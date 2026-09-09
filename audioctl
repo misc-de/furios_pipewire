@@ -188,30 +188,68 @@ switch_to() {
 # auskommentiert. Unser Plugin baut sie selbst; der HAL braucht die Datei
 # nicht, er bekommt beim Routen nur den Geraetetyp.
 bt_call() {
-    local mode=$1 card sink_port src_port
+    local mode=$1 card sink_port src_port prof
+
     card=$(pactl list short cards 2>/dev/null | awk '/bluez_card/ {print $2; exit}')
 
     case "$mode" in
     on)
-        [ -n "$card" ] || die "Kein Bluetooth-Geraet verbunden."
-        run pactl set-card-profile "$card" headset-head-unit \
-            || run pactl set-card-profile "$card" headset-head-unit-cvsd \
-            || die "Freisprechprofil laesst sich nicht setzen."
+        if [ -z "$card" ]; then
+            printf 'Kein Bluetooth-Geraet verbunden - nichts zu tun.\n' >&2
+            return 1
+        fi
+        printf 'Bluetooth-Karte:    %s\n' "$card"
+
+        # Freisprechprofil setzen, damit ein SCO-Kanal steht. Schlaegt es fehl,
+        # geht es trotzdem weiter: der Kanal kann bereits stehen.
+        if pactl set-card-profile "$card" headset-head-unit 2>/dev/null; then
+            printf 'Kopfhoererprofil:   headset-head-unit\n'
+        elif pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null; then
+            printf 'Kopfhoererprofil:   headset-head-unit-cvsd (Schmalband)\n'
+        else
+            prof=$(pactl list cards 2>/dev/null | sed -n "/$card/,/^$/p" | sed -n 's/.*Active Profile: //p')
+            printf 'ACHTUNG: Freisprechprofil laesst sich nicht setzen (aktiv: %s).\n' "${prof:-unbekannt}" >&2
+            printf '         Ohne Freisprechprofil steht kein SCO-Kanal.\n' >&2
+        fi
         sink_port=output-bluetooth_sco
         src_port=input-bluetooth_sco_headset
         ;;
     off)
         sink_port=output-earpiece
         src_port=input-builtin_mic
-        [ -n "$card" ] && run pactl set-card-profile "$card" a2dp-sink 2>/dev/null
+        [ -n "$card" ] && pactl set-card-profile "$card" a2dp-sink 2>/dev/null
         ;;
     *) die "bt-call braucht 'on' oder 'off'." ;;
     esac
 
-    run pactl set-sink-port   droid-sink   "$sink_port" || die "Route $sink_port fehlgeschlagen."
-    run pactl set-source-port droid-source "$src_port"  || info "Mikrofonroute $src_port fehlgeschlagen."
-    info "Anrufton: $sink_port / $src_port"
-    [ "$mode" = on ] && info "Hoerst du die Gegenseite im Headset? Zurueck mit: audioctl bt-call off"
+    pactl set-sink-port   droid-sink   "$sink_port" 2>/dev/null \
+        && printf 'Ausgang:            %s\n' "$sink_port" \
+        || printf 'FEHLER: Ausgang %s liess sich nicht setzen.\n' "$sink_port" >&2
+    pactl set-source-port droid-source "$src_port" 2>/dev/null \
+        && printf 'Eingang:            %s\n' "$src_port" \
+        || printf 'FEHLER: Eingang %s liess sich nicht setzen.\n' "$src_port" >&2
+
+    # Gegenprobe an der Wirklichkeit, nicht am Wunsch.
+    printf 'Tatsaechlich aktiv: %s / %s\n' \
+        "$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')" \
+        "$(pactl list sources 2>/dev/null | sed -n '/Name: droid-source/,/^$/p' | sed -n 's/.*Active Port: //p')"
+
+    # Im Anruf mischt callaudiod mit und setzt den Port gern zurueck. Nach
+    # einigen Sekunden nachsehen und es einmal richten - sonst sucht man den
+    # Fehler beim HAL, obwohl ihn jemand anders ueberschrieben hat.
+    if [ "$mode" = on ]; then
+        sleep 3
+        now=$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')
+        if [ "$now" != "$sink_port" ]; then
+            printf 'Nach 3 s stand der Ausgang auf "%s" - jemand hat umgeschaltet\n' "$now"
+            printf '(sehr wahrscheinlich callaudiod). Setze noch einmal.\n'
+            pactl set-sink-port droid-sink "$sink_port" 2>/dev/null
+            sleep 2
+            printf 'Jetzt: %s\n' "$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')"
+        fi
+    fi
+
+    [ "$mode" = on ] && printf 'Zurueck mit: audioctl bt-call off\n'
     return 0
 }
 
