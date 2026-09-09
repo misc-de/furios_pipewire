@@ -196,77 +196,106 @@ active_ports() {
         "$(pactl list sources 2>/dev/null | sed -n '/Name: droid-source/,/^$/p' | sed -n 's/.*Active Port: //p')"
 }
 
+droid_profile() {
+    pactl list cards 2>/dev/null | sed -n '/Name: droid$/,/^$/p' | sed -n 's/.*Active Profile: //p'
+}
+
+# Schreibt zusaetzlich ins Journal - beim Anruftest sitzt niemand vor dem
+# Terminal, und hinterher will man wissen, was wirklich passiert ist:
+#   journalctl --user -t audioctl --since -10min
 btlog() {
     printf '%s\n' "$*"
     command -v logger >/dev/null 2>&1 && logger -t audioctl -- "$*"
     return 0
 }
 
-bt_call() {
-    local mode=$1 card sink_port src_port prof now i
+# Kopfhoerer ins Freisprechprofil zwingen, damit ein SCO-Kanal steht.
+bt_headset_profile() {
+    local card=$1 want=$2 prof
+    [ -n "$card" ] || return 1
+    if [ "$want" = headset ]; then
+        pactl set-card-profile "$card" headset-head-unit 2>/dev/null && { btlog "bt-call: Kopfhoererprofil headset-head-unit"; return 0; }
+        pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null && { btlog "bt-call: Kopfhoererprofil headset-head-unit-cvsd (Schmalband)"; return 0; }
+        prof=$(pactl list cards 2>/dev/null | sed -n "/$card/,/^$/p" | sed -n 's/.*Active Profile: //p')
+        btlog "bt-call: ACHTUNG Freisprechprofil nicht setzbar (aktiv: ${prof:-unbekannt})"
+        return 1
+    fi
+    pactl set-card-profile "$card" a2dp-sink 2>/dev/null
+    return 0
+}
 
+# Routen der Telefonkarte setzen und melden, was tatsaechlich ankam.
+bt_set_ports() {
+    local sink_port=$1 src_port=$2
+    pactl set-sink-port   droid-sink   "$sink_port" 2>/dev/null \
+        && btlog "bt-call: Ausgang $sink_port gesetzt" \
+        || btlog "bt-call: FEHLER - Ausgang $sink_port liess sich nicht setzen"
+    pactl set-source-port droid-source "$src_port" 2>/dev/null \
+        && btlog "bt-call: Eingang $src_port gesetzt" \
+        || btlog "bt-call: FEHLER - Eingang $src_port liess sich nicht setzen"
+    btlog "bt-call: tatsaechlich aktiv $(active_ports)"
+}
+
+# Route gegen callaudiod verteidigen, solange das Gespraech laeuft.
+bt_hold() {
+    local sink_port=$1 src_port=$2 limit=$3 i=0 now
+    while [ $i -lt "$limit" ]; do
+        sleep 2
+        now=$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')
+        if [ "$now" != "$sink_port" ]; then
+            btlog "bt-call: Ausgang stand auf \"$now\" - setze erneut"
+            pactl set-sink-port   droid-sink   "$sink_port" 2>/dev/null
+            pactl set-source-port droid-source "$src_port"  2>/dev/null
+        fi
+        # Ende des Gespraechs? Dann aufhoeren.
+        [ "$(droid_profile)" = voicecall ] || return 0
+        i=$((i+1))
+    done
+    return 0
+}
+
+bt_call() {
+    local mode=$1 card waited
     card=$(pactl list short cards 2>/dev/null | awk '/bluez_card/ {print $2; exit}')
 
     case "$mode" in
     on)
-        if [ -z "$card" ]; then
-            btlog "bt-call: kein Bluetooth-Geraet verbunden - nichts zu tun."
-            return 1
-        fi
+        [ -n "$card" ] || { btlog "bt-call: kein Bluetooth-Geraet verbunden"; return 1; }
         btlog "bt-call: Karte $card"
-
-        # Freisprechprofil setzen, damit ein SCO-Kanal steht. Schlaegt es fehl,
-        # geht es trotzdem weiter: der Kanal kann bereits stehen.
-        if pactl set-card-profile "$card" headset-head-unit 2>/dev/null; then
-            btlog "bt-call: Kopfhoererprofil headset-head-unit"
-        elif pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null; then
-            btlog "bt-call: Kopfhoererprofil headset-head-unit-cvsd (Schmalband)"
-        else
-            prof=$(pactl list cards 2>/dev/null | sed -n "/$card/,/^$/p" | sed -n 's/.*Active Profile: //p')
-            btlog "bt-call: ACHTUNG Freisprechprofil nicht setzbar (aktiv: ${prof:-unbekannt})"
-        fi
-        sink_port=output-bluetooth_sco
-        src_port=input-bluetooth_sco_headset
-        ;;
-    off)
-        sink_port=output-earpiece
-        src_port=input-builtin_mic
-        [ -n "$card" ] && pactl set-card-profile "$card" a2dp-sink 2>/dev/null
-        ;;
-    *) die "bt-call braucht 'on' oder 'off'." ;;
-    esac
-
-    if pactl set-sink-port droid-sink "$sink_port" 2>/dev/null; then
-        btlog "bt-call: Ausgang $sink_port gesetzt"
-    else
-        btlog "bt-call: FEHLER - Ausgang $sink_port liess sich nicht setzen"
-    fi
-    if pactl set-source-port droid-source "$src_port" 2>/dev/null; then
-        btlog "bt-call: Eingang $src_port gesetzt"
-    else
-        btlog "bt-call: FEHLER - Eingang $src_port liess sich nicht setzen"
-    fi
-
-    btlog "bt-call: tatsaechlich aktiv $(active_ports)"
-
-    # Im Anruf mischt callaudiod mit und setzt den Port zurueck. 20 Sekunden
-    # lang dagegenhalten - sonst sucht man den Fehler beim HAL, obwohl ihn
-    # jemand anders ueberschrieben hat.
-    if [ "$mode" = on ]; then
-        i=0
-        while [ $i -lt 10 ]; do
-            sleep 2
-            now=$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')
-            if [ "$now" != "$sink_port" ]; then
-                btlog "bt-call: Ausgang stand auf \"$now\" - jemand hat umgeschaltet, setze erneut"
-                pactl set-sink-port droid-sink "$sink_port" 2>/dev/null
-                pactl set-source-port droid-source "$src_port" 2>/dev/null
-            fi
-            i=$((i+1))
-        done
+        bt_headset_profile "$card" headset
+        bt_set_ports output-bluetooth_sco input-bluetooth_sco_headset
+        bt_hold output-bluetooth_sco input-bluetooth_sco_headset 10
         btlog "bt-call: Ende, aktiv $(active_ports)"
         printf 'Zurueck mit: audioctl bt-call off\n'
-    fi
+        ;;
+    off)
+        bt_headset_profile "$card" a2dp
+        bt_set_ports output-earpiece input-builtin_mic
+        ;;
+    watch)
+        # Vor dem Anruf starten: wartet, legt das Gespraech dann selbst aufs
+        # Headset und haelt die Route, bis aufgelegt wird. So muss waehrend
+        # des Telefonierens niemand etwas tippen - genau daran sind die
+        # bisherigen Versuche gescheitert.
+        [ -n "$card" ] || { btlog "bt-call watch: kein Bluetooth-Geraet verbunden"; return 1; }
+        btlog "bt-call watch: warte auf einen Anruf (Abbruch mit Strg-C)"
+        waited=0
+        while [ "$(droid_profile)" != voicecall ]; do
+            sleep 1
+            waited=$((waited+1))
+            [ $waited -ge 600 ] && { btlog "bt-call watch: nach 10 Minuten kein Anruf - Ende"; return 1; }
+        done
+        btlog "bt-call watch: Anruf erkannt nach ${waited}s"
+        bt_headset_profile "$card" headset
+        bt_set_ports output-bluetooth_sco input-bluetooth_sco_headset
+        # Bis zum Auflegen halten, hoechstens 30 Minuten.
+        bt_hold output-bluetooth_sco input-bluetooth_sco_headset 900
+        btlog "bt-call watch: Gespraech beendet - zurueck aufs Telefon"
+        bt_headset_profile "$card" a2dp
+        bt_set_ports output-earpiece input-builtin_mic
+        ;;
+    *) die "bt-call braucht 'on', 'off' oder 'watch'." ;;
+    esac
     return 0
 }
 
@@ -279,7 +308,9 @@ audioctl - Audiostack umschalten
   audioctl list                Profile auflisten
   audioctl try <profil>        umschalten, faellt beim Neustart zurueck
   audioctl set <profil>        umschalten und persistent merken
-  audioctl bt-call on|off      laufenden Anruf aufs Bluetooth-Headset legen
+  audioctl bt-call watch       vor dem Anruf starten: legt das Gespraech dann
+                               selbst aufs Bluetooth-Headset und haelt es dort
+  audioctl bt-call on|off      laufenden Anruf von Hand umlegen
   audioctl revert              sofort zurueck auf standard
   audioctl verify              pruefen, ob ein Sink da ist
 
@@ -326,7 +357,7 @@ case "${1:-status}" in
     list)   printf '%s\n' $PROFILES ;;
     try)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" try ;;
     set)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" sticky ;;
-    bt-call) [ $# -ge 2 ] || die "bt-call braucht 'on' oder 'off'."; bt_call "$2" ;;
+    bt-call) [ $# -ge 2 ] || die "bt-call braucht 'on', 'off' oder 'watch'."; bt_call "$2" ;;
     revert) switch_to standard sticky ;;
     verify) verify && echo "OK - Sink vorhanden." || { echo "kein Sink." >&2; exit 1; } ;;
     -h|--help|help) usage ;;
