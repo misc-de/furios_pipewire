@@ -22,7 +22,12 @@ sudo install -m644 /tmp/pipewire-hal.conf /usr/local/share/furios-audio/pipewire
 sudo install -m644 pipewire-hal.conf.dropin /usr/local/share/furios-audio/pipewire-hal.conf.dropin
 rm -f /tmp/pipewire-hal.conf
 
-echo "3) audioctl aktualisieren (Plugin-Pfad)"
+echo "3) WirePlumber-Monitor"
+sudo mkdir -p /usr/local/share/wireplumber/scripts/monitors /usr/local/share/wireplumber/wireplumber.conf.d
+sudo install -m644 wireplumber/droid.lua /usr/local/share/wireplumber/scripts/monitors/droid.lua
+sudo install -m644 wireplumber/50-droid.conf /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf
+
+echo "4) audioctl aktualisieren (Plugin-Pfad)"
 sudo install -m755 audioctl /usr/local/bin/audioctl
 
 echo

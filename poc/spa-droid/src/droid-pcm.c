@@ -40,6 +40,7 @@
 #include <spa/param/param.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/filter.h>
+#include <spa/pod/parser.h>
 
 #include <hardware/audio.h>
 #include <pulse/sample.h>
@@ -51,8 +52,23 @@
 #include "pulsecore/idxset.h"
 #include "droid/droid-util.h"
 #include "droid/droid-config.h"
+#include "droid/conversion.h"
 
 #define NAME "droid-pcm"
+
+/* Das Device (droid-device.c) und der Node sind getrennte SPA-Objekte, leben
+ * aber im selben Prozess. Damit eine Routenaenderung am Device den laufenden
+ * HAL-Stream erreicht, tragen sich Nodes hier ein. Bewusst winzig: mehr als
+ * eine Handvoll Nodes gibt es nicht. */
+#define MAX_REG 8
+static struct {
+	pthread_mutex_t lock;
+	struct { const char *mix_port; struct impl *node; } e[MAX_REG];
+} registry = { .lock = PTHREAD_MUTEX_INITIALIZER };
+
+struct impl;
+static void registry_add(struct impl *this);
+static void registry_remove(struct impl *this);
 
 #define MAX_PORTS       1
 #define RING_SIZE       (1u << 18)   /* 256 kB, Zweierpotenz fuer spa_ringbuffer */
@@ -101,6 +117,8 @@ struct impl {
 	char mix_port_name[64];
 	audio_devices_t input_device;
 	char input_port_name[64];   /* leer = ueber den Geraetetyp suchen */
+	char audio_source[32];      /* Android-Audioquelle, z. B. "mic" */
+	char wanted_port[64];       /* vom Device gewuenschte Route */
 
 	/* Uebergabe an den Schreib-Thread */
 	struct spa_ringbuffer ring;
@@ -145,6 +163,8 @@ struct impl {
 			spa_log_info((this)->log, NAME " [diag] " fmt, ##__VA_ARGS__); \
 	} while (0)
 
+static int apply_route(struct impl *this, const char *route);
+
 /* ------------------------------------------------------------------ HAL */
 
 static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
@@ -160,6 +180,21 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 		spa_log_error(this->log, NAME " Eingabestream \"%s\" fehlgeschlagen",
 				this->mix_port_name);
 		return -EIO;
+	}
+
+	/* Der HAL bekommt beim blossen Oeffnen AUDIO_SOURCE_DEFAULT. Android-HALs
+	 * haengen ihre Mikrofonaufbereitung (Verstaerkung, Rauschunterdrueckung,
+	 * Echokompensation) aber an der Audioquelle. reconfigure_input setzt sie
+	 * und oeffnet den Stream dabei selbst neu. */
+	if (this->audio_source[0]) {
+		pa_proplist *pl = pa_proplist_new();
+		pa_proplist_sets(pl, EXT_PROP_AUDIO_SOURCE, this->audio_source);
+		if (!pa_droid_stream_reconfigure_input(this->stream, spec, map, pl))
+			spa_log_warn(this->log, NAME " Audioquelle \"%s\" liess sich nicht setzen",
+					this->audio_source);
+		else
+			DIAG(this, "Audioquelle: %s", this->audio_source);
+		pa_proplist_free(pl);
 	}
 
 	/* Der HAL darf Rate und Kanalzahl beim Oeffnen aendern. Unser Port hat
@@ -179,7 +214,9 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	}
 
 	mix = dm_config_find_mix_port(this->hw->enabled_module, this->mix_port_name);
-	if (this->input_port_name[0])
+	if (this->wanted_port[0])
+		dev = dm_config_find_port(this->hw->enabled_module, this->wanted_port);
+	else if (this->input_port_name[0])
 		dev = dm_config_find_port(this->hw->enabled_module, this->input_port_name);
 	else
 		dev = mix ? dm_config_find_device_port(mix, this->input_device) : NULL;
@@ -240,7 +277,11 @@ static int hal_open(struct impl *this)
 	 * Kopie werden deshalb immer abgelehnt - sie muessen aus dem HAL-Modul
 	 * stammen. */
 	mix = dm_config_find_mix_port(this->hw->enabled_module, this->mix_port_name);
-	dev = dm_config_default_output_device(this->hw->enabled_module);
+	dev = this->wanted_port[0]
+		? dm_config_find_port(this->hw->enabled_module, this->wanted_port)
+		: NULL;
+	if (!dev)
+		dev = dm_config_default_output_device(this->hw->enabled_module);
 	if (!mix || !dev) {
 		spa_log_error(this->log, NAME " mixPort \"%s\" oder Standardausgabe fehlt",
 				this->mix_port_name);
@@ -1004,9 +1045,51 @@ static int impl_process(void *object)
 	return SPA_STATUS_NEED_DATA;
 }
 
+/* Der einzige Weg, auf dem eine Routenaenderung vom Device hierher findet:
+ * Device und Node laufen in verschiedenen Prozessen (Device in WirePlumber,
+ * Node im PipeWire-Daemon). WirePlumber schiebt den Routennamen als
+ * SPA_PROP_params-Paar herueber. */
+static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
+		const struct spa_pod *param)
+{
+	struct impl *this = object;
+	const struct spa_pod_prop *prop;
+	const struct spa_pod_object *obj;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	if (id != SPA_PARAM_Props || param == NULL)
+		return -ENOENT;
+
+	obj = (const struct spa_pod_object *) param;
+	SPA_POD_OBJECT_FOREACH(obj, prop) {
+		struct spa_pod_parser prs;
+		struct spa_pod_frame f;
+
+		if (prop->key != SPA_PROP_params)
+			continue;
+
+		spa_pod_parser_pod(&prs, &prop->value);
+		if (spa_pod_parser_push_struct(&prs, &f) < 0)
+			continue;
+		while (true) {
+			const char *key, *val;
+			if (spa_pod_parser_get_string(&prs, &key) < 0)
+				break;
+			if (spa_pod_parser_get_string(&prs, &val) < 0)
+				break;
+			if (spa_streq(key, "droid.route"))
+				apply_route(this, val);
+		}
+		spa_pod_parser_pop(&prs, &f);
+	}
+	return 0;
+}
+
 static const struct spa_node_methods impl_node = {
 	SPA_VERSION_NODE_METHODS,
 	.add_listener = impl_add_listener,
+	.set_param = impl_node_set_param,
 	.set_callbacks = impl_set_callbacks,
 	.set_io = impl_set_io,
 	.send_command = impl_send_command,
@@ -1036,6 +1119,7 @@ static int impl_clear(struct spa_handle *handle)
 {
 	struct impl *this = (struct impl *) handle;
 
+	registry_remove(this);
 	timer_stop(this);
 	if (this->timer_added) {
 		spa_loop_remove_source(this->data_loop, &this->timer_source);
@@ -1114,8 +1198,9 @@ static int impl_init(const struct spa_handle_factory *factory,
 		this->info.max_input_ports = MAX_PORTS;
 	this->info.flags = SPA_NODE_FLAG_RT;
 	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
+	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_Props, SPA_PARAM_INFO_WRITE);
 	this->info.params = this->params;
-	this->info.n_params = 1;
+	this->info.n_params = 2;
 
 	port = &this->port;
 	port->id = 0;
@@ -1144,6 +1229,12 @@ static int impl_init(const struct spa_handle_factory *factory,
 	if (str)
 		snprintf(this->input_port_name, sizeof(this->input_port_name), "%s", str);
 
+	/* Android-Audioquelle. "mic" ist das, was der HAL fuer das eingebaute
+	 * Mikrofon erwartet; fuer Telefonie waere es "voice_call" bzw.
+	 * "voice_communication". Leer laesst AUDIO_SOURCE_DEFAULT stehen. */
+	str = info ? spa_dict_lookup(info, "droid.audio-source") : NULL;
+	snprintf(this->audio_source, sizeof(this->audio_source), "%s", str ? str : "mic");
+
 	str = info ? spa_dict_lookup(info, "droid.config") : NULL;
 	this->config = pa_parse_droid_audio_config(
 			str ? str : "/android/vendor/etc/audio_policy_configuration.xml");
@@ -1167,8 +1258,115 @@ static int impl_init(const struct spa_handle_factory *factory,
 	pthread_mutex_init(&this->lock, NULL);
 	pthread_cond_init(&this->cond, NULL);
 
+	registry_add(this);
 	spa_log_info(this->log, NAME " bereit fuer mixPort \"%s\"", this->mix_port_name);
 	return 0;
+}
+
+/* Sucht den devicePort zu einem PulseAudio-Routennamen ("output-earpiece").
+ * Das Device meldet Routen unter diesen Namen, der HAL kennt nur seine
+ * eigenen ("Earpiece") - hier wird uebersetzt. */
+static dm_config_port *port_by_route_name(struct impl *this, const char *route)
+{
+	dm_config_module *module = this->hw ? this->hw->enabled_module : this->module;
+	dm_config_port *port;
+	void *state;
+
+	if (!module)
+		return NULL;
+
+	for (port = dm_list_first_data(module->device_ports, &state); port;
+	     port = dm_list_next_data(module->device_ports, &state)) {
+		const char *name = NULL;
+		bool ok = port->role == DM_CONFIG_ROLE_SINK
+			? pa_droid_output_port_name(port->type, &name)
+			: pa_droid_input_port_name(port->type, &name);
+		if (ok && spa_streq(name, route))
+			return port;
+	}
+	return NULL;
+}
+
+/* Route anwenden. Ist der HAL noch zu, wird der Wunsch nur gemerkt und beim
+ * naechsten hal_open() angewandt. */
+static int apply_route(struct impl *this, const char *route)
+{
+	dm_config_port *dev;
+	int res;
+
+	if (!(dev = port_by_route_name(this, route))) {
+		spa_log_warn(this->log, NAME " Route \"%s\" kennt der HAL nicht", route);
+		return -ENOENT;
+	}
+
+	snprintf(this->wanted_port, sizeof(this->wanted_port), "%s", dev->name);
+
+	if (!this->stream) {
+		spa_log_info(this->log, NAME " Route \"%s\" gemerkt (HAL noch zu)", dev->name);
+		return 0;
+	}
+
+	if (this->capture)
+		res = pa_droid_hw_set_input_device(this->stream, dev) ? 0 : -EIO;
+	else
+		res = pa_droid_stream_set_route(this->stream, dev);
+
+	if (res < 0)
+		spa_log_warn(this->log, NAME " Route \"%s\" fehlgeschlagen: %d", dev->name, res);
+	else
+		spa_log_warn(this->log, NAME " Route gewechselt: %s -> %s", route, dev->name);
+	return res;
+}
+
+/* Vom Device gerufen: Route auf einen benannten devicePort umstellen. Ist der
+ * HAL noch nicht offen, wird der Wunsch nur gemerkt und beim naechsten
+ * hal_open() angewandt. */
+int droid_node_set_route(const char *mix_port, const char *device_port);
+
+int droid_node_set_route(const char *mix_port, const char *device_port)
+{
+	struct impl *this = NULL;
+	int res = -ENOENT;
+	unsigned i;
+
+	pthread_mutex_lock(&registry.lock);
+	for (i = 0; i < MAX_REG; i++) {
+		if (registry.e[i].node && spa_streq(registry.e[i].mix_port, mix_port)) {
+			this = registry.e[i].node;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&registry.lock);
+
+	if (!this)
+		return -ENOENT;
+
+	res = apply_route(this, device_port);
+	return res;
+}
+
+static void registry_add(struct impl *this)
+{
+	unsigned i;
+	pthread_mutex_lock(&registry.lock);
+	for (i = 0; i < MAX_REG; i++) {
+		if (!registry.e[i].node) {
+			registry.e[i].mix_port = this->mix_port_name;
+			registry.e[i].node = this;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&registry.lock);
+}
+
+static void registry_remove(struct impl *this)
+{
+	unsigned i;
+	pthread_mutex_lock(&registry.lock);
+	for (i = 0; i < MAX_REG; i++)
+		if (registry.e[i].node == this)
+			registry.e[i].node = NULL;
+	pthread_mutex_unlock(&registry.lock);
 }
 
 static const struct spa_interface_info impl_interfaces[] = {

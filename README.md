@@ -29,10 +29,12 @@ Nach einem Wechsel wirklich etwas abspielen.
 
 ## Stand
 
-Wiedergabe ueber PipeWire -> `libspa-droid` -> Android-HAL funktioniert
-(hoerbar bestaetigt). **Aufnahme und Telefonie noch nicht** - `callaudiod` ist
-gegen libpulse gelinkt und erwartet die Ports der droid-card, im Profil
-`pw-hal` ist Telefonie daher kaputt.
+Wiedergabe und Aufnahme ueber PipeWire -> `libspa-droid` -> Android-HAL
+funktionieren, ebenso das Umschalten zwischen Lautsprecher, Ohrmuschel und
+Headset. `callaudiod` erkennt die Karte und steuert sie (Sink, Source und
+Ports). **Telefonie ist damit noch nicht fertig**: es fehlen ein
+`voicecall`-Profil, `AUDIO_MODE_IN_CALL` (`pa_droid_hw_set_mode`) und der
+Sprachpfad selbst.
 
 ## Bauen
 
@@ -50,15 +52,36 @@ Funktionen aus `common/droid-util.c`, die PulseAudio-Graphobjekte
 dereferenzieren. Nach einem Upstream-Update erneut ausfuehren; das Skript
 meldet, wenn seine Muster nicht mehr passen.
 
-## Aufbau des Plugins
+## Aufbau
 
-`libspa-droid.so` exportiert zwei Factories:
+`libspa-droid.so` exportiert drei Factories:
 
-- **`api.droid.device`** - liest die Android-`audio_policy_configuration.xml`
-  und meldet die HAL-Topologie als SPA-Device (9 Knoten auf diesem Geraet).
+- **`api.droid.device`** - die Karte. Liest die Android-Datei
+  `audio_policy_configuration.xml`, meldet Profile und Routen und erzeugt die
+  beiden Knoten. Die Routen heissen genau wie bei PulseAudios droid-card
+  (`output-earpiece`, `output-speaker`, `input-builtin_mic`), weil callaudiod
+  nach diesen Namen sucht.
 - **`api.droid.pcm`** - der Sink. `process()` schreibt in einen Ringpuffer,
   ein eigener `writer_thread` ruft den HAL, weil `pa_droid_stream_write`
   blockiert und deshalb nicht in den Graph-Thread darf.
+- **`api.droid.pcm.source`** - die Aufnahme, dasselbe rueckwaerts: ein
+  `reader_thread` ruft das blockierende `pa_droid_stream_read`.
+
+`wireplumber/droid.lua` bindet das Device ein. Der Umweg ueber WirePlumber ist
+noetig: laesst man PipeWire das Device direkt aus `context.objects`
+instanziieren, entstehen rohe SPA-Knoten ohne Adapter - die haben keine
+Formatwandlung und erscheinen in pipewire-pulse gar nicht erst als Sink.
+
+### Der Weg einer Routenaenderung
+
+    pactl set-sink-port droid-sink output-earpiece
+      -> Device (in WirePlumber): set_param(Route), merkt sich die Route
+      -> SERIAL-Bit kippt -> Ereignis device-params-changed
+      -> droid.lua reicht den Routennamen als SPA_PROP_params an den Knoten
+      -> Knoten (im PipeWire-Daemon): pa_droid_stream_set_route()
+
+Der Umweg ist noetig, weil Device und Knoten in **verschiedenen Prozessen**
+laufen - nur der Knoten haelt den HAL-Stream.
 
 ## Fallen, die Zeit gekostet haben
 
@@ -74,6 +97,14 @@ meldet, wenn seine Muster nicht mehr passen.
   `pa_droid_stream_set_route()` und `set_volume(1.0)` bleibt der Stream stumm.
 - **Node-Tests ohne Adapter sind unvollstaendig** - `probe-droid-node` spricht
   den Node direkt an und uebergeht genau die Schicht, die abgestuerzt ist.
+- **Param-Aenderungen meldet man ueber das SERIAL-Bit**, nicht ueber das Feld
+  `user` daneben: `params[i].flags ^= SPA_PARAM_INFO_SERIAL`. Ohne das erfaehrt
+  niemand von der neuen Route - PipeWire liefert Clients weiter den alten
+  zwischengespeicherten Wert, und WirePlumbers Routenpolitik ueberschreibt die
+  Auswahl gleich wieder.
+- **Puffergroesse ist das Graph-Quantum, nicht die HAL-Periode.** Beim Ausgang
+  sind beide zufaellig 4096 B, beim Eingang liefert der HAL 3840 B - ein zu
+  kleiner Puffer laesst libspa-audioconvert abstuerzen.
 - **`spa_log_info` ist unter PipeWires Standard-Loglevel unsichtbar.**
   Diagnose einschalten mit:
 

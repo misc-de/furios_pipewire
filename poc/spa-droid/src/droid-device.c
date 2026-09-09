@@ -1,7 +1,11 @@
 /* SPA-Device fuer den Android-Audio-HAL.
- * Stufe 2a: meldet die HAL-Topologie (mixPorts/devicePorts aus der
- * audio_policy-XML) in den PipeWire-Graphen. Oeffnet den HAL noch nicht -
- * der ist exklusiv und gehoert zur Laufzeit noch PulseAudio. */
+ *
+ * Das Device ist die Karte: es meldet Profile und Routen und erzeugt die
+ * beiden Knoten (Wiedergabe/Aufnahme). Die Routennamen sind bewusst genau
+ * die, die PulseAudios droid-card verwendet - "output-earpiece",
+ * "output-speaker", "input-builtin_mic" - denn callaudiod sucht nach genau
+ * diesen Namen, um im Anruf zwischen Ohrmuschel und Lautsprecher zu schalten.
+ */
 
 #include <errno.h>
 #include <stdio.h>
@@ -13,9 +17,15 @@
 #include <spa/utils/hook.h>
 #include <spa/utils/keys.h>
 #include <spa/utils/string.h>
+#include <spa/utils/result.h>
 #include <spa/node/node.h>
 #include <spa/monitor/device.h>
 #include <spa/monitor/utils.h>
+#include <spa/param/param.h>
+#include <spa/param/audio/raw.h>
+#include <spa/pod/builder.h>
+#include <spa/pod/filter.h>
+#include <spa/pod/parser.h>
 
 #include <hardware/audio.h>
 #include "droid/droid-config.h"
@@ -24,6 +34,27 @@
 
 #define NAME "droid-device"
 
+#define MAX_ROUTES  16
+#define DEV_SINK    0
+#define DEV_SOURCE  1
+#define N_DEVICES   2
+
+#define PROFILE_OFF     0
+#define PROFILE_DEFAULT 1
+
+/* aus droid-pcm.c */
+int droid_node_set_route(const char *mix_port, const char *device_port);
+
+struct route {
+	dm_config_port *port;      /* devicePort aus der HAL-Konfiguration */
+	const char *pa_name;       /* "output-speaker" usw. */
+	char description[64];
+	enum spa_direction dir;
+	uint32_t device;           /* DEV_SINK oder DEV_SOURCE */
+	uint32_t priority;
+	uint32_t available;        /* SPA_PARAM_AVAILABILITY_* */
+};
+
 struct impl {
 	struct spa_handle handle;
 	struct spa_device device;
@@ -31,8 +62,18 @@ struct impl {
 	struct spa_log *log;
 	struct spa_hook_list hooks;
 
+	struct spa_device_info info;
+	struct spa_param_info params[4];
+
 	dm_config_device *config;
 	dm_config_module *module;
+
+	struct route routes[MAX_ROUTES];
+	uint32_t n_routes;
+	uint32_t active[N_DEVICES];   /* Index in routes[], SPA_ID_INVALID = keiner */
+
+	uint32_t profile;
+	bool nodes_emitted;
 };
 
 static const char *default_config_file(void)
@@ -40,64 +81,430 @@ static const char *default_config_file(void)
 	return "/android/vendor/etc/audio_policy_configuration.xml";
 }
 
-/* Ein mixPort wird zu einem Knoten im Graphen. */
-static void emit_node(struct impl *this, dm_config_port *port, uint32_t id)
+static const char *mix_port_of(uint32_t device)
+{
+	return device == DEV_SINK ? "primary output" : "primary input";
+}
+
+/* ------------------------------------------------------------- Routen */
+
+/* Wie wichtig ist ein Port? Lautsprecher und Ohrmuschel sind die Faelle, um
+ * die es im Anruf geht; Kabelzubehoer schlaegt sie, wenn es steckt. */
+static uint32_t route_priority(audio_devices_t type)
+{
+	switch (type) {
+	case AUDIO_DEVICE_OUT_SPEAKER:
+	case AUDIO_DEVICE_IN_BUILTIN_MIC:
+		return 100;
+	case AUDIO_DEVICE_OUT_EARPIECE:
+		return 90;
+	/* Ohne Klinkenerkennung darf Kabelzubehoer nicht vorne stehen - sonst
+	 * waehlt WirePlumbers Routenpolitik ein Headset, das gar nicht steckt. */
+	case AUDIO_DEVICE_OUT_WIRED_HEADSET:
+	case AUDIO_DEVICE_OUT_WIRED_HEADPHONE:
+	case AUDIO_DEVICE_IN_WIRED_HEADSET:
+		return 60;
+	default:
+		return 10;
+	}
+}
+
+static void collect_routes(struct impl *this)
+{
+	dm_config_port *port;
+	void *state;
+
+	for (port = dm_list_first_data(this->module->device_ports, &state); port;
+	     port = dm_list_next_data(this->module->device_ports, &state)) {
+		struct route *r;
+		const char *pa_name = NULL;
+		bool output = port->role == DM_CONFIG_ROLE_SINK;
+
+		if (this->n_routes >= MAX_ROUTES)
+			break;
+
+		/* Ohne PulseAudio-Namen waere die Route fuer callaudiod & Co.
+		 * wertlos - solche Ports lassen wir weg. */
+		if (output) {
+			if (!pa_droid_output_port_name(port->type, &pa_name))
+				continue;
+		} else {
+			if (!pa_droid_input_port_name(port->type, &pa_name))
+				continue;
+		}
+
+		r = &this->routes[this->n_routes++];
+		r->port = port;
+		r->pa_name = pa_name;
+		r->dir = output ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
+		r->device = output ? DEV_SINK : DEV_SOURCE;
+		r->priority = route_priority(port->type);
+		/* Eingebautes ist immer da; ob ein Kabel steckt, wissen wir nicht. */
+		r->available = r->priority >= 90
+			? SPA_PARAM_AVAILABILITY_yes : SPA_PARAM_AVAILABILITY_unknown;
+		snprintf(r->description, sizeof(r->description), "%s", port->name);
+	}
+}
+
+static uint32_t default_route(struct impl *this, uint32_t device)
+{
+	uint32_t i, best = SPA_ID_INVALID, best_prio = 0;
+
+	for (i = 0; i < this->n_routes; i++) {
+		/* Kabelzubehoer nicht blind vorwaehlen - ob es steckt, wissen wir
+		 * (noch) nicht. */
+		if (this->routes[i].device != device ||
+		    this->routes[i].available != SPA_PARAM_AVAILABILITY_yes)
+			continue;
+		if (best == SPA_ID_INVALID || this->routes[i].priority > best_prio) {
+			best = i;
+			best_prio = this->routes[i].priority;
+		}
+	}
+	return best;
+}
+
+static int build_profile(struct impl *this, struct spa_pod_builder *b,
+		uint32_t id, uint32_t index, struct spa_pod **param)
+{
+	struct spa_pod_frame f[4];
+	const char *name, *desc;
+	uint32_t prio;
+
+	switch (index) {
+	case PROFILE_OFF:
+		name = "off"; desc = "Aus"; prio = 0;
+		break;
+	case PROFILE_DEFAULT:
+		name = "default"; desc = "Wiedergabe und Aufnahme"; prio = 100;
+		break;
+	default:
+		return 0;
+	}
+
+	spa_pod_builder_push_object(b, &f[0], SPA_TYPE_OBJECT_ParamProfile, id);
+	spa_pod_builder_add(b,
+		SPA_PARAM_PROFILE_index,       SPA_POD_Int(index),
+		SPA_PARAM_PROFILE_name,        SPA_POD_String(name),
+		SPA_PARAM_PROFILE_description, SPA_POD_String(desc),
+		SPA_PARAM_PROFILE_priority,    SPA_POD_Int(prio),
+		SPA_PARAM_PROFILE_available,   SPA_POD_Id(SPA_PARAM_AVAILABILITY_yes),
+		0);
+
+	if (index == PROFILE_DEFAULT) {
+		spa_pod_builder_prop(b, SPA_PARAM_PROFILE_classes, 0);
+		spa_pod_builder_push_struct(b, &f[1]);
+		spa_pod_builder_int(b, 2);
+
+		spa_pod_builder_push_struct(b, &f[2]);
+		spa_pod_builder_string(b, "Audio/Sink");
+		spa_pod_builder_int(b, 1);
+		spa_pod_builder_string(b, "card.profile.devices");
+		spa_pod_builder_push_array(b, &f[3]);
+		spa_pod_builder_int(b, DEV_SINK);
+		spa_pod_builder_pop(b, &f[3]);
+		spa_pod_builder_pop(b, &f[2]);
+
+		spa_pod_builder_push_struct(b, &f[2]);
+		spa_pod_builder_string(b, "Audio/Source");
+		spa_pod_builder_int(b, 1);
+		spa_pod_builder_string(b, "card.profile.devices");
+		spa_pod_builder_push_array(b, &f[3]);
+		spa_pod_builder_int(b, DEV_SOURCE);
+		spa_pod_builder_pop(b, &f[3]);
+		spa_pod_builder_pop(b, &f[2]);
+
+		spa_pod_builder_pop(b, &f[1]);
+	}
+
+	*param = spa_pod_builder_pop(b, &f[0]);
+	return 1;
+}
+
+static void build_route_body(struct impl *this, struct spa_pod_builder *b,
+		struct route *r, uint32_t index, bool with_device)
+{
+	struct spa_pod_frame f;
+
+	spa_pod_builder_add(b,
+		SPA_PARAM_ROUTE_index,       SPA_POD_Int(index),
+		SPA_PARAM_ROUTE_direction,   SPA_POD_Id(r->dir),
+		SPA_PARAM_ROUTE_name,        SPA_POD_String(r->pa_name),
+		SPA_PARAM_ROUTE_description, SPA_POD_String(r->description),
+		SPA_PARAM_ROUTE_priority,    SPA_POD_Int(r->priority),
+		SPA_PARAM_ROUTE_available,   SPA_POD_Id(r->available),
+		0);
+
+	if (with_device) {
+		struct spa_pod_frame pf, sf;
+
+		spa_pod_builder_add(b, SPA_PARAM_ROUTE_device, SPA_POD_Int(r->device), 0);
+
+		/* Die Route traegt ihren Namen als Prop mit. PipeWire reicht die
+		 * Props einer aktiven Route an den Knoten des Geraets weiter - und
+		 * nur der Knoten haelt den HAL-Stream, den es umzurouten gilt.
+		 * Device und Knoten laufen in verschiedenen Prozessen. */
+		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_props, 0);
+		spa_pod_builder_push_object(b, &pf, SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
+		spa_pod_builder_prop(b, SPA_PROP_params, 0);
+		spa_pod_builder_push_struct(b, &sf);
+		spa_pod_builder_string(b, "droid.route");
+		spa_pod_builder_string(b, r->pa_name);
+		spa_pod_builder_pop(b, &sf);
+		spa_pod_builder_pop(b, &pf);
+	}
+
+	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profiles, 0);
+	spa_pod_builder_push_array(b, &f);
+	spa_pod_builder_int(b, PROFILE_DEFAULT);
+	spa_pod_builder_pop(b, &f);
+
+	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_devices, 0);
+	spa_pod_builder_push_array(b, &f);
+	spa_pod_builder_int(b, r->device);
+	spa_pod_builder_pop(b, &f);
+}
+
+/* ------------------------------------------------------------- Knoten */
+
+static void emit_node(struct impl *this, uint32_t device)
 {
 	struct spa_device_object_info info;
-	struct spa_dict_item items[6];
-	char flags_str[32], id_str[16];
-	uint32_t n = 0;
-	const char *media_class;
-	char *flag_names;
+	struct spa_dict_item items[14];
+	char routes_str[8], dev_str[8];
+	uint32_t n = 0, i, n_routes = 0;
+	bool sink = device == DEV_SINK;
 
-	/* mixPort-Rolle ist aus Sicht des HAL gedacht: SOURCE liefert Wiedergabe. */
-	media_class = port->role == DM_CONFIG_ROLE_SOURCE
-		? "Audio/Sink" : "Audio/Source";
+	for (i = 0; i < this->n_routes; i++)
+		if (this->routes[i].device == device)
+			n_routes++;
 
-	snprintf(flags_str, sizeof(flags_str), "%#x", port->flags);
-	snprintf(id_str, sizeof(id_str), "%u", id);
-	/* pa_list_string_flags kennt nur AUDIO_OUTPUT_FLAG_*; fuer Eingaenge
-	 * waeren das AUDIO_INPUT_FLAG_* und die Namen waeren schlicht falsch. */
-	flag_names = port->role == DM_CONFIG_ROLE_SOURCE
-		? pa_list_string_flags(port->flags) : NULL;
+	snprintf(routes_str, sizeof(routes_str), "%u", n_routes);
+	snprintf(dev_str, sizeof(dev_str), "%u", device);
 
-	items[n++] = SPA_DICT_ITEM_INIT("node.name", port->name);
-	items[n++] = SPA_DICT_ITEM_INIT("node.description", port->name);
-	items[n++] = SPA_DICT_ITEM_INIT("media.class", media_class);
-	items[n++] = SPA_DICT_ITEM_INIT("droid.mix-port", port->name);
-	items[n++] = SPA_DICT_ITEM_INIT("droid.flags", flags_str);
-	if (flag_names)
-		items[n++] = SPA_DICT_ITEM_INIT("droid.flag-names", flag_names);
+	items[n++] = SPA_DICT_ITEM_INIT("node.name", sink ? "droid-sink" : "droid-source");
+	items[n++] = SPA_DICT_ITEM_INIT("node.description",
+			sink ? "Android HAL (Wiedergabe)" : "Android HAL (Aufnahme)");
+	items[n++] = SPA_DICT_ITEM_INIT("media.class", sink ? "Audio/Sink" : "Audio/Source");
+	items[n++] = SPA_DICT_ITEM_INIT("device.api", "droid");
+	items[n++] = SPA_DICT_ITEM_INIT("droid.mix-port", mix_port_of(device));
+	items[n++] = SPA_DICT_ITEM_INIT("card.profile.device", dev_str);
+	items[n++] = SPA_DICT_ITEM_INIT("device.routes", routes_str);
+	items[n++] = SPA_DICT_ITEM_INIT("audio.format", "S16LE");
+	items[n++] = SPA_DICT_ITEM_INIT("audio.rate", "48000");
+	items[n++] = SPA_DICT_ITEM_INIT("audio.channels", "2");
+	items[n++] = SPA_DICT_ITEM_INIT("audio.position", "FL,FR");
+	/* Beide Richtungen takten ihren Graphen selbst; die Wiedergabe soll
+	 * fuehren, wenn beide verbunden sind. */
+	items[n++] = SPA_DICT_ITEM_INIT("node.driver", "true");
+	items[n++] = SPA_DICT_ITEM_INIT("priority.driver", sink ? "50000" : "20000");
 
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
 	info.type = SPA_TYPE_INTERFACE_Node;
-	info.factory_name = "api.droid.pcm";
+	info.factory_name = sink ? "api.droid.pcm" : "api.droid.pcm.source";
 	info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
 	info.props = &SPA_DICT_INIT(items, n);
 
-	spa_device_emit_object_info(&this->hooks, id, &info);
-
-	free(flag_names);
+	spa_device_emit_object_info(&this->hooks, device, &info);
 }
 
-static void emit_info(struct impl *this)
+static void emit_nodes(struct impl *this, bool present)
 {
-	struct spa_device_info info;
-	struct spa_dict_item items[5];
-	uint32_t n = 0;
+	uint32_t i;
 
-	info = SPA_DEVICE_INFO_INIT();
-	info.change_mask = SPA_DEVICE_CHANGE_MASK_PROPS;
+	if (present == this->nodes_emitted)
+		return;
+
+	if (present) {
+		emit_node(this, DEV_SINK);
+		emit_node(this, DEV_SOURCE);
+	} else {
+		for (i = 0; i < N_DEVICES; i++)
+			spa_device_emit_object_info(&this->hooks, i, NULL);
+	}
+	this->nodes_emitted = present;
+}
+
+static void emit_info(struct impl *this, bool full)
+{
+	uint64_t old = full ? this->info.change_mask : 0;
+	struct spa_dict_item items[6];
+	uint32_t n = 0;
 
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "droid");
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
-	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME,
-			this->module ? this->module->name : "droid");
-	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION,
-			"Android HAL (droid)");
-	info.props = &SPA_DICT_INIT(items, n);
+	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, "droid");
+	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, "Android HAL");
+	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NICK, "droid");
+	items[n++] = SPA_DICT_ITEM_INIT("api.droid.module",
+			this->module ? this->module->name : "primary");
+	this->info.props = &SPA_DICT_INIT(items, n);
 
-	spa_device_emit_info(&this->hooks, &info);
+	if (full)
+		this->info.change_mask = SPA_DEVICE_CHANGE_MASK_PROPS |
+					 SPA_DEVICE_CHANGE_MASK_PARAMS;
+	if (this->info.change_mask) {
+		spa_device_emit_info(&this->hooks, &this->info);
+		this->info.change_mask = old;
+	}
+	this->info.props = NULL;
+}
+
+/* -------------------------------------------------------------- Params */
+
+static int impl_enum_params(void *object, int seq, uint32_t id,
+		uint32_t start, uint32_t num, const struct spa_pod *filter)
+{
+	struct impl *this = object;
+	struct spa_pod_builder b = { 0 };
+	uint8_t buffer[2048];
+	struct spa_result_device_params result;
+	uint32_t count = 0;
+	int res;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	result.id = id;
+	result.next = start;
+next:
+	result.index = result.next++;
+	spa_pod_builder_init(&b, buffer, sizeof(buffer));
+
+	switch (id) {
+	case SPA_PARAM_EnumProfile:
+		if ((res = build_profile(this, &b, id, result.index,
+						(struct spa_pod **) &result.param)) <= 0)
+			return res;
+		break;
+	case SPA_PARAM_Profile:
+		if (result.index > 0)
+			return 0;
+		if ((res = build_profile(this, &b, id, this->profile,
+						(struct spa_pod **) &result.param)) <= 0)
+			return res;
+		break;
+	case SPA_PARAM_EnumRoute:
+	{
+		struct spa_pod_frame f;
+		if (result.index >= this->n_routes)
+			return 0;
+		spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_ParamRoute, id);
+		build_route_body(this, &b, &this->routes[result.index], result.index, false);
+		result.param = spa_pod_builder_pop(&b, &f);
+		break;
+	}
+	case SPA_PARAM_Route:
+	{
+		struct spa_pod_frame f;
+		uint32_t dev = result.index, idx;
+		if (dev >= N_DEVICES)
+			return 0;
+		if ((idx = this->active[dev]) == SPA_ID_INVALID)
+			goto next;
+		spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_ParamRoute, id);
+		build_route_body(this, &b, &this->routes[idx], idx, true);
+		spa_pod_builder_add(&b, SPA_PARAM_ROUTE_save, SPA_POD_Bool(true), 0);
+		result.param = spa_pod_builder_pop(&b, &f);
+		break;
+	}
+	default:
+		return -ENOENT;
+	}
+
+	if (spa_pod_filter(&b, (struct spa_pod **) &result.param, result.param, filter) < 0)
+		goto next;
+
+	spa_device_emit_result(&this->hooks, seq, 0, SPA_RESULT_TYPE_DEVICE_PARAMS, &result);
+
+	if (++count != num)
+		goto next;
+	return 0;
+}
+
+static void params_changed(struct impl *this, uint32_t id)
+{
+	uint32_t i;
+	/* Eine Param-Aenderung meldet man, indem das SERIAL-Bit in den Flags
+	 * kippt - genau dafuer ist es da ("signal update even when the
+	 * read/write flags don't change"). Das Feld `user` daneben ist privater
+	 * Zustand des Plugins und wird von PipeWire nie angesehen. */
+	for (i = 0; i < SPA_N_ELEMENTS(this->params); i++)
+		if (this->params[i].id == id)
+			this->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+	this->info.change_mask |= SPA_DEVICE_CHANGE_MASK_PARAMS;
+	emit_info(this, false);
+}
+
+static int set_profile(struct impl *this, uint32_t index)
+{
+	if (index > PROFILE_DEFAULT)
+		return -EINVAL;
+	if (index == this->profile)
+		return 0;
+
+	this->profile = index;
+	emit_nodes(this, index == PROFILE_DEFAULT);
+	spa_log_warn(this->log, NAME " Profil: %s",
+			index == PROFILE_DEFAULT ? "default" : "off");
+	params_changed(this, SPA_PARAM_Profile);
+	return 0;
+}
+
+static int set_route(struct impl *this, uint32_t index, uint32_t device)
+{
+	struct route *r;
+	int res;
+
+	if (index >= this->n_routes || device >= N_DEVICES)
+		return -EINVAL;
+	r = &this->routes[index];
+	if (r->device != device)
+		return -EINVAL;
+
+	this->active[device] = index;
+	res = droid_node_set_route(mix_port_of(device), r->port->name);
+	if (res < 0 && res != -ENOENT)
+		spa_log_warn(this->log, NAME " Route \"%s\" nicht angewandt: %s",
+				r->pa_name, spa_strerror(res));
+	else
+		spa_log_warn(this->log, NAME " Route: %s -> %s", r->pa_name, r->port->name);
+
+	params_changed(this, SPA_PARAM_Route);
+	return 0;
+}
+
+static int impl_set_param(void *object, uint32_t id, uint32_t flags,
+		const struct spa_pod *param)
+{
+	struct impl *this = object;
+
+	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	switch (id) {
+	case SPA_PARAM_Profile:
+	{
+		uint32_t index;
+		if (param == NULL)
+			return -EINVAL;
+		if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamProfile, NULL,
+					SPA_PARAM_PROFILE_index, SPA_POD_Int(&index)) < 0)
+			return -EINVAL;
+		return set_profile(this, index);
+	}
+	case SPA_PARAM_Route:
+	{
+		uint32_t index, device = 0;
+		if (param == NULL)
+			return -EINVAL;
+		if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamRoute, NULL,
+					SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
+					SPA_PARAM_ROUTE_device, SPA_POD_OPT_Int(&device)) < 0)
+			return -EINVAL;
+		return set_route(this, index, device);
+	}
+	default:
+		return -ENOENT;
+	}
 }
 
 static int impl_add_listener(void *object, struct spa_hook *listener,
@@ -105,21 +512,16 @@ static int impl_add_listener(void *object, struct spa_hook *listener,
 {
 	struct impl *this = object;
 	struct spa_hook_list save;
-	void *state = NULL;
-	dm_config_port *port;
-	uint32_t id = 0;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 	spa_return_val_if_fail(events != NULL, -EINVAL);
 
 	spa_hook_list_isolate(&this->hooks, &save, listener, events, data);
 
-	emit_info(this);
-
-	if (this->module) {
-		for (port = dm_list_first_data(this->module->mix_ports, &state); port;
-		     port = dm_list_next_data(this->module->mix_ports, &state))
-			emit_node(this, port, id++);
+	emit_info(this, true);
+	if (this->profile == PROFILE_DEFAULT) {
+		this->nodes_emitted = false;
+		emit_nodes(this, true);
 	}
 
 	spa_hook_list_join(&this->hooks, &save);
@@ -138,6 +540,8 @@ static const struct spa_device_methods impl_device = {
 	SPA_VERSION_DEVICE_METHODS,
 	.add_listener = impl_add_listener,
 	.sync = impl_sync,
+	.enum_params = impl_enum_params,
+	.set_param = impl_set_param,
 };
 
 static int impl_get_interface(struct spa_handle *handle, const char *type, void **interface)
@@ -180,6 +584,7 @@ static int impl_init(const struct spa_handle_factory *factory,
 {
 	struct impl *this;
 	const char *file = NULL;
+	uint32_t i;
 
 	spa_return_val_if_fail(factory != NULL, -EINVAL);
 	spa_return_val_if_fail(handle != NULL, -EINVAL);
@@ -195,6 +600,14 @@ static int impl_init(const struct spa_handle_factory *factory,
 			SPA_TYPE_INTERFACE_Device,
 			SPA_VERSION_DEVICE,
 			&impl_device, this);
+
+	this->info = SPA_DEVICE_INFO_INIT();
+	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumProfile, SPA_PARAM_INFO_READ);
+	this->params[1] = SPA_PARAM_INFO(SPA_PARAM_Profile, SPA_PARAM_INFO_READWRITE);
+	this->params[2] = SPA_PARAM_INFO(SPA_PARAM_EnumRoute, SPA_PARAM_INFO_READ);
+	this->params[3] = SPA_PARAM_INFO(SPA_PARAM_Route, SPA_PARAM_INFO_READWRITE);
+	this->info.params = this->params;
+	this->info.n_params = SPA_N_ELEMENTS(this->params);
 
 	if (info)
 		file = spa_dict_lookup(info, "droid.config");
@@ -215,10 +628,17 @@ static int impl_init(const struct spa_handle_factory *factory,
 		return -ENOENT;
 	}
 
-	spa_log_info(this->log, NAME " HAL-Konfiguration geladen: %s (%zd mixPorts, %zd devicePorts)",
-			file,
-			(ssize_t) dm_list_size(this->module->mix_ports),
-			(ssize_t) dm_list_size(this->module->device_ports));
+	collect_routes(this);
+	for (i = 0; i < N_DEVICES; i++)
+		this->active[i] = default_route(this, i);
+	this->profile = PROFILE_DEFAULT;
+
+	spa_log_info(this->log, NAME " HAL-Konfiguration geladen: %s (%u Routen)",
+			file, this->n_routes);
+	for (i = 0; i < this->n_routes; i++)
+		spa_log_info(this->log, NAME "   Route %u: %-24s (%s, Geraet %u, Prio %u)",
+				i, this->routes[i].pa_name, this->routes[i].port->name,
+				this->routes[i].device, this->routes[i].priority);
 	return 0;
 }
 
