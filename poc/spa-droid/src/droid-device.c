@@ -135,6 +135,62 @@ static uint32_t route_priority(audio_devices_t type)
 	}
 }
 
+/* Bluetooth steht in der audio_policy-XML dieses Geraets vollstaendig im
+ * Kommentar - ein Block von rund 3900 Zeichen nimmt zehn Geraeteports mit,
+ * darunter alle BT-SCO- und A2DP-Eintraege. Der HAL braucht die XML aber
+ * nicht: beim Routen bekommt er nur den Geraetetyp, und
+ * pa_droid_stream_set_route schickt fuer BT-SCO-Typen zusaetzlich BT_SCO=on
+ * an den HAL - genau der Android-Mechanismus, der den Sprachpfad auf die
+ * Bluetooth-PCM-Leitung legt. Also bauen wir die Ports selbst.
+ *
+ * Der Controller dieses Geraets fuehrt SCO nicht ueber HCI (hciconfig zeigt
+ * sco:0 in beide Richtungen), sondern in Hardware zwischen BT-Chip und
+ * Audio-DSP. Damit ist dieser Weg der einzig moegliche fuer Telefonate ueber
+ * ein Headset. */
+static dm_config_port synthetic_ports[2];
+
+static void add_synthetic_bt_routes(struct impl *this)
+{
+	static const struct {
+		const char *name;
+		const char *pa_name;
+		audio_devices_t type;
+		dm_config_role_t role;
+		uint32_t device;
+	} defs[] = {
+		{ "BT SCO",             "output-bluetooth_sco",        AUDIO_DEVICE_OUT_BLUETOOTH_SCO,
+		  DM_CONFIG_ROLE_SINK,   DEV_SINK },
+		{ "BT SCO Headset Mic", "input-bluetooth_sco_headset", AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET,
+		  DM_CONFIG_ROLE_SOURCE, DEV_SOURCE },
+	};
+	uint32_t i;
+
+	for (i = 0; i < SPA_N_ELEMENTS(defs) && this->n_routes < MAX_ROUTES; i++) {
+		dm_config_port *p = &synthetic_ports[i];
+		struct route *r = &this->routes[this->n_routes++];
+
+		p->module = this->module;
+		p->port_type = DM_CONFIG_TYPE_DEVICE_PORT;
+		p->name = (char *) defs[i].name;
+		p->role = defs[i].role;
+		p->type = defs[i].type;
+		p->address = (char *) "";
+
+		r->port = p;
+		r->pa_name = defs[i].pa_name;
+		r->dir = defs[i].role == DM_CONFIG_ROLE_SINK
+			? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
+		r->device = defs[i].device;
+		r->priority = 50;
+		/* Ob wirklich ein Headset verbunden ist, weiss die Karte nicht - das
+		 * entscheidet der Bluetooth-Stack. Also "unbekannt": waehlbar, aber
+		 * nichts waehlt sie von selbst. */
+		r->available = SPA_PARAM_AVAILABILITY_unknown;
+		snprintf(r->description, sizeof(r->description), "Bluetooth (%s)",
+				defs[i].role == DM_CONFIG_ROLE_SINK ? "Freisprechen" : "Mikrofon");
+	}
+}
+
 static void collect_routes(struct impl *this)
 {
 	dm_config_port *port;
@@ -184,6 +240,8 @@ static void collect_routes(struct impl *this)
 		}
 		snprintf(r->description, sizeof(r->description), "%s", port->name);
 	}
+
+	add_synthetic_bt_routes(this);
 }
 
 static uint32_t default_route(struct impl *this, uint32_t device)

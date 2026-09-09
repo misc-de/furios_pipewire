@@ -177,6 +177,44 @@ switch_to() {
     return 1
 }
 
+# --- Anruf auf ein Bluetooth-Headset legen ---------------------------------
+#
+# callaudiod kennt nur Ohrmuschel und Lautsprecher. Fuer ein Headset muss
+# zweierlei zusammenkommen: der Kopfhoerer im Freisprechprofil (damit ein
+# SCO-Kanal steht) und die Telefonkarte auf die Route output-bluetooth_sco
+# (damit der HAL BT_SCO=on schickt und den Sprachpfad dorthin legt).
+#
+# Die BT-Ports fehlen in der audio_policy-XML dieses Geraets - sie sind
+# auskommentiert. Unser Plugin baut sie selbst; der HAL braucht die Datei
+# nicht, er bekommt beim Routen nur den Geraetetyp.
+bt_call() {
+    local mode=$1 card sink_port src_port
+    card=$(pactl list short cards 2>/dev/null | awk '/bluez_card/ {print $2; exit}')
+
+    case "$mode" in
+    on)
+        [ -n "$card" ] || die "Kein Bluetooth-Geraet verbunden."
+        run pactl set-card-profile "$card" headset-head-unit \
+            || run pactl set-card-profile "$card" headset-head-unit-cvsd \
+            || die "Freisprechprofil laesst sich nicht setzen."
+        sink_port=output-bluetooth_sco
+        src_port=input-bluetooth_sco_headset
+        ;;
+    off)
+        sink_port=output-earpiece
+        src_port=input-builtin_mic
+        [ -n "$card" ] && run pactl set-card-profile "$card" a2dp-sink 2>/dev/null
+        ;;
+    *) die "bt-call braucht 'on' oder 'off'." ;;
+    esac
+
+    run pactl set-sink-port   droid-sink   "$sink_port" || die "Route $sink_port fehlgeschlagen."
+    run pactl set-source-port droid-source "$src_port"  || info "Mikrofonroute $src_port fehlgeschlagen."
+    info "Anrufton: $sink_port / $src_port"
+    [ "$mode" = on ] && info "Hoerst du die Gegenseite im Headset? Zurueck mit: audioctl bt-call off"
+    return 0
+}
+
 usage() {
     cat <<EOF
 audioctl - Audiostack umschalten
@@ -186,6 +224,7 @@ audioctl - Audiostack umschalten
   audioctl list                Profile auflisten
   audioctl try <profil>        umschalten, faellt beim Neustart zurueck
   audioctl set <profil>        umschalten und persistent merken
+  audioctl bt-call on|off      laufenden Anruf aufs Bluetooth-Headset legen
   audioctl revert              sofort zurueck auf standard
   audioctl verify              pruefen, ob ein Sink da ist
 
@@ -232,6 +271,7 @@ case "${1:-status}" in
     list)   printf '%s\n' $PROFILES ;;
     try)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" try ;;
     set)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" sticky ;;
+    bt-call) [ $# -ge 2 ] || die "bt-call braucht 'on' oder 'off'."; bt_call "$2" ;;
     revert) switch_to standard sticky ;;
     verify) verify && echo "OK - Sink vorhanden." || { echo "kein Sink." >&2; exit 1; } ;;
     -h|--help|help) usage ;;

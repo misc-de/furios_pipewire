@@ -1304,6 +1304,34 @@ static dm_config_port *port_by_route_name(struct impl *this, const char *route)
 		if (ok && spa_streq(name, route))
 			return port;
 	}
+
+	/* Bluetooth fehlt in der audio_policy-XML dieses Geraets (alles
+	 * auskommentiert). Der HAL braucht sie nicht - er bekommt beim Routen nur
+	 * den Geraetetyp -, also bauen wir den Port selbst. Das Device meldet
+	 * dieselben Routen. */
+	{
+		static dm_config_port bt_out, bt_in;
+		dm_config_port *p = NULL;
+
+		if (spa_streq(route, "output-bluetooth_sco")) {
+			p = &bt_out;
+			p->name = (char *) "BT SCO";
+			p->role = DM_CONFIG_ROLE_SINK;
+			p->type = AUDIO_DEVICE_OUT_BLUETOOTH_SCO;
+		} else if (spa_streq(route, "input-bluetooth_sco_headset")) {
+			p = &bt_in;
+			p->name = (char *) "BT SCO Headset Mic";
+			p->role = DM_CONFIG_ROLE_SOURCE;
+			p->type = AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET;
+		}
+		if (p) {
+			p->module = module;
+			p->port_type = DM_CONFIG_TYPE_DEVICE_PORT;
+			p->address = (char *) "";
+			return p;
+		}
+	}
+
 	return NULL;
 }
 
