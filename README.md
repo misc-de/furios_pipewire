@@ -144,6 +144,22 @@ laufen - nur der Knoten haelt den HAL-Stream.
 
       systemctl --user set-environment SPA_DROID_DIAG=1
 
+## Umschalten per Knopfdruck
+
+    ./gui/install.sh
+
+Installiert einen kleinen GTK4/libadwaita-Umschalter samt Symbol und
+Startereintrag ("Audio-Umschalter" im Anwendungsraster). Ein Schalter fuer
+den Stack, darunter was tatsaechlich laeuft, und ein Knopf **Ton
+wiederherstellen** - der stellt den Auslieferungszustand her, schaltet auf den
+Lautsprecher, hebt die Stummschaltung auf und setzt eine hoerbare Lautstaerke.
+Genau die Kombination, die nach einem misslungenen Test wie "gar nichts geht
+mehr" aussieht.
+
+Standardmaessig merkt sich der Schalter die Auswahl **nicht**: ein Neustart
+fuehrt zum Auslieferungszustand zurueck. Wer es anders will, legt vorher den
+zweiten Schalter um.
+
 ## Bluetooth
 
 Damit PipeWire Bluetooth-Audio kann, muss `libspa-0.2-bluetooth` installiert
