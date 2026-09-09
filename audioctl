@@ -117,12 +117,16 @@ verify() {
     return 1
 }
 
-# callaudiod haelt eine dauerhafte Verbindung zum Audioserver. Beim
-# Profilwechsel wechselt der Server - danach findet es keine Karte mehr
-# ("No suitable card found") und die Telefonie waere stumm geschaltet.
-# Beenden genuegt: D-Bus startet es beim naechsten Aufruf neu.
-restart_callaudiod() {
-    pkill -x callaudiod 2>/dev/null && info "callaudiod neu gestartet (D-Bus aktiviert es bei Bedarf)"
+# callaudiod und feedbackd halten dauerhafte Verbindungen zum Audioserver.
+# Beim Profilwechsel wechselt der Server - danach findet callaudiod keine
+# Karte mehr ("No suitable card found") und feedbackd scheitert an
+# "Invalid state": kein Klingelton, nur noch Vibration. Beenden genuegt,
+# D-Bus startet beide beim naechsten Aufruf neu.
+restart_audio_clients() {
+    local restarted=""
+    pkill -x callaudiod 2>/dev/null && restarted="callaudiod"
+    pkill -x feedbackd  2>/dev/null && restarted="${restarted:+$restarted, }feedbackd"
+    [ -n "$restarted" ] && info "neu gestartet: $restarted (D-Bus aktiviert sie bei Bedarf)"
     return 0
 }
 
@@ -134,7 +138,7 @@ switch_to() {
     apply "$p"
     [ "$DRY" = 1 ] && { echo "Trockenlauf beendet, nichts geaendert."; return 0; }
 
-    restart_callaudiod
+    restart_audio_clients
 
     if verify; then
         info "OK - Sink vorhanden: $(pactl list sinks short | awk '{print $2}' | paste -sd, -)"
