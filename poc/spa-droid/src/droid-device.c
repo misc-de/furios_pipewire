@@ -263,10 +263,15 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 	}
 
 	/* Ohne save-Kennzeichnung haelt WirePlumber die Auswahl fuer eine
-	 * beilaeufige Aenderung und legt sie nicht in den Profilzustand. */
+	 * beilaeufige Aenderung und legt sie nicht in den Profilzustand.
+	 *
+	 * Der Anrufmodus ist die Ausnahme: er wird NIE gespeichert. Sonst merkt
+	 * sich WirePlumber ein Profil, das beim naechsten Start wieder gesetzt
+	 * wuerde - das Telefon startete im Anrufmodus, ohne dass jemand
+	 * telefoniert. */
 	if (current)
 		spa_pod_builder_add(b, SPA_PARAM_PROFILE_save,
-				SPA_POD_Bool(this->profile_save), 0);
+				SPA_POD_Bool(index != PROFILE_VOICECALL && this->profile_save), 0);
 
 	*param = spa_pod_builder_pop(b, &f[0]);
 	return 1;
@@ -324,7 +329,7 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 static void emit_node(struct impl *this, uint32_t device)
 {
 	struct spa_device_object_info info;
-	struct spa_dict_item items[14];
+	struct spa_dict_item items[16];
 	char routes_str[8], dev_str[8];
 	uint32_t n = 0, i, n_routes = 0;
 	bool sink = device == DEV_SINK;
@@ -353,6 +358,13 @@ static void emit_node(struct impl *this, uint32_t device)
 	 * fuehren, wenn beide verbunden sind. */
 	items[n++] = SPA_DICT_ITEM_INIT("node.driver", "true");
 	items[n++] = SPA_DICT_ITEM_INIT("priority.driver", sink ? "50000" : "20000");
+	/* priority.session MUSS gesetzt sein: fehlt sie, faellt WirePlumbers
+	 * Geraetewahl auf priority.driver zurueck - und mit 50000 schluege dieser
+	 * Knoten sogar eine ausdrueckliche Benutzerwahl (die mit 30000 gewichtet
+	 * wird). Es liesse sich dann kein anderes Ausgabegeraet mehr auswaehlen,
+	 * kein Bluetooth-Kopfhoerer, nichts. 1000 ist der uebliche Wert fuer
+	 * eingebaute Hardware; ein verbundener Kopfhoerer liegt darueber. */
+	items[n++] = SPA_DICT_ITEM_INIT("priority.session", "1000");
 
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
 	info.type = SPA_TYPE_INTERFACE_Node;

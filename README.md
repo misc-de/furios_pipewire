@@ -158,6 +158,14 @@ Bluetooth-Karte deshalb ausschliesslich A2DP-Profile - telefonieren ueber den
 Kopfhoerer ist unmoeglich, die Ein- und Ausgaenge dafuer existieren nicht
 einmal.
 
+**`priority.session` muss am Knoten gesetzt sein.** Fehlt sie, faellt
+WirePlumbers Geraetewahl auf `priority.driver` zurueck - und der ist hier
+50000, damit der Sink den Graphen taktet. Damit schlaegt der Knoten sogar eine
+ausdrueckliche Benutzerwahl, die mit 30000 gewichtet wird: es liesse sich
+ueberhaupt kein anderes Ausgabegeraet mehr auswaehlen, kein
+Bluetooth-Kopfhoerer, nichts. Das Symptom ist tueckisch, weil die Auswahl in
+der Oberflaeche einfach wirkungslos bleibt, ohne Fehlermeldung.
+
 **Nach einem Profilwechsel den Kopfhoerer einmal neu verbinden.** audioctl
 startet WirePlumber neu; ein Geraet, das die Verbindung schon vorher hatte,
 registriert seine Profile nicht vollstaendig neu - die Karte zeigt dann nur
