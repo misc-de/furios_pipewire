@@ -33,6 +33,23 @@ current_profile() {
     printf 'standard'
 }
 
+# Was laeuft WIRKLICH? Die Vermerkdatei kann veralten - genau das hat beim
+# ersten Anruftest in die Irre gefuehrt: status meldete pw-hal, tatsaechlich
+# lief PulseAudio, und der Anruf pruefte den falschen Stack.
+effective_profile() {
+    if uctl is-active pulseaudio.service >/dev/null 2>&1; then
+        if uctl is-active furios-pw-tunnel.service >/dev/null 2>&1; then
+            printf 'pw-tunnel'
+        else
+            printf 'standard'
+        fi
+    elif uctl is-active pipewire-pulse.service >/dev/null 2>&1; then
+        printf 'pw-hal'
+    else
+        printf 'unklar'
+    fi
+}
+
 pulse_owner() {
     local s
     s=$(pactl info 2>/dev/null | sed -n 's/^Server Name: //p')
@@ -183,7 +200,14 @@ EOF
 }
 
 status() {
-    printf 'Profil (aktiv):     %s\n' "$(current_profile)"
+    local eff rec
+    eff=$(effective_profile)
+    rec=$(current_profile)
+    printf 'Profil (aktiv):     %s\n' "$eff"
+    if [ "$eff" != "$rec" ]; then
+        printf 'ACHTUNG:            vermerkt ist "%s" - das passt nicht zum laufenden System.\n' "$rec"
+        printf '                    Mit "audioctl set %s" wieder in Einklang bringen.\n' "$eff"
+    fi
     printf 'Profil (persistent):%s\n' " $(cat "$STICKY" 2>/dev/null || echo standard)"
     [ -r "$TRY" ] && printf 'Testmodus:          ja - faellt beim Neustart zurueck\n'
     printf 'Pulse-Server:       %s\n' "$(pulse_owner)"
@@ -200,7 +224,7 @@ case "${1:-status}" in
     status) status ;;
     # Schalter: bewusst im Testmodus, damit ein Neustart immer zum
     # Auslieferungszustand zurueckfuehrt.
-    toggle) if [ "$(current_profile)" = pw-hal ]; then
+    toggle) if [ "$(effective_profile)" = pw-hal ]; then
                 switch_to standard sticky
             else
                 switch_to pw-hal try
