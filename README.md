@@ -144,6 +144,26 @@ laufen - nur der Knoten haelt den HAL-Stream.
 
       systemctl --user set-environment SPA_DROID_DIAG=1
 
+## Bluetooth
+
+Damit PipeWire Bluetooth-Audio kann, muss `libspa-0.2-bluetooth` installiert
+sein - ohne das Paket gibt es gar keine BT-Unterstuetzung, WirePlumber meldet
+nur "BlueZ SPA plugin is missing or broken".
+
+Fuers Freisprechen (HFP) ist **`native` der richtige Backend**, nicht `ofono`
+(siehe `wireplumber/51-bluez-ofono.conf`): ofono hat auf diesem Geraet kein
+`org.ofono.Handsfree`-Interface und meldet unter `HandsfreeAudioManager` auch
+bei verbundenem Kopfhoerer keine Karten. Mit dem ofono-Backend bietet die
+Bluetooth-Karte deshalb ausschliesslich A2DP-Profile - telefonieren ueber den
+Kopfhoerer ist unmoeglich, die Ein- und Ausgaenge dafuer existieren nicht
+einmal.
+
+**Nach einem Profilwechsel den Kopfhoerer einmal neu verbinden.** audioctl
+startet WirePlumber neu; ein Geraet, das die Verbindung schon vorher hatte,
+registriert seine Profile nicht vollstaendig neu - die Karte zeigt dann nur
+einen Teil (etwa nur HFP, kein A2DP). Nach `bluetoothctl disconnect` und
+`connect` sind beide da.
+
 ## Testen ohne Installation
 
     ninja -C poc/spa-droid/build
