@@ -1,0 +1,191 @@
+#!/bin/bash
+# audioctl - Umschalten zwischen FuriOS-Standard-Audiostack und eigenen Profilen.
+# Kein dpkg-Eigentum wird angefasst; alles laeuft ueber Masken in /etc/systemd/user
+# und additive Units unter /usr/local. Rueckweg ist immer 'audioctl revert'.
+
+set -u
+
+STATE_DIR=/var/lib/furios-audio
+STICKY=$STATE_DIR/profile
+TRY=$STATE_DIR/profile.try
+ETCU=/etc/systemd/user
+DROPIN=$ETCU/pipewire.service.d/50-furios-audio.conf
+LOCAL=/usr/local/share/furios-audio
+
+PROFILES="standard pw-tunnel pw-hal"
+DRY=0
+
+die()  { printf 'audioctl: %s\n' "$*" >&2; exit 1; }
+info() { printf '  %s\n' "$*"; }
+run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
+
+[ "$(id -un)" = root ] && die "bitte als Benutzer furios aufrufen, nicht als root (sudo wird intern verwendet)."
+
+uctl() { systemctl --user "$@"; }
+
+# --- Masken: Datei -> /dev/null anlegen bzw. entfernen -----------------------
+mask()   { for u in "$@"; do run sudo ln -sf /dev/null "$ETCU/$u"; done; }
+unmask() { for u in "$@"; do [ -L "$ETCU/$u" ] && [ "$(readlink "$ETCU/$u")" = /dev/null ] && run sudo rm -f "$ETCU/$u"; done; }
+
+current_profile() {
+    [ -r "$TRY" ]    && { printf '%s' "$(cat "$TRY")";    return; }
+    [ -r "$STICKY" ] && { printf '%s' "$(cat "$STICKY")"; return; }
+    printf 'standard'
+}
+
+pulse_owner() {
+    local s
+    s=$(pactl info 2>/dev/null | sed -n 's/^Server Name: //p')
+    [ -n "$s" ] && printf '%s' "$s" || printf 'nicht erreichbar'
+}
+
+# --- Vorbedingungen je Profil ----------------------------------------------
+preflight() {
+    case "$1" in
+    standard) : ;;
+    pw-tunnel)
+        [ -e /usr/lib/aarch64-linux-gnu/pipewire-0.3/libpipewire-module-pulse-tunnel.so ] \
+            || die "libpipewire-module-pulse-tunnel.so fehlt."
+        [ -e "$LOCAL/tunnel.conf" ] || die "$LOCAL/tunnel.conf fehlt."
+        ;;
+    pw-hal)
+        [ -e /usr/lib/aarch64-linux-gnu/spa-0.2/droid/libspa-droid.so ] \
+            || die "SPA-Droid-Plugin noch nicht gebaut - Profil pw-hal ist bis dahin gesperrt."
+        command -v wireplumber >/dev/null \
+            || die "wireplumber nicht installiert (apt install wireplumber)."
+        ;;
+    *) die "unbekanntes Profil '$1'. Bekannt: $PROFILES" ;;
+    esac
+}
+
+# --- Profile anwenden -------------------------------------------------------
+apply() {
+    local p=$1
+    case "$p" in
+    standard)
+        run uctl stop furios-pw-tunnel.service 2>/dev/null
+        run uctl disable furios-pw-tunnel.service 2>/dev/null
+        # Maskieren stoppt einen LAUFENDEN Dienst nicht - erst stoppen,
+        # sonst haelt pipewire-pulse weiter den Pulse-Socket.
+        run uctl stop pipewire-pulse.service pipewire-pulse.socket 2>/dev/null
+        run uctl stop wireplumber.service 2>/dev/null
+        mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
+        unmask pulseaudio.service pulseaudio.socket
+        run sudo rm -f "$DROPIN"
+        run uctl daemon-reload
+        # Ein gescheitertes pw-hal laesst pipewire in 'failed' zurueck - ohne
+        # reset-failed bliebe die Kamera tot. Erst zuruecksetzen, dann starten.
+        run uctl reset-failed pipewire.service 2>/dev/null
+        run uctl restart pipewire.service
+        # restart statt start: pipewire-pulse nimmt den Socket beim Beenden mit,
+        # ein blosses start wuerde ihn nicht neu anlegen.
+        run uctl restart pulseaudio.socket pulseaudio.service
+        ;;
+    pw-tunnel)
+        # PulseAudio behaelt HAL und Pulse-Socket. PipeWire bekommt zusaetzlich
+        # einen Tunnel-Sink. Telefonie bleibt unberuehrt.
+        mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
+        unmask pulseaudio.service pulseaudio.socket
+        run sudo rm -f "$DROPIN"
+        run uctl daemon-reload
+        run uctl start pulseaudio.socket pulseaudio.service
+        run uctl enable --now furios-pw-tunnel.service
+        ;;
+    pw-hal)
+        # PipeWire uebernimmt den HAL. PulseAudio muss weichen (HAL ist exklusiv).
+        run uctl stop furios-pw-tunnel.service 2>/dev/null
+        run uctl disable furios-pw-tunnel.service 2>/dev/null
+        run uctl stop pulseaudio.service pulseaudio.socket
+        mask   pulseaudio.service pulseaudio.socket
+        unmask pipewire-pulse.service pipewire-pulse.socket wireplumber.service
+        run sudo mkdir -p "$ETCU/pipewire.service.d"
+        run sudo ln -sf "$LOCAL/pipewire-hal.conf.dropin" "$DROPIN"
+        run uctl daemon-reload
+        run uctl restart pipewire.service
+        run uctl start wireplumber.service pipewire-pulse.socket pipewire-pulse.service
+        ;;
+    esac
+}
+
+# --- Verifikation: gibt es einen brauchbaren Sink? --------------------------
+verify() {
+    local i=0
+    while [ $i -lt 15 ]; do
+        if pactl list sinks short 2>/dev/null | grep -q .; then return 0; fi
+        i=$((i+1)); sleep 1
+    done
+    return 1
+}
+
+switch_to() {
+    local p=$1 mode=$2 prev
+    prev=$(current_profile)
+    preflight "$p"
+    printf 'Wechsel: %s -> %s (%s)\n' "$prev" "$p" "$mode"
+    apply "$p"
+    [ "$DRY" = 1 ] && { echo "Trockenlauf beendet, nichts geaendert."; return 0; }
+
+    if verify; then
+        info "OK - Sink vorhanden: $(pactl list sinks short | awk '{print $2}' | paste -sd, -)"
+        info "Pulse-Server: $(pulse_owner)"
+        case "$mode" in
+        sticky) mkdir -p "$STATE_DIR"; printf '%s\n' "$p" > "$STICKY"; rm -f "$TRY"
+                info "persistent gesetzt (ueberlebt Neustart)" ;;
+        try)    mkdir -p "$STATE_DIR"; printf '%s\n' "$p" > "$TRY"
+                info "nur bis zum naechsten Neustart - danach wieder '$(cat "$STICKY" 2>/dev/null || echo standard)'" ;;
+        esac
+        [ "$p" != standard ] && info "Telefonie bitte pruefen: Anruf, Klingelton, Ohrmuschel/Lautsprecher."
+        return 0
+    fi
+
+    printf 'FEHLGESCHLAGEN - kein Sink nach 15s. Falle auf standard zurueck.\n' >&2
+    apply standard
+    rm -f "$TRY"
+    verify && info "standard wiederhergestellt." || info "ACHTUNG: auch standard liefert keinen Sink."
+    return 1
+}
+
+usage() {
+    cat <<EOF
+audioctl - Audiostack umschalten
+
+  audioctl status              aktuellen Zustand zeigen
+  audioctl list                Profile auflisten
+  audioctl try <profil>        umschalten, faellt beim Neustart zurueck
+  audioctl set <profil>        umschalten und persistent merken
+  audioctl revert              sofort zurueck auf standard
+  audioctl verify              pruefen, ob ein Sink da ist
+
+  --dry-run                    nur zeigen, was passieren wuerde
+
+Profile:
+  standard    FuriOS wie ausgeliefert: PulseAudio haelt den HAL, PipeWire nur Video
+  pw-tunnel   wie standard, plus PipeWire-Tunnel-Sink (Telefonie unberuehrt)
+  pw-hal      PipeWire haelt den HAL per SPA-Droid-Plugin (noch nicht gebaut)
+EOF
+}
+
+status() {
+    printf 'Profil (aktiv):     %s\n' "$(current_profile)"
+    printf 'Profil (persistent):%s\n' " $(cat "$STICKY" 2>/dev/null || echo standard)"
+    [ -r "$TRY" ] && printf 'Testmodus:          ja - faellt beim Neustart zurueck\n'
+    printf 'Pulse-Server:       %s\n' "$(pulse_owner)"
+    printf 'Sinks:              %s\n' "$(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, - || echo keine)"
+    printf '\nUnits:\n'
+    for u in pulseaudio.service pipewire.service pipewire-pulse.service wireplumber.service furios-pw-tunnel.service; do
+        printf '  %-28s %-10s %s\n' "$u" "$(uctl is-enabled "$u" 2>&1 | head -1)" "$(uctl is-active "$u" 2>&1 | head -1)"
+    done
+}
+
+args=(); for a in "$@"; do [ "$a" = --dry-run ] && DRY=1 || args+=("$a"); done
+set -- ${args+"${args[@]}"}
+case "${1:-status}" in
+    status) status ;;
+    list)   printf '%s\n' $PROFILES ;;
+    try)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" try ;;
+    set)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" sticky ;;
+    revert) switch_to standard sticky ;;
+    verify) verify && echo "OK - Sink vorhanden." || { echo "kein Sink." >&2; exit 1; } ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+esac

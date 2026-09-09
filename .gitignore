@@ -1,0 +1,11 @@
+# Build-Ausgaben
+poc/spa-droid/build/
+poc/spa-droid/generated/
+*.o
+*.so
+
+# Upstream-Quellen: eigener Klon, siehe README (nicht mitversionieren)
+src/pulseaudio-modules-droid-modern/
+
+# Erzeugte Konfiguration (entsteht aus der FuriOS-Vorlage)
+pipewire-hal.conf
