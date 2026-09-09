@@ -18,6 +18,11 @@ log = Log.open_topic ("s-monitors")
 -- geaendert hat - der HAL soll davon nichts merken.
 last_route = {}
 last_mode = nil
+last_volume = nil
+
+-- Lautstaerkeaenderungen kommen nicht als Param-Ereignis am Knoten an -
+-- sie laufen ueber WirePlumbers Mixer-API.
+mixer = nil
 
 function findNode (dev, card_profile_device)
   -- card.profile.device ist eine reine Knoteneigenschaft, keine globale -
@@ -50,9 +55,31 @@ function forwardProfile (dev)
           last_mode = mode
           log:info ("droid: Audiomodus " .. mode)
           setNodeProp (node, "droid.mode", mode)
+          -- Der HAL kennt den aktuellen Pegel noch nicht.
+          last_volume = nil
+          forwardVolume (node)
         end
       end
     end
+  end
+end
+
+-- Lautstaerke im Gespraech. Der Adapter regelt sie sonst in Software - im
+-- Anruf fliesst aber kein PCM durch den Graphen, der Pegel sitzt im HAL.
+function forwardVolume (node)
+  if last_mode ~= "call" or mixer == nil or node == nil then
+    return
+  end
+  local vol = mixer:call ("get-volume", node["bound-id"])
+  if vol == nil then
+    return
+  end
+
+  local v = string.format ("%.3f", vol.mute and 0.0 or vol.volume)
+  if last_volume ~= v then
+    last_volume = v
+    log:info ("droid: Sprachlautstaerke " .. v)
+    setNodeProp (node, "droid.voice-volume", v)
   end
 end
 
@@ -148,5 +175,25 @@ device:connect ("object-removed", function (parent, id)
 end)
 device:activate (Feature.SpaDevice.ENABLED | Feature.Proxy.BOUND)
 device_hook:register ()
+
+mixer = Plugin.find ("mixer-api")
+if mixer then
+  log:warning ("droid: mixer-api gefunden")
+  mixer:connect ("changed", function (m, id)
+    log:warning ("droid: mixer changed id=" .. tostring (id) .. " mode=" .. tostring (last_mode))
+    if last_mode ~= "call" then
+      return
+    end
+    local node = cutils.get_object_manager ("node"):lookup {
+      Constraint { "bound-id", "=", id, type = "gobject" }
+    }
+    if node and node.properties["device.api"] == "droid-hal" and
+       node.properties["media.class"] == "Audio/Sink" then
+      forwardVolume (node)
+    end
+  end)
+else
+  log:warning ("droid: mixer-api nicht verfuegbar - Lautstaerke im Anruf bleibt fest")
+end
 
 log:info ("droid: Device aktiviert")

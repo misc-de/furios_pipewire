@@ -165,6 +165,7 @@ usage() {
 audioctl - Audiostack umschalten
 
   audioctl status              aktuellen Zustand zeigen
+  audioctl toggle              Schalter: standard <-> pw-hal (im Testmodus)
   audioctl list                Profile auflisten
   audioctl try <profil>        umschalten, faellt beim Neustart zurueck
   audioctl set <profil>        umschalten und persistent merken
@@ -176,7 +177,8 @@ audioctl - Audiostack umschalten
 Profile:
   standard    FuriOS wie ausgeliefert: PulseAudio haelt den HAL, PipeWire nur Video
   pw-tunnel   wie standard, plus PipeWire-Tunnel-Sink (Telefonie unberuehrt)
-  pw-hal      PipeWire haelt den HAL per SPA-Droid-Plugin (noch nicht gebaut)
+  pw-hal      PipeWire haelt den HAL per SPA-Droid-Plugin (Wiedergabe, Aufnahme
+              und Telefonie am Geraet bestaetigt)
 EOF
 }
 
@@ -196,6 +198,13 @@ args=(); for a in "$@"; do [ "$a" = --dry-run ] && DRY=1 || args+=("$a"); done
 set -- ${args+"${args[@]}"}
 case "${1:-status}" in
     status) status ;;
+    # Schalter: bewusst im Testmodus, damit ein Neustart immer zum
+    # Auslieferungszustand zurueckfuehrt.
+    toggle) if [ "$(current_profile)" = pw-hal ]; then
+                switch_to standard sticky
+            else
+                switch_to pw-hal try
+            fi ;;
     list)   printf '%s\n' $PROFILES ;;
     try)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" try ;;
     set)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" sticky ;;

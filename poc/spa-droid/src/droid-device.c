@@ -9,6 +9,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <spa/support/plugin.h>
@@ -70,6 +71,8 @@ struct impl {
 	struct spa_handle handle;
 	struct spa_device device;
 
+	bool diag;                 /* ausfuehrliche Diagnose (SPA_DROID_DIAG=1) */
+
 	struct spa_log *log;
 	struct spa_hook_list hooks;
 
@@ -87,6 +90,16 @@ struct impl {
 	bool profile_save;         /* war es eine bewusste Auswahl? */
 	bool nodes_emitted;
 };
+
+/* Wie im Knoten: standardmaessig auf info (unter dem Standard-Loglevel
+ * unsichtbar), mit SPA_DROID_DIAG=1 auf warn. */
+#define DIAG(this, fmt, ...)						\
+	do {								\
+		if ((this)->diag)					\
+			spa_log_warn((this)->log, NAME " " fmt, ##__VA_ARGS__); \
+		else							\
+			spa_log_info((this)->log, NAME " " fmt, ##__VA_ARGS__); \
+	} while (0)
 
 static const char *default_config_file(void)
 {
@@ -490,7 +503,7 @@ static int set_profile(struct impl *this, uint32_t index, bool save)
 	/* Die Knoten bleiben ueber den Profilwechsel hinweg bestehen - im Anruf
 	 * wird derselbe HAL-Stream benutzt, nur im Modus AUDIO_MODE_IN_CALL. */
 	emit_nodes(this, index != PROFILE_OFF);
-	spa_log_warn(this->log, NAME " Profil: %s",
+	DIAG(this, "Profil: %s",
 			index == PROFILE_VOICECALL ? VOICECALL_NAME :
 			index == PROFILE_DEFAULT ? "default" : "off");
 	params_changed(this, SPA_PARAM_Profile);
@@ -514,7 +527,7 @@ static int set_route(struct impl *this, uint32_t index, uint32_t device)
 		spa_log_warn(this->log, NAME " Route \"%s\" nicht angewandt: %s",
 				r->pa_name, spa_strerror(res));
 	else
-		spa_log_warn(this->log, NAME " Route: %s -> %s", r->pa_name, r->port->name);
+		DIAG(this, "Route: %s -> %s", r->pa_name, r->port->name);
 
 	params_changed(this, SPA_PARAM_Route);
 	return 0;
@@ -643,6 +656,10 @@ static int impl_init(const struct spa_handle_factory *factory,
 
 	this = (struct impl *) handle;
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
+	{
+		const char *env = getenv("SPA_DROID_DIAG");
+		this->diag = env && spa_atob(env);
+	}
 
 	spa_hook_list_init(&this->hooks);
 	this->device.iface = SPA_INTERFACE_INIT(

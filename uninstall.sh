@@ -10,6 +10,15 @@ sudo rm -f /usr/local/bin/audioctl \
 sudo rm -rf /usr/local/share/furios-audio /var/lib/furios-audio
 sudo rm -rf /usr/lib/aarch64-linux-gnu/spa-0.2/droid
 sudo rmdir /etc/systemd/user/pipewire.service.d 2>/dev/null || true
+# WirePlumber-Monitor und Bluetooth-Konfiguration
+sudo rm -f /usr/local/share/wireplumber/scripts/monitors/droid.lua \
+           /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf \
+           /usr/local/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf
+sudo rmdir --ignore-fail-on-non-empty \
+    /usr/local/share/wireplumber/scripts/monitors \
+    /usr/local/share/wireplumber/scripts \
+    /usr/local/share/wireplumber/wireplumber.conf.d \
+    /usr/local/share/wireplumber 2>/dev/null || true
 # FuriOS-Masken wiederherstellen
 for u in pipewire-pulse.service pipewire-pulse.socket wireplumber.service; do sudo ln -sf /dev/null "/etc/systemd/user/$u"; done
 for u in pulseaudio.service pulseaudio.socket; do

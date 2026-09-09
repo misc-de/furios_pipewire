@@ -120,6 +120,7 @@ struct impl {
 	char audio_source[32];      /* Android-Audioquelle, z. B. "mic" */
 	char wanted_port[64];       /* vom Device gewuenschte Route */
 	bool mode_holds_hal;        /* HAL nur wegen Anrufmodus offen */
+	bool in_call;               /* Modus ist AUDIO_MODE_IN_CALL */
 
 	/* Uebergabe an den Schreib-Thread */
 	struct spa_ringbuffer ring;
@@ -166,6 +167,7 @@ struct impl {
 
 static int apply_route(struct impl *this, const char *route);
 static int apply_mode(struct impl *this, const char *mode);
+static int apply_voice_volume(struct impl *this, const char *value);
 
 /* ------------------------------------------------------------------ HAL */
 
@@ -741,6 +743,10 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	return 0;
 }
 
+/* Kanalpositionen gehoeren NICHT hierher: eine Kanalspanne und feste
+ * Positionen schliessen sich im selben Format-Objekt aus, und mit zwei festen
+ * Varianten handelte der Adapter prompt Mono aus. Die Zuordnung liefert die
+ * Knoteneigenschaft audio.position (FL,FR), die das Device mitgibt. */
 static int port_enum_formats(struct impl *this, struct spa_pod_builder *b,
 		uint32_t index, struct spa_pod **param)
 {
@@ -1092,6 +1098,8 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 				apply_route(this, val);
 			else if (spa_streq(key, "droid.mode"))
 				apply_mode(this, val);
+			else if (spa_streq(key, "droid.voice-volume"))
+				apply_voice_volume(this, val);
 		}
 		spa_pod_parser_pop(&prs, &f);
 	}
@@ -1326,8 +1334,47 @@ static int apply_route(struct impl *this, const char *route)
 	if (res < 0)
 		spa_log_warn(this->log, NAME " Route \"%s\" fehlgeschlagen: %d", dev->name, res);
 	else
-		spa_log_warn(this->log, NAME " Route gewechselt: %s -> %s", route, dev->name);
+		DIAG(this, "Route gewechselt: %s -> %s", route, dev->name);
 	return res;
+}
+
+/* Lautstaerke im Gespraech. Im Anruf fliesst kein PCM durch den Graphen - die
+ * Software-Verstaerkung des Adapters greift also ins Leere. Der Pegel des
+ * Sprachpfads sitzt im HAL und wird ueber set_voice_volume gesetzt; PulseAudios
+ * droid-sink macht im Anrufprofil dasselbe. */
+static int apply_voice_volume(struct impl *this, const char *value)
+{
+	float vol;
+
+	if (this->capture || !this->hw)
+		return 0;
+	if (!this->in_call)
+		return 0;   /* ausserhalb des Anrufs macht der HAL nichts damit */
+
+	/* NICHT atof(): das liest den Punkt in einer Lokalisierung mit Komma als
+	 * Dezimaltrennzeichen nicht - aus "0.343" wurde 0,00 und der Sprachpegel
+	 * fiel auf null. spa_atof schaltet dafuer intern auf die C-Lokalisierung. */
+	if (!spa_atof(value, &vol)) {
+		spa_log_warn(this->log, NAME " Sprachlautstaerke \"%s\" nicht lesbar", value);
+		return -EINVAL;
+	}
+	if (vol < 0.0f)
+		vol = 0.0f;
+	else if (vol > 1.0f)
+		vol = 1.0f;
+
+	pa_droid_hw_module_lock(this->hw);
+	if (this->hw->device->set_voice_volume) {
+		int r = this->hw->device->set_voice_volume(this->hw->device, vol);
+		if (r < 0)
+			spa_log_warn(this->log, NAME " Sprachlautstaerke %.2f abgelehnt (%d)", vol, r);
+		else
+			DIAG(this, "Sprachlautstaerke: %.2f", vol);
+	} else {
+		spa_log_warn(this->log, NAME " HAL bietet kein set_voice_volume");
+	}
+	pa_droid_hw_module_unlock(this->hw);
+	return 0;
 }
 
 /* Anrufmodus. Der Modus gehoert dem HAL-Modul, nicht dem Stream - aber
@@ -1369,7 +1416,8 @@ static int apply_mode(struct impl *this, const char *mode)
 		spa_log_warn(this->log, NAME " Audiomodus \"%s\" abgelehnt", mode);
 		return -EIO;
 	}
-	spa_log_warn(this->log, NAME " Audiomodus: %s", mode);
+	this->in_call = m == AUDIO_MODE_IN_CALL;
+	DIAG(this, "Audiomodus: %s", mode);
 
 	/* Der HAL routet beim Eintritt in den Anruf selbst auf die Ohrmuschel.
 	 * Die Karte weiss davon nichts und glaubt weiter an ihre Route - ein
