@@ -34,13 +34,24 @@
 
 #define NAME "droid-device"
 
+/* Genau die Kennung, die PulseAudios droid-Modul setzt (PROP_DROID_API_STRING).
+ * callaudiod erkennt eine Android-HAL-Karte allein daran und schaltet nur dann
+ * zwischen "default" und "voicecall" um - mit "droid" faellt es auf den
+ * UCM-Weg zurueck und tut nichts. */
+#define DROID_API_NAME  "droid-hal"
+
 #define MAX_ROUTES  16
 #define DEV_SINK    0
 #define DEV_SOURCE  1
 #define N_DEVICES   2
 
-#define PROFILE_OFF     0
-#define PROFILE_DEFAULT 1
+#define PROFILE_OFF       0
+#define PROFILE_DEFAULT   1
+#define PROFILE_VOICECALL 2
+
+/* Der Name ist nicht frei waehlbar: callaudiod sucht im Kartenprofil nach
+ * genau diesem Namen ("card has voice profile, using it"). */
+#define VOICECALL_NAME  "voicecall"
 
 /* aus droid-pcm.c */
 int droid_node_set_route(const char *mix_port, const char *device_port);
@@ -73,6 +84,7 @@ struct impl {
 	uint32_t active[N_DEVICES];   /* Index in routes[], SPA_ID_INVALID = keiner */
 
 	uint32_t profile;
+	bool profile_save;         /* war es eine bewusste Auswahl? */
 	bool nodes_emitted;
 };
 
@@ -92,20 +104,21 @@ static const char *mix_port_of(uint32_t device)
  * die es im Anruf geht; Kabelzubehoer schlaegt sie, wenn es steckt. */
 static uint32_t route_priority(audio_devices_t type)
 {
+	/* Dieselben Werte, die PulseAudios droid-card vergibt. */
 	switch (type) {
 	case AUDIO_DEVICE_OUT_SPEAKER:
-	case AUDIO_DEVICE_IN_BUILTIN_MIC:
-		return 100;
+		return 300;
 	case AUDIO_DEVICE_OUT_EARPIECE:
-		return 90;
-	/* Ohne Klinkenerkennung darf Kabelzubehoer nicht vorne stehen - sonst
-	 * waehlt WirePlumbers Routenpolitik ein Headset, das gar nicht steckt. */
+	case AUDIO_DEVICE_IN_BUILTIN_MIC:
+	case AUDIO_DEVICE_IN_BACK_MIC:
+	case AUDIO_DEVICE_IN_VOICE_CALL:
+		return 200;
 	case AUDIO_DEVICE_OUT_WIRED_HEADSET:
 	case AUDIO_DEVICE_OUT_WIRED_HEADPHONE:
 	case AUDIO_DEVICE_IN_WIRED_HEADSET:
-		return 60;
+		return 100;
 	default:
-		return 10;
+		return 50;
 	}
 }
 
@@ -139,9 +152,23 @@ static void collect_routes(struct impl *this)
 		r->dir = output ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 		r->device = output ? DEV_SINK : DEV_SOURCE;
 		r->priority = route_priority(port->type);
-		/* Eingebautes ist immer da; ob ein Kabel steckt, wissen wir nicht. */
-		r->available = r->priority >= 90
-			? SPA_PARAM_AVAILABILITY_yes : SPA_PARAM_AVAILABILITY_unknown;
+		/* Kabelzubehoer gilt als nicht angeschlossen. Das ist keine Willkuer,
+		 * sondern was PulseAudio auf diesem Geraet ebenfalls meldet - eine
+		 * Klinkenerkennung gibt es hier nicht (in /sys/class/extcon steht nur
+		 * USB). Und es ist wichtig: callaudiod nimmt bei Droid-Karten sofort
+		 * das Headset, sobald es nicht als "nicht verfuegbar" markiert ist -
+		 * im Anruf landete der Ton dann statt auf der Ohrmuschel im
+		 * Nirgendwo. */
+		switch (port->type) {
+		case AUDIO_DEVICE_OUT_WIRED_HEADSET:
+		case AUDIO_DEVICE_OUT_WIRED_HEADPHONE:
+		case AUDIO_DEVICE_IN_WIRED_HEADSET:
+			r->available = SPA_PARAM_AVAILABILITY_no;
+			break;
+		default:
+			r->available = SPA_PARAM_AVAILABILITY_yes;
+			break;
+		}
 		snprintf(r->description, sizeof(r->description), "%s", port->name);
 	}
 }
@@ -165,7 +192,7 @@ static uint32_t default_route(struct impl *this, uint32_t device)
 }
 
 static int build_profile(struct impl *this, struct spa_pod_builder *b,
-		uint32_t id, uint32_t index, struct spa_pod **param)
+		uint32_t id, uint32_t index, bool current, struct spa_pod **param)
 {
 	struct spa_pod_frame f[4];
 	const char *name, *desc;
@@ -177,6 +204,11 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 		break;
 	case PROFILE_DEFAULT:
 		name = "default"; desc = "Wiedergabe und Aufnahme"; prio = 100;
+		break;
+	case PROFILE_VOICECALL:
+		/* Niedrigere Prioritaet als default - dieses Profil waehlt
+		 * callaudiod im Anruf, nicht die Routenpolitik von selbst. */
+		name = VOICECALL_NAME; desc = "Anruf"; prio = 50;
 		break;
 	default:
 		return 0;
@@ -191,7 +223,7 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 		SPA_PARAM_PROFILE_available,   SPA_POD_Id(SPA_PARAM_AVAILABILITY_yes),
 		0);
 
-	if (index == PROFILE_DEFAULT) {
+	if (index != PROFILE_OFF) {
 		spa_pod_builder_prop(b, SPA_PARAM_PROFILE_classes, 0);
 		spa_pod_builder_push_struct(b, &f[1]);
 		spa_pod_builder_int(b, 2);
@@ -216,6 +248,12 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 
 		spa_pod_builder_pop(b, &f[1]);
 	}
+
+	/* Ohne save-Kennzeichnung haelt WirePlumber die Auswahl fuer eine
+	 * beilaeufige Aenderung und legt sie nicht in den Profilzustand. */
+	if (current)
+		spa_pod_builder_add(b, SPA_PARAM_PROFILE_save,
+				SPA_POD_Bool(this->profile_save), 0);
 
 	*param = spa_pod_builder_pop(b, &f[0]);
 	return 1;
@@ -254,9 +292,12 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 		spa_pod_builder_pop(b, &pf);
 	}
 
+	/* Routen gelten in beiden Betriebsprofilen - im Anruf ist die Wahl
+	 * zwischen Ohrmuschel und Lautsprecher gerade der Kern der Sache. */
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profiles, 0);
 	spa_pod_builder_push_array(b, &f);
 	spa_pod_builder_int(b, PROFILE_DEFAULT);
+	spa_pod_builder_int(b, PROFILE_VOICECALL);
 	spa_pod_builder_pop(b, &f);
 
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_devices, 0);
@@ -286,7 +327,8 @@ static void emit_node(struct impl *this, uint32_t device)
 	items[n++] = SPA_DICT_ITEM_INIT("node.description",
 			sink ? "Android HAL (Wiedergabe)" : "Android HAL (Aufnahme)");
 	items[n++] = SPA_DICT_ITEM_INIT("media.class", sink ? "Audio/Sink" : "Audio/Source");
-	items[n++] = SPA_DICT_ITEM_INIT("device.api", "droid");
+	items[n++] = SPA_DICT_ITEM_INIT("device.api", DROID_API_NAME);
+	items[n++] = SPA_DICT_ITEM_INIT("device.class", "sound");
 	items[n++] = SPA_DICT_ITEM_INIT("droid.mix-port", mix_port_of(device));
 	items[n++] = SPA_DICT_ITEM_INIT("card.profile.device", dev_str);
 	items[n++] = SPA_DICT_ITEM_INIT("device.routes", routes_str);
@@ -328,10 +370,11 @@ static void emit_nodes(struct impl *this, bool present)
 static void emit_info(struct impl *this, bool full)
 {
 	uint64_t old = full ? this->info.change_mask : 0;
-	struct spa_dict_item items[6];
+	struct spa_dict_item items[8];
 	uint32_t n = 0;
 
-	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, "droid");
+	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_API, DROID_API_NAME);
+	items[n++] = SPA_DICT_ITEM_INIT("device.class", "sound");
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, "droid");
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, "Android HAL");
@@ -372,14 +415,14 @@ next:
 
 	switch (id) {
 	case SPA_PARAM_EnumProfile:
-		if ((res = build_profile(this, &b, id, result.index,
+		if ((res = build_profile(this, &b, id, result.index, false,
 						(struct spa_pod **) &result.param)) <= 0)
 			return res;
 		break;
 	case SPA_PARAM_Profile:
 		if (result.index > 0)
 			return 0;
-		if ((res = build_profile(this, &b, id, this->profile,
+		if ((res = build_profile(this, &b, id, this->profile, true,
 						(struct spa_pod **) &result.param)) <= 0)
 			return res;
 		break;
@@ -435,16 +478,20 @@ static void params_changed(struct impl *this, uint32_t id)
 	emit_info(this, false);
 }
 
-static int set_profile(struct impl *this, uint32_t index)
+static int set_profile(struct impl *this, uint32_t index, bool save)
 {
-	if (index > PROFILE_DEFAULT)
+	this->profile_save = save;
+	if (index > PROFILE_VOICECALL)
 		return -EINVAL;
 	if (index == this->profile)
 		return 0;
 
 	this->profile = index;
-	emit_nodes(this, index == PROFILE_DEFAULT);
+	/* Die Knoten bleiben ueber den Profilwechsel hinweg bestehen - im Anruf
+	 * wird derselbe HAL-Stream benutzt, nur im Modus AUDIO_MODE_IN_CALL. */
+	emit_nodes(this, index != PROFILE_OFF);
 	spa_log_warn(this->log, NAME " Profil: %s",
+			index == PROFILE_VOICECALL ? VOICECALL_NAME :
 			index == PROFILE_DEFAULT ? "default" : "off");
 	params_changed(this, SPA_PARAM_Profile);
 	return 0;
@@ -484,12 +531,14 @@ static int impl_set_param(void *object, uint32_t id, uint32_t flags,
 	case SPA_PARAM_Profile:
 	{
 		uint32_t index;
+		bool save = false;
 		if (param == NULL)
 			return -EINVAL;
 		if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamProfile, NULL,
-					SPA_PARAM_PROFILE_index, SPA_POD_Int(&index)) < 0)
+					SPA_PARAM_PROFILE_index, SPA_POD_Int(&index),
+					SPA_PARAM_PROFILE_save, SPA_POD_OPT_Bool(&save)) < 0)
 			return -EINVAL;
-		return set_profile(this, index);
+		return set_profile(this, index, save);
 	}
 	case SPA_PARAM_Route:
 	{

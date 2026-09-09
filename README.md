@@ -31,10 +31,31 @@ Nach einem Wechsel wirklich etwas abspielen.
 
 Wiedergabe und Aufnahme ueber PipeWire -> `libspa-droid` -> Android-HAL
 funktionieren, ebenso das Umschalten zwischen Lautsprecher, Ohrmuschel und
-Headset. `callaudiod` erkennt die Karte und steuert sie (Sink, Source und
-Ports). **Telefonie ist damit noch nicht fertig**: es fehlen ein
-`voicecall`-Profil, `AUDIO_MODE_IN_CALL` (`pa_droid_hw_set_mode`) und der
-Sprachpfad selbst.
+Headset. Die Steuerkette der Telefonie ist vollstaendig:
+
+| callaudiod            | Karte              | HAL                       |
+|-----------------------|--------------------|---------------------------|
+| `SelectMode(1)`       | Profil `voicecall` | `AUDIO_MODE_IN_CALL`      |
+| `EnableSpeaker(false)`| `output-earpiece`  | Route `Earpiece`          |
+| `EnableSpeaker(true)` | `output-speaker`   | Route `Speaker`           |
+| `SelectMode(0)`       | Profil `default`   | `AUDIO_MODE_NORMAL`       |
+
+**Ungetestet ist der Sprachpfad selbst** - ob im echten Anruf beide Seiten
+einander hoeren, kann nur ein Anruf zeigen.
+
+Damit callaudiod das tut, muss dreierlei stimmen, und jedes davon hat gekostet:
+
+- Der Sink muss `device.api = "droid-hal"` melden (die Kennung von
+  PulseAudios droid-Modul). Nur dann nimmt callaudiod seinen Droid-Pfad und
+  schaltet zwischen `default` und `voicecall`; mit `droid` faellt es auf den
+  ALSA-UCM-Weg zurueck, sucht Profile mit Praefix `HiFi`/`Voice Call` und tut
+  nichts ("set_card_profile: nothing to be done").
+- Die Profile muessen genau `default` und `voicecall` heissen.
+- Kabelports muessen als **nicht verfuegbar** gemeldet werden. Bei
+  Droid-Karten waehlt callaudiod sonst sofort das Headset - im Anruf landete
+  der Ton statt auf der Ohrmuschel im Nirgendwo. PulseAudio meldet sie auf
+  diesem Geraet ebenfalls als nicht verfuegbar; eine Klinkenerkennung gibt es
+  hier nicht (in `/sys/class/extcon` steht nur USB).
 
 ## Bauen
 

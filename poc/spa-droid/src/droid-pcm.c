@@ -119,6 +119,7 @@ struct impl {
 	char input_port_name[64];   /* leer = ueber den Geraetetyp suchen */
 	char audio_source[32];      /* Android-Audioquelle, z. B. "mic" */
 	char wanted_port[64];       /* vom Device gewuenschte Route */
+	bool mode_holds_hal;        /* HAL nur wegen Anrufmodus offen */
 
 	/* Uebergabe an den Schreib-Thread */
 	struct spa_ringbuffer ring;
@@ -164,6 +165,7 @@ struct impl {
 	} while (0)
 
 static int apply_route(struct impl *this, const char *route);
+static int apply_mode(struct impl *this, const char *mode);
 
 /* ------------------------------------------------------------------ HAL */
 
@@ -615,7 +617,9 @@ static void emit_node_info(struct impl *this, bool full)
 	struct spa_dict_item items[3];
 	uint32_t n = 0;
 
-	items[n++] = SPA_DICT_ITEM_INIT("device.api", "droid");
+	/* "droid-hal" ist die Kennung von PulseAudios droid-Modul. callaudiod
+	 * erkennt eine Android-Karte allein daran. */
+	items[n++] = SPA_DICT_ITEM_INIT("device.api", "droid-hal");
 	items[n++] = SPA_DICT_ITEM_INIT("media.class",
 			this->capture ? "Audio/Source" : "Audio/Sink");
 	items[n++] = SPA_DICT_ITEM_INIT("droid.mix-port", this->mix_port_name);
@@ -719,11 +723,17 @@ static int impl_send_command(void *object, const struct spa_command *command)
 		break;
 	case SPA_NODE_COMMAND_Suspend:
 		/* Suspend gibt die Hardware frei - erst dadurch kann PulseAudio das
-		 * PCM-Geraet wieder bekommen, wenn der Sink nur untaetig herumsteht. */
+		 * PCM-Geraet wieder bekommen, wenn der Sink nur untaetig herumsteht.
+		 * Im Anruf bleibt sie offen: dort laeuft der Sprachpfad ueber Modem
+		 * und DSP, ohne dass ein PipeWire-Strom spielt. */
 		timer_stop(this);
 		writer_stop(this, true);
-		hal_close(this);
-		spa_log_info(this->log, NAME " angehalten, HAL freigegeben");
+		if (this->mode_holds_hal) {
+			spa_log_info(this->log, NAME " angehalten, HAL bleibt fuer den Anruf offen");
+		} else {
+			hal_close(this);
+			spa_log_info(this->log, NAME " angehalten, HAL freigegeben");
+		}
 		break;
 	default:
 		return -ENOTSUP;
@@ -1080,6 +1090,8 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 				break;
 			if (spa_streq(key, "droid.route"))
 				apply_route(this, val);
+			else if (spa_streq(key, "droid.mode"))
+				apply_mode(this, val);
 		}
 		spa_pod_parser_pop(&prs, &f);
 	}
@@ -1316,6 +1328,68 @@ static int apply_route(struct impl *this, const char *route)
 	else
 		spa_log_warn(this->log, NAME " Route gewechselt: %s -> %s", route, dev->name);
 	return res;
+}
+
+/* Anrufmodus. Der Modus gehoert dem HAL-Modul, nicht dem Stream - aber
+ * pa_droid_hw_set_mode braucht den primaeren Ausgangsstream, um beim Wechsel
+ * nach AUDIO_MODE_IN_CALL erst auf Lautsprecher und dann auf Ohrmuschel zu
+ * routen (manche Geraete starten den Anruf sonst falsch). Deshalb wird der
+ * HAL hier notfalls eigens geoeffnet - PulseAudio macht dasselbe mit einem
+ * virtuellen Stream (voice_virtual_stream). */
+static int apply_mode(struct impl *this, const char *mode)
+{
+	audio_mode_t m;
+	int res;
+
+	/* Nur der Wiedergabeknoten: er haelt den primaeren Ausgang. */
+	if (this->capture)
+		return 0;
+
+	if (spa_streq(mode, "call"))
+		m = AUDIO_MODE_IN_CALL;
+	else if (spa_streq(mode, "communication"))
+		m = AUDIO_MODE_IN_COMMUNICATION;
+	else if (spa_streq(mode, "ringtone"))
+		m = AUDIO_MODE_RINGTONE;
+	else
+		m = AUDIO_MODE_NORMAL;
+
+	if (m != AUDIO_MODE_NORMAL) {
+		if ((res = hal_open(this)) < 0) {
+			spa_log_warn(this->log, NAME " Anrufmodus: HAL liess sich nicht oeffnen");
+			return res;
+		}
+		this->mode_holds_hal = true;
+	}
+
+	if (!this->hw)
+		return 0;   /* nichts offen, nichts zu tun */
+
+	if (!pa_droid_hw_set_mode(this->hw, m)) {
+		spa_log_warn(this->log, NAME " Audiomodus \"%s\" abgelehnt", mode);
+		return -EIO;
+	}
+	spa_log_warn(this->log, NAME " Audiomodus: %s", mode);
+
+	/* Der HAL routet beim Eintritt in den Anruf selbst auf die Ohrmuschel.
+	 * Die Karte weiss davon nichts und glaubt weiter an ihre Route - ein
+	 * spaeteres Umschalten auf genau diese Route waere dann ein No-Op, und
+	 * HAL und Karte blieben dauerhaft uneins. Deshalb die zuletzt vom Device
+	 * gewuenschte Route neu setzen. */
+	if (this->wanted_port[0] && this->stream) {
+		dm_config_port *dev = dm_config_find_port(this->hw->enabled_module,
+				this->wanted_port);
+		if (dev)
+			pa_droid_stream_set_route(this->stream, dev);
+	}
+
+	/* Anruf vorbei und nichts zu spielen: Hardware wieder freigeben. */
+	if (m == AUDIO_MODE_NORMAL && this->mode_holds_hal) {
+		this->mode_holds_hal = false;
+		if (!this->started)
+			hal_close(this);
+	}
+	return 0;
 }
 
 /* Vom Device gerufen: Route auf einen benannten devicePort umstellen. Ist der

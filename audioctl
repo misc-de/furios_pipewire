@@ -117,6 +117,15 @@ verify() {
     return 1
 }
 
+# callaudiod haelt eine dauerhafte Verbindung zum Audioserver. Beim
+# Profilwechsel wechselt der Server - danach findet es keine Karte mehr
+# ("No suitable card found") und die Telefonie waere stumm geschaltet.
+# Beenden genuegt: D-Bus startet es beim naechsten Aufruf neu.
+restart_callaudiod() {
+    pkill -x callaudiod 2>/dev/null && info "callaudiod neu gestartet (D-Bus aktiviert es bei Bedarf)"
+    return 0
+}
+
 switch_to() {
     local p=$1 mode=$2 prev
     prev=$(current_profile)
@@ -124,6 +133,8 @@ switch_to() {
     printf 'Wechsel: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"
     [ "$DRY" = 1 ] && { echo "Trockenlauf beendet, nichts geaendert."; return 0; }
+
+    restart_callaudiod
 
     if verify; then
         info "OK - Sink vorhanden: $(pactl list sinks short | awk '{print $2}' | paste -sd, -)"
