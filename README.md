@@ -27,6 +27,12 @@ dem Wechsel ein Sink, schaltet audioctl von selbst auf `standard` zurueck.
 **`audioctl verify` prueft nur, ob ein Sink existiert - nicht, ob Ton fliesst.**
 Nach einem Wechsel wirklich etwas abspielen.
 
+Beim Wechsel beendet audioctl ausserdem `callaudiod` und `feedbackd`. Beide
+halten dauerhafte Verbindungen zum Audioserver und ueberleben einen
+Serverwechsel nicht: callaudiod findet danach keine Karte mehr, feedbackd
+scheitert an "Invalid state" - der Klingelton bleibt aus und nur die
+Vibration kommt noch. D-Bus startet beide bei Bedarf neu.
+
 ## Stand
 
 Wiedergabe und Aufnahme ueber PipeWire -> `libspa-droid` -> Android-HAL
@@ -40,8 +46,15 @@ Headset. Die Steuerkette der Telefonie ist vollstaendig:
 | `EnableSpeaker(true)` | `output-speaker`   | Route `Speaker`           |
 | `SelectMode(0)`       | Profil `default`   | `AUDIO_MODE_NORMAL`       |
 
-**Ungetestet ist der Sprachpfad selbst** - ob im echten Anruf beide Seiten
-einander hoeren, kann nur ein Anruf zeigen.
+**Am Geraet bestaetigt (2026-09-09)**: echtes Telefonat im Profil `pw-hal` -
+Klingelton hoerbar, beide Seiten hoeren einander, Lautsprecher-Taste schaltet
+hoerbar um, Medienwiedergabe danach unveraendert. Der Journalauszug dazu:
+
+    19:25:25  gnome-calls startet callaudiod
+    19:25:29  Profil voicecall -> AUDIO_MODE_IN_CALL -> Route Earpiece am HAL
+    19:25:41  Lautsprecher-Taste -> Route Speaker am HAL
+    19:25:48  wieder Ohrmuschel  -> Route Earpiece am HAL
+    19:25:50  Auflegen -> Profil default -> AUDIO_MODE_NORMAL
 
 Damit callaudiod das tut, muss dreierlei stimmen, und jedes davon hat gekostet:
 
