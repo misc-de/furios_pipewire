@@ -150,13 +150,24 @@ Damit PipeWire Bluetooth-Audio kann, muss `libspa-0.2-bluetooth` installiert
 sein - ohne das Paket gibt es gar keine BT-Unterstuetzung, WirePlumber meldet
 nur "BlueZ SPA plugin is missing or broken".
 
-Fuers Freisprechen (HFP) ist **`native` der richtige Backend**, nicht `ofono`
-(siehe `wireplumber/51-bluez-ofono.conf`): ofono hat auf diesem Geraet kein
-`org.ofono.Handsfree`-Interface und meldet unter `HandsfreeAudioManager` auch
-bei verbundenem Kopfhoerer keine Karten. Mit dem ofono-Backend bietet die
-Bluetooth-Karte deshalb ausschliesslich A2DP-Profile - telefonieren ueber den
-Kopfhoerer ist unmoeglich, die Ein- und Ausgaenge dafuer existieren nicht
-einmal.
+**A2DP (Musik) funktioniert. Freisprechen (HFP) nicht - und zwar auf keinem
+Stack, auch nicht im Auslieferungszustand.** Nachgemessen:
+
+- ofono besitzt HFP: `hfp_ag_bluez5` ist fest eingebaut, `/bluetooth/profile/hfp_ag`
+  ist bei BlueZ registriert. PipeWires nativer Backend scheitert daneben an
+  `listen(): Address already in use` und `RegisterProfile() failed: NotPermitted`.
+- ofono legt fuer den verbundenen Kopfhoerer trotzdem keine Karte an
+  (`HandsfreeAudioManager.GetCards` bleibt leer).
+- Auf dem Auslieferungs-PulseAudio ist das Ergebnis dasselbe: `handsfree_head_unit`
+  laesst sich waehlen, die Quelle geht auf `RUNNING` und liefert **0 Bytes**;
+  `paplay` in die Gegenrichtung blockiert.
+- Die HAL-Konfiguration kennt BT-SCO-Geraeteports, aber weder unsere Karte noch
+  die von PulseAudio fuehren sie: auf Android-Geraeten laeuft SCO in Hardware
+  zwischen BT-Chip und Audio-DSP, nicht ueber den Rechner.
+
+Deshalb bleibt es beim **ofono-Backend**: mit `native` erscheinen HFP-Profile,
+die stumm bleiben, und WirePlumber schaltet beim ersten Aufnahmeversuch dorthin
+um - was auch die Musikwiedergabe verdirbt.
 
 **`priority.session` muss am Knoten gesetzt sein.** Fehlt sie, faellt
 WirePlumbers Geraetewahl auf `priority.driver` zurueck - und der ist hier
