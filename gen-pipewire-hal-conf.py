@@ -3,7 +3,7 @@
 
 Statt einer Kopie werden nur zwei Dinge eingefuegt:
   1. api.droid.* -> unser SPA-Plugin in context.spa-libs
-  2. ein Sink-Knoten in context.objects
+  2. je ein Sink- und ein Source-Knoten in context.objects
 
 Damit wandern spaetere FuriOS-Aenderungen an pipewire-droid.conf mit,
 sobald man dieses Skript erneut laufen laesst.
@@ -27,6 +27,25 @@ NODE = """    { factory = adapter
             priority.session    = 1000
         }
     }
+    { factory = adapter
+        args = {
+            factory.name        = api.droid.pcm.source
+            node.name           = droid-source
+            node.description    = "Android HAL (Aufnahme)"
+            media.class         = "Audio/Source"
+            droid.mix-port      = "primary input"
+            audio.format        = "S16LE"
+            audio.rate          = 48000
+            audio.channels      = 2
+            audio.position      = "FL,FR"
+            # Auch die Aufnahme taktet ihren Graphen selbst, aber mit
+            # niedrigerer Prioritaet: sind Sink und Source verbunden,
+            # soll die Wiedergabe den Takt vorgeben.
+            node.driver         = true
+            priority.driver     = 20000
+            priority.session    = 1000
+        }
+    }
 """
 
 
@@ -47,7 +66,7 @@ def main():
                 + "    api.droid.*     = droid/libspa-droid\n"
                 + text[insert:])
 
-    # 2) Sink-Knoten anhaengen
+    # 2) Sink- und Source-Knoten anhaengen
     m = re.search(r"^context\.objects\s*=\s*\[\s*$", text, re.M)
     if not m:
         print("FEHLER: context.objects nicht gefunden", file=sys.stderr)

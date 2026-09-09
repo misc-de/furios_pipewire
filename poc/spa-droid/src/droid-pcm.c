@@ -1,10 +1,18 @@
-/* SPA-Node: Wiedergabe ueber den Android-Audio-HAL.
+/* SPA-Node: Wiedergabe und Aufnahme ueber den Android-Audio-HAL.
  *
  * Der HAL-Write blockiert, bis die Daten abgenommen sind. Er darf deshalb
  * nicht im Datenthread des Graphen laufen. Aufbau daher:
  *
  *   process()        -> schreibt in einen Ringpuffer  (Graph-Thread)
  *   writer_thread()  -> liest daraus, ruft pa_droid_stream_write (eigener Thread)
+ *
+ * Aufnahme ist dasselbe rueckwaerts:
+ *
+ *   reader_thread()  -> pa_droid_stream_read, legt in den Ringpuffer
+ *   process()        -> holt daraus, reicht den Puffer an den Graphen
+ *
+ * Beide Richtungen teilen sich diesen Code; welche es ist, entscheidet die
+ * benutzte Factory (api.droid.pcm bzw. api.droid.pcm.source).
  */
 
 #include <errno.h>
@@ -79,6 +87,10 @@ struct impl {
 	struct spa_node_info info;
 	struct spa_param_info params[2];
 
+	/* Richtung: Wiedergabe hat einen Eingangsport, Aufnahme einen Ausgang. */
+	bool capture;
+	enum spa_direction dir;
+
 	struct port port;
 
 	/* HAL */
@@ -87,6 +99,8 @@ struct impl {
 	pa_droid_hw_module *hw;
 	pa_droid_stream *stream;
 	char mix_port_name[64];
+	audio_devices_t input_device;
+	char input_port_name[64];   /* leer = ueber den Geraetetyp suchen */
 
 	/* Uebergabe an den Schreib-Thread */
 	struct spa_ringbuffer ring;
@@ -116,8 +130,9 @@ struct impl {
 	uint64_t bytes_written;  /* vom writer_thread an den HAL gegeben */
 	uint32_t n_process;
 	uint32_t n_write;
-	uint32_t n_write_err;    /* abgewiesene HAL-Writes */
+	uint32_t n_write_err;    /* abgewiesene HAL-Writes bzw. -Reads */
 	uint32_t n_overrun;      /* verworfene Bloecke, weil der Ring voll war */
+	uint32_t n_underrun;     /* Aufnahme: mit Stille aufgefuellte Bloecke */
 };
 
 /* Diagnose: standardmaessig auf info (unter PipeWires Loglevel unsichtbar),
@@ -132,6 +147,56 @@ struct impl {
 
 /* ------------------------------------------------------------------ HAL */
 
+static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
+		const pa_channel_map *map)
+{
+	const pa_sample_spec *got;
+	dm_config_port *mix, *dev;
+
+	/* Anders als beim Ausgang nimmt der Eingang den mixPort als NAME - die
+	 * Zeigeridentitaets-Falle gibt es hier also nicht. */
+	this->stream = pa_droid_open_input_stream(this->hw, spec, map, this->mix_port_name);
+	if (!this->stream) {
+		spa_log_error(this->log, NAME " Eingabestream \"%s\" fehlgeschlagen",
+				this->mix_port_name);
+		return -EIO;
+	}
+
+	/* Der HAL darf Rate und Kanalzahl beim Oeffnen aendern. Unser Port hat
+	 * aber schon ein ausgehandeltes Format - eine Abweichung wuerde
+	 * unbemerkt Tonhoehe und Kanalzuordnung verbiegen. Also lieber ehrlich
+	 * scheitern und die tatsaechlichen Werte melden. */
+	got = pa_droid_stream_sample_spec(this->stream);
+	if (got->rate != spec->rate || got->channels != spec->channels ||
+	    got->format != spec->format) {
+		spa_log_error(this->log, NAME " HAL lieferte anderes Format als ausgehandelt: "
+				"%u Hz/%u Kanaele/Format %d statt %u Hz/%u Kanaele/Format %d",
+				got->rate, got->channels, got->format,
+				spec->rate, spec->channels, spec->format);
+		pa_droid_stream_unref(this->stream);
+		this->stream = NULL;
+		return -EINVAL;
+	}
+
+	mix = dm_config_find_mix_port(this->hw->enabled_module, this->mix_port_name);
+	if (this->input_port_name[0])
+		dev = dm_config_find_port(this->hw->enabled_module, this->input_port_name);
+	else
+		dev = mix ? dm_config_find_device_port(mix, this->input_device) : NULL;
+	if (!dev)
+		spa_log_warn(this->log, NAME " Eingabegeraet %#x nicht gefunden - "
+				"HAL behaelt sein aktuelles Routing", this->input_device);
+	else if (!pa_droid_hw_set_input_device(this->stream, dev))
+		spa_log_warn(this->log, NAME " Routing auf \"%s\" fehlgeschlagen", dev->name);
+	else
+		DIAG(this, "Eingabegeraet gesetzt: %s", dev->name);
+
+	spa_log_info(this->log, NAME " Aufnahmestream offen: %s, %u Hz, %u Kanaele, Puffer %zu B",
+			this->mix_port_name, spec->rate, spec->channels,
+			pa_droid_stream_buffer_size(this->stream));
+	return 0;
+}
+
 static int hal_open(struct impl *this)
 {
 	dm_config_port *mix, *dev;
@@ -144,6 +209,29 @@ static int hal_open(struct impl *this)
 	if (!(this->hw = pa_droid_hw_module_get(pa_compat_core(), this->config, "primary"))) {
 		spa_log_error(this->log, NAME " HAL-Modul liess sich nicht oeffnen");
 		return -EIO;
+	}
+
+	if (this->capture) {
+		int res;
+		spec.format = PA_SAMPLE_S16LE;
+		spec.rate = this->port.have_format
+			? this->port.current_format.info.raw.rate : DEFAULT_RATE;
+		spec.channels = this->port.have_format
+			? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS;
+		if (spec.channels == 1)
+			pa_channel_map_init_mono(&map);
+		else
+			pa_channel_map_init_stereo(&map);
+
+		if ((res = hal_open_input(this, &spec, &map)) < 0) {
+			pa_droid_hw_module_unref(this->hw);
+			this->hw = NULL;
+			return res;
+		}
+		this->bytes_queued = this->bytes_written = 0;
+		this->n_process = this->n_write = 0;
+		this->n_write_err = this->n_overrun = this->n_underrun = 0;
+		return 0;
 	}
 
 	/* WICHTIG: pa_droid_hw_module_get dupliziert die Konfiguration
@@ -203,7 +291,7 @@ static int hal_open(struct impl *this)
 
 	this->bytes_queued = this->bytes_written = 0;
 	this->n_process = this->n_write = 0;
-	this->n_write_err = this->n_overrun = 0;
+	this->n_write_err = this->n_overrun = this->n_underrun = 0;
 	return 0;
 }
 
@@ -372,6 +460,66 @@ static void *writer_thread(void *arg)
 	return NULL;
 }
 
+/* Aufnahme: pa_droid_stream_read blockiert bis zur naechsten HAL-Periode und
+ * gibt damit den Takt vor. Deshalb ebenfalls ein eigener Thread. */
+static void *reader_thread(void *arg)
+{
+	struct impl *this = arg;
+	size_t chunk = pa_droid_stream_buffer_size(this->stream);
+	uint8_t *buf;
+
+	if (chunk == 0 || chunk > RING_SIZE / 2)
+		chunk = 4096;
+	buf = malloc(chunk);
+	if (!buf)
+		return NULL;
+
+	while (true) {
+		ssize_t r;
+		uint32_t idx;
+		int32_t filled;
+		bool run;
+
+		pthread_mutex_lock(&this->lock);
+		run = this->running;
+		pthread_mutex_unlock(&this->lock);
+		if (!run)
+			break;
+
+		r = pa_droid_stream_read(this->stream, buf, chunk);
+		if (r <= 0) {
+			if (this->n_write_err++ == 0)
+				spa_log_warn(this->log, NAME " HAL-Read fehlgeschlagen: %zd "
+						"(weitere werden nur gezaehlt)", r);
+			/* Nicht heisslaufen, wenn der HAL dauerhaft sofort scheitert. */
+			usleep((useconds_t) (this->period_ns / 1000));
+			continue;
+		}
+
+		if (this->n_write == 0)
+			DIAG(this, "erster HAL-Read ok: %zd von %zu B", r, chunk);
+		this->bytes_written += (uint64_t) r;
+		this->n_write++;
+
+		filled = spa_ringbuffer_get_write_index(&this->ring, &idx);
+		if (filled + r > (int32_t) RING_SIZE) {
+			/* Niemand holt die Daten ab - lieber die aeltesten wegwerfen als
+			 * die neuesten, sonst laeuft die Aufnahme immer weiter hinterher. */
+			if (this->n_overrun++ == 0)
+				spa_log_warn(this->log, NAME " Ringpuffer voll, Aufnahme verwirft "
+						"aelteste Daten (weitere werden nur gezaehlt)");
+			spa_ringbuffer_read_update(&this->ring,
+					idx + filled + (int32_t) r - (int32_t) RING_SIZE);
+		}
+		spa_ringbuffer_write_data(&this->ring, this->ring_data, RING_SIZE,
+				idx & (RING_SIZE - 1), buf, (uint32_t) r);
+		spa_ringbuffer_write_update(&this->ring, idx + (uint32_t) r);
+	}
+
+	free(buf);
+	return NULL;
+}
+
 static int writer_start(struct impl *this)
 {
 	if (this->started)
@@ -381,7 +529,8 @@ static int writer_start(struct impl *this)
 	spa_ringbuffer_init(&this->ring);
 	this->running = true;
 	this->drain = true;
-	if (pthread_create(&this->writer, NULL, writer_thread, this) != 0) {
+	if (pthread_create(&this->writer, NULL,
+				this->capture ? reader_thread : writer_thread, this) != 0) {
 		this->running = false;
 		return -errno;
 	}
@@ -402,14 +551,17 @@ static void writer_stop(struct impl *this, bool drain)
 	pthread_mutex_unlock(&this->lock);
 	pthread_join(this->writer, NULL);
 	this->started = false;
-	DIAG(this, "Bilanz: process() %ux / %llu B eingereiht, "
-			"HAL-Write %ux / %llu B geschrieben",
+	DIAG(this, "Bilanz: process() %ux / %llu B, HAL-%s %ux / %llu B",
 			this->n_process, (unsigned long long) this->bytes_queued,
+			this->capture ? "Read" : "Write",
 			this->n_write, (unsigned long long) this->bytes_written);
+	if (this->n_underrun)
+		DIAG(this, "%u Bloecke mit Stille aufgefuellt (Ring war leer)", this->n_underrun);
 	if (this->n_write_err || this->n_overrun)
-		spa_log_warn(this->log, NAME " Stoerungen im Lauf: %u abgewiesene HAL-Writes, "
+		spa_log_warn(this->log, NAME " Stoerungen im Lauf: %u abgewiesene HAL-%s, "
 				"%u verworfene Bloecke (Ring voll)",
-				this->n_write_err, this->n_overrun);
+				this->n_write_err, this->capture ? "Reads" : "Writes",
+				this->n_overrun);
 }
 
 /* ------------------------------------------------------------- Node */
@@ -423,7 +575,8 @@ static void emit_node_info(struct impl *this, bool full)
 	uint32_t n = 0;
 
 	items[n++] = SPA_DICT_ITEM_INIT("device.api", "droid");
-	items[n++] = SPA_DICT_ITEM_INIT("media.class", "Audio/Sink");
+	items[n++] = SPA_DICT_ITEM_INIT("media.class",
+			this->capture ? "Audio/Source" : "Audio/Sink");
 	items[n++] = SPA_DICT_ITEM_INIT("droid.mix-port", this->mix_port_name);
 	this->info.props = &SPA_DICT_INIT(items, n);
 
@@ -445,7 +598,7 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 	struct spa_dict_item items[1];
 
 	/* gleiche Falle wie beim Node: props darf nicht NULL sein */
-	items[0] = SPA_DICT_ITEM_INIT("port.name", "playback");
+	items[0] = SPA_DICT_ITEM_INIT("port.name", this->capture ? "capture" : "playback");
 	port->info.props = &SPA_DICT_INIT(items, 1);
 
 	if (full)
@@ -454,7 +607,7 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 					 SPA_PORT_CHANGE_MASK_PARAMS;
 	if (port->info.change_mask) {
 		spa_node_emit_port_info(&this->hooks,
-				SPA_DIRECTION_INPUT, port->id, &port->info);
+				this->dir, port->id, &port->info);
 		port->info.change_mask = old;
 	}
 	port->info.props = NULL;
@@ -586,7 +739,7 @@ static int impl_port_enum_params(void *object, int seq,
 	int res;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
-	spa_return_val_if_fail(direction == SPA_DIRECTION_INPUT, -EINVAL);
+	spa_return_val_if_fail(direction == this->dir, -EINVAL);
 
 	result.id = id;
 	result.next = start;
@@ -610,9 +763,23 @@ next:
 		break;
 	case SPA_PARAM_Buffers:
 	{
-		size_t size = this->stream ? pa_droid_stream_buffer_size(this->stream) : 4096;
+		/* Der Puffer muss ein GRAPH-Quantum fassen, nicht eine HAL-Periode.
+		 * Beim Ausgang sind beide zufaellig gleich gross (4096 B), beim
+		 * Eingang nicht: der HAL liefert 3840 B, der Graph will 4096 B.
+		 * Ein zu kleiner Puffer laesst den Adapter mit einem Teilquantum
+		 * arbeiten. */
+		uint32_t stride = 2 * port->current_format.info.raw.channels;
+		uint32_t q = this->quantum;
+		size_t size;
+
 		if (!port->have_format)
 			return -EIO;
+		if (q == 0 && this->position)
+			q = this->position->clock.target_duration;
+		if (q == 0)
+			q = 1024;
+		size = SPA_MAX((size_t) q * stride,
+				this->stream ? pa_droid_stream_buffer_size(this->stream) : 4096);
 		if (result.index > 0)
 			return 0;
 		result.param = spa_pod_builder_add_object(&b,
@@ -620,7 +787,7 @@ next:
 			SPA_PARAM_BUFFERS_buffers, SPA_POD_CHOICE_RANGE_Int(2, 2, 16),
 			SPA_PARAM_BUFFERS_blocks,  SPA_POD_Int(1),
 			SPA_PARAM_BUFFERS_size,    SPA_POD_Int((int) size),
-			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int(2 * (int) port->current_format.info.raw.channels));
+			SPA_PARAM_BUFFERS_stride,  SPA_POD_Int((int) stride));
 		break;
 	}
 	case SPA_PARAM_IO:
@@ -687,7 +854,7 @@ static int impl_port_set_param(void *object,
 	struct impl *this = object;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
-	spa_return_val_if_fail(direction == SPA_DIRECTION_INPUT, -EINVAL);
+	spa_return_val_if_fail(direction == this->dir, -EINVAL);
 
 	if (id == SPA_PARAM_Format)
 		return port_set_format(this, &this->port, flags, param);
@@ -727,6 +894,66 @@ static int impl_port_set_io(void *object,
 	return 0;
 }
 
+/* Aufnahme: einen freien Puffer nehmen, aus dem Ring fuellen, dem Graphen
+ * hinlegen. Ist der Ring leer (Anlauf, Aussetzer), wird mit Stille aufgefuellt -
+ * ein zu kurzer Puffer waere fuer den Graphen ein Fehler. */
+static int process_capture(struct impl *this)
+{
+	struct port *port = &this->port;
+	struct spa_io_buffers *io = port->io;
+	struct spa_data *d;
+	uint32_t idx, want, take, stride, id;
+	int32_t avail;
+
+	if (io == NULL)
+		return -EIO;
+	if (io->status == SPA_STATUS_HAVE_DATA)
+		return SPA_STATUS_HAVE_DATA;
+
+	if (io->buffer_id < port->n_buffers) {
+		port->buffers[io->buffer_id].queued = false;
+		io->buffer_id = SPA_ID_INVALID;
+	}
+
+	for (id = 0; id < port->n_buffers; id++)
+		if (!port->buffers[id].queued)
+			break;
+	if (id == port->n_buffers) {
+		io->status = -EPIPE;
+		return SPA_STATUS_HAVE_DATA;
+	}
+
+	d = &port->buffers[id].outbuf->datas[0];
+	stride = 2 * port->current_format.info.raw.channels;
+	want = SPA_MIN(d->maxsize, this->quantum * stride);
+
+	avail = spa_ringbuffer_get_read_index(&this->ring, &idx);
+	take = SPA_MIN((uint32_t) SPA_MAX(avail, 0), want);
+	if (take > 0) {
+		spa_ringbuffer_read_data(&this->ring, this->ring_data, RING_SIZE,
+				idx & (RING_SIZE - 1), d->data, take);
+		spa_ringbuffer_read_update(&this->ring, idx + take);
+	}
+	if (take < want) {
+		memset(SPA_PTROFF(d->data, take, void), 0, want - take);
+		this->n_underrun++;
+	}
+
+	d->chunk->offset = 0;
+	d->chunk->size = want;
+	d->chunk->stride = stride;
+
+	if (this->n_process == 0)
+		DIAG(this, "erster process(): %u B ausgeliefert (%u B aus dem Ring)", want, take);
+	this->bytes_queued += take;
+	this->n_process++;
+
+	port->buffers[id].queued = true;
+	io->buffer_id = id;
+	io->status = SPA_STATUS_HAVE_DATA;
+	return SPA_STATUS_HAVE_DATA;
+}
+
 static int impl_process(void *object)
 {
 	struct impl *this = object;
@@ -737,6 +964,9 @@ static int impl_process(void *object)
 	uint32_t idx, filled, offs, size;
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
+
+	if (this->capture)
+		return process_capture(this);
 
 	if ((io = port->io) == NULL)
 		return -EIO;
@@ -850,6 +1080,9 @@ static int impl_init(const struct spa_handle_factory *factory,
 	handle->clear = impl_clear;
 
 	this = (struct impl *) handle;
+	/* Welche Richtung, entscheidet die benutzte Factory. */
+	this->capture = spa_streq(factory->name, "api.droid.pcm.source");
+	this->dir = this->capture ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
 	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
@@ -875,7 +1108,10 @@ static int impl_init(const struct spa_handle_factory *factory,
 			SPA_TYPE_INTERFACE_Node, SPA_VERSION_NODE, &impl_node, this);
 
 	this->info = SPA_NODE_INFO_INIT();
-	this->info.max_input_ports = MAX_PORTS;
+	if (this->capture)
+		this->info.max_output_ports = MAX_PORTS;
+	else
+		this->info.max_input_ports = MAX_PORTS;
 	this->info.flags = SPA_NODE_FLAG_RT;
 	this->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
 	this->info.params = this->params;
@@ -885,6 +1121,9 @@ static int impl_init(const struct spa_handle_factory *factory,
 	port->id = 0;
 	port->info = SPA_PORT_INFO_INIT();
 	port->info.flags = SPA_PORT_FLAG_NO_REF;
+	if (this->capture)
+		port->info.flags |= SPA_PORT_FLAG_LIVE | SPA_PORT_FLAG_PHYSICAL |
+				    SPA_PORT_FLAG_TERMINAL;
 	port->params[0] = SPA_PARAM_INFO(SPA_PARAM_EnumFormat, SPA_PARAM_INFO_READ);
 	port->params[1] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
 	port->params[2] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
@@ -892,10 +1131,18 @@ static int impl_init(const struct spa_handle_factory *factory,
 	port->info.params = port->params;
 	port->info.n_params = 4;
 
-	/* Welcher mixPort? Standard ist der primaere Ausgang. */
+	/* Welcher mixPort? Standard ist der primaere Aus- bzw. Eingang. */
 	str = info ? spa_dict_lookup(info, "droid.mix-port") : NULL;
 	snprintf(this->mix_port_name, sizeof(this->mix_port_name), "%s",
-			str ? str : "primary output");
+			str ? str : (this->capture ? "primary input" : "primary output"));
+
+	/* Aufnahmequelle: standardmaessig das eingebaute Mikrofon, per
+	 * droid.device-port aber auf einen benannten devicePort umlenkbar
+	 * (z. B. "Wired Headset Mic"). */
+	this->input_device = AUDIO_DEVICE_IN_BUILTIN_MIC;
+	str = info ? spa_dict_lookup(info, "droid.device-port") : NULL;
+	if (str)
+		snprintf(this->input_port_name, sizeof(this->input_port_name), "%s", str);
 
 	str = info ? spa_dict_lookup(info, "droid.config") : NULL;
 	this->config = pa_parse_droid_audio_config(
@@ -937,6 +1184,15 @@ static int impl_enum_interface_info(const struct spa_handle_factory *factory,
 	*info = &impl_interfaces[(*index)++];
 	return 1;
 }
+
+const struct spa_handle_factory droid_pcm_source_factory = {
+	SPA_VERSION_HANDLE_FACTORY,
+	.name = "api.droid.pcm.source",
+	.info = NULL,
+	.get_size = impl_get_size,
+	.init = impl_init,
+	.enum_interface_info = impl_enum_interface_info,
+};
 
 const struct spa_handle_factory droid_pcm_factory = {
 	SPA_VERSION_HANDLE_FACTORY,

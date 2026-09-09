@@ -251,6 +251,7 @@ static const struct spa_handle_factory droid_device_factory = {
 
 /* aus droid-pcm.c */
 extern const struct spa_handle_factory droid_pcm_factory;
+extern const struct spa_handle_factory droid_pcm_source_factory;
 
 SPA_EXPORT
 int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t *index)
@@ -264,6 +265,9 @@ int spa_handle_factory_enum(const struct spa_handle_factory **factory, uint32_t 
 		break;
 	case 1:
 		*factory = &droid_pcm_factory;
+		break;
+	case 2:
+		*factory = &droid_pcm_source_factory;
 		break;
 	default:
 		return 0;
