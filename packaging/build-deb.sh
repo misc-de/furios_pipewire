@@ -15,6 +15,9 @@ ARCH=$(dpkg --print-architecture)
 TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
 PWVER=$(pkg-config --modversion libpipewire-0.3 2>/dev/null || echo 1.6.6)
 VERSION="0.1.0+git$(git log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d).$(git rev-parse --short HEAD 2>/dev/null || echo 0)"
+# Ungesicherte Aenderungen bekommen eine eigene Nummer - sonst traegt das Paket
+# die Version des letzten Commits, und dpkg haelt es fuer dasselbe.
+[ -n "$(git status --porcelain 2>/dev/null)" ] && VERSION="$VERSION+dirty$(date +%H%M%S)"
 PKG="furios-audio-pipewire"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
@@ -100,7 +103,15 @@ exit 0
 EOF
 chmod 755 "$STAGE/DEBIAN/prerm"
 
+# Aeltere Pakete wegraeumen: ein "dpkg -i packaging/*.deb" wuerde sonst alle
+# einspielen - und in Glob-Reihenfolge womoeglich das aelteste zuletzt. Genau
+# das ist einmal passiert und sah aus wie ein kaputtes Plugin.
+rm -f "$ROOT/packaging/${PKG}_"*.deb
+
 OUT="$ROOT/packaging/${PKG}_${VERSION}_${ARCH}.deb"
 dpkg-deb --root-owner-group --build "$STAGE" "$OUT" >/dev/null
 echo "Fertig: $OUT"
-dpkg-deb --info "$OUT" | sed -n '1,12p'
+
+if [ "${1:-}" = --install ]; then
+    sudo dpkg -i "$OUT"
+fi

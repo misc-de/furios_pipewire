@@ -46,9 +46,10 @@
 #define DEV_SOURCE  1
 #define N_DEVICES   2
 
-#define PROFILE_OFF       0
-#define PROFILE_DEFAULT   1
-#define PROFILE_VOICECALL 2
+#define PROFILE_OFF           0
+#define PROFILE_DEFAULT       1
+#define PROFILE_VOICECALL     2
+#define PROFILE_COMMUNICATION 3
 
 /* Der Name ist nicht frei waehlbar: callaudiod sucht im Kartenprofil nach
  * genau diesem Namen ("card has voice profile, using it"). */
@@ -281,6 +282,13 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 		 * callaudiod im Anruf, nicht die Routenpolitik von selbst. */
 		name = VOICECALL_NAME; desc = "Anruf"; prio = 50;
 		break;
+	case PROFILE_COMMUNICATION:
+		/* AUDIO_MODE_IN_COMMUNICATION: dafuer schaltet der HAL seine
+		 * Echounterdrueckung und Rauschminderung ein. Gedacht fuer VoIP -
+		 * heisst wie bei PulseAudios droid-card, damit vorhandene Werkzeuge
+		 * es finden. Waehlt niemand von selbst. */
+		name = "communication"; desc = "VoIP-Gespraech"; prio = 40;
+		break;
 	default:
 		return 0;
 	}
@@ -329,7 +337,9 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 	 * telefoniert. */
 	if (current)
 		spa_pod_builder_add(b, SPA_PARAM_PROFILE_save,
-				SPA_POD_Bool(index != PROFILE_VOICECALL && this->profile_save), 0);
+				SPA_POD_Bool(index != PROFILE_VOICECALL &&
+					     index != PROFILE_COMMUNICATION &&
+					     this->profile_save), 0);
 
 	*param = spa_pod_builder_pop(b, &f[0]);
 	return 1;
@@ -374,6 +384,7 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 	spa_pod_builder_push_array(b, &f);
 	spa_pod_builder_int(b, PROFILE_DEFAULT);
 	spa_pod_builder_int(b, PROFILE_VOICECALL);
+	spa_pod_builder_int(b, PROFILE_COMMUNICATION);
 	spa_pod_builder_pop(b, &f);
 
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_devices, 0);
@@ -564,7 +575,7 @@ static void params_changed(struct impl *this, uint32_t id)
 static int set_profile(struct impl *this, uint32_t index, bool save)
 {
 	this->profile_save = save;
-	if (index > PROFILE_VOICECALL)
+	if (index > PROFILE_COMMUNICATION)
 		return -EINVAL;
 	if (index == this->profile)
 		return 0;
@@ -575,6 +586,7 @@ static int set_profile(struct impl *this, uint32_t index, bool save)
 	emit_nodes(this, index != PROFILE_OFF);
 	DIAG(this, "Profil: %s",
 			index == PROFILE_VOICECALL ? VOICECALL_NAME :
+			index == PROFILE_COMMUNICATION ? "communication" :
 			index == PROFILE_DEFAULT ? "default" : "off");
 	params_changed(this, SPA_PARAM_Profile);
 	return 0;

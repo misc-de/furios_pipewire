@@ -48,7 +48,14 @@ function forwardProfile (dev)
   for p in dev:iterate_params ("Profile") do
     local profile = cutils.parseParam (p, "Profile")
     if profile and profile.name then
-      local mode = (profile.name == "voicecall") and "call" or "normal"
+      local mode = "normal"
+      if profile.name == "voicecall" then
+        mode = "call"
+      elseif profile.name == "communication" then
+        -- AUDIO_MODE_IN_COMMUNICATION: der HAL schaltet dafuer seine
+        -- Echounterdrueckung ein. Gedacht fuer VoIP.
+        mode = "communication"
+      end
       if last_mode ~= mode then
         local node = findNode (dev, 0)
         if node then
