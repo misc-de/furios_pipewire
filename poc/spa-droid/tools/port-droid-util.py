@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 """Turns the unmodified droid-util.c into a version usable from SPA.
 
 The only code excluded is code that dereferences PulseAudio graph objects

@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* Replacement for the last 14 functions the plugin still linked against
  * libpulse for.
  *

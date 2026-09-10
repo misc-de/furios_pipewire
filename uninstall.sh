@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 # Removes everything and restores the shipped state.
 set -e
 /usr/local/bin/audioctl revert 2>/dev/null || true

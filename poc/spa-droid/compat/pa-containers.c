@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* Replacement for the pulsecore containers the ported droid code uses.
  * The collections here are small (profiles, mappings, ports), so these are
  * deliberately plain implementations rather than reproductions of the PA

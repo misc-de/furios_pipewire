@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* Loads the SPA plugin the way PipeWire does, attaches as a listener and
  * shows what the device announces to the graph. */
 #include <dlfcn.h>

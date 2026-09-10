@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 # Experiment: turn on MediaTek's handsfree echo suppression (DMNR) for calls.
 #
 # Background

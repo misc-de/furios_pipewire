@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* Verifies the PulseAudio-free port: reads the device's real audio_policy XML
  * with the ported parser and prints what the HAL offers. */
 #include <stdio.h>

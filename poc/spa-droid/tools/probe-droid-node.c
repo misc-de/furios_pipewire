@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* Reproduces what the PipeWire adapter does with the node: enumerate params,
  * set a format, enumerate again. Without PipeWire, without the HAL. */
 #include <dlfcn.h>

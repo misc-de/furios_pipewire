@@ -316,3 +316,67 @@ no A2DP). After `bluetoothctl disconnect` and `connect` both are there.
 
 `spa-inspect` is **not** suitable for this: it dlopen's its argument directly
 and never consults `SPA_PLUGIN_DIR`.
+
+## Licence and credits
+
+The source files in this repository are **MIT** (see `LICENSE`), and every file
+carries an SPDX header saying so.
+
+**The built plugin is not.** `libspa-droid.so` compiles six source files from
+*pulseaudio-modules-droid-modern* straight into itself — `droid-util.c`,
+`droid-config.c`, `config-parser-xml.c`, `conversion.c`, `sllist.c`,
+`utils.c` — and those are **LGPL-2.1** (Copyright © 2013-2022 Jolla Ltd.),
+version 2.1 only, not "or later". The resulting binary is a combined work, so
+anyone distributing it — including the `.deb` from `packaging/build-deb.sh` —
+distributes it under the LGPL-2.1 and owes its recipients the corresponding
+source. Since everything here is public and `tools/port-droid-util.py`
+reproduces the adaptation from an unmodified upstream checkout, that obligation
+is easy to meet: point at this repository and at the upstream commit.
+
+MIT on our side is deliberate: it imposes nothing on anyone who takes only
+these files (say the SPA node, the WirePlumber scripts or `audioctl`) without
+the Jolla code.
+
+### What we build against
+
+| Component | Licence | How it is used |
+|---|---|---|
+| [pulseaudio-modules-droid-modern](https://github.com/FuriLabs/pulseaudio-modules-droid-modern) | LGPL-2.1 | six source files compiled into the plugin |
+| [PipeWire / SPA](https://pipewire.org) headers | MIT | the plugin interface itself |
+| [WirePlumber](https://pipewire.pages.freedesktop.org/wireplumber/) Lua API | MIT | the monitor and the policy script |
+| libpulse headers (`pulse/*.h`) | LGPL-2.1+ | types the ported code expects; the code behind them is ours (`compat/pa-audio.c`) |
+| [libhybris](https://github.com/libhybris/libhybris) / Android headers | Apache-2.0 | `hardware/audio.h`, the HAL interface |
+| [expat](https://libexpat.github.io/) | MIT | parsing `audio_policy_configuration.xml` |
+| GTK4 / [libadwaita](https://gitlab.gnome.org/GNOME/libadwaita) | LGPL-2.1+ | the switcher app, through PyGObject |
+
+The headers under `poc/spa-droid/compat/pulsecore/` re-declare PulseAudio
+interfaces so the ported code compiles — the names and signatures are dictated
+by PulseAudio, the implementations behind them are ours.
+
+### Projects we learned from
+
+Not all of these contribute code; several were simply the reason something
+works at all, and it took reading them to find out why.
+
+- **[Jolla / Sailfish OS](https://github.com/mer-hybris/pulseaudio-modules-droid)** —
+  the original droid modules. Every hard-won detail about the Android HAL in
+  this repo (routing by device type, the primary-stream assertion, the
+  `voip_rx` rate override) was learned from that code.
+- **[Droidian](https://github.com/droidian/pulseaudio-modules-droid-modern)** —
+  carried the modules forward to Android 11 HALs.
+- **[FuriLabs / FuriOS](https://github.com/FuriLabs)** — the distribution this
+  runs on; `pipewire-hal.conf` is generated from their `pipewire-droid.conf`
+  rather than replacing it.
+- **[callaudiod](https://gitlab.com/mobian1/callaudiod)** (Mobian) — decides
+  what a phone call sounds like. Our card reports `device.api = "droid-hal"`
+  and names its profiles `default`/`voicecall` because callaudiod looks for
+  exactly that; reading its droid path is what made telephony work.
+- **[feedbackd](https://source.puri.sm/Librem5/feedbackd)** (Purism) — owns the
+  ringtone. `audioctl` restarts it on a profile switch for that reason.
+- **[oFono](https://git.kernel.org/pub/scm/network/ofono/ofono.git)** and
+  **[BlueZ](http://www.bluez.org/)** — the HFP investigation in
+  `51-bluez-ofono.conf` is a summary of what those two do on this device.
+- **[Android Open Source Project](https://source.android.com)** — the audio HAL
+  interface and its `audio_policy_configuration.xml`.
+- **[PipeWire documentation on SPA plugins](https://docs.pipewire.org/page_spa_plugins.html)** —
+  the map for everything under `poc/spa-droid/src/`.

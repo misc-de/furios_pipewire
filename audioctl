@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 # audioctl - switch between the stock FuriOS audio stack and our own profiles.
 # Nothing owned by dpkg is touched; everything works through masks in
 # /etc/systemd/user and additive units under /usr/local. The way back is always

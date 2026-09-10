@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 # Installs the SPA droid plugin and the PipeWire configuration for the pw-hal
 # profile. Changes NOTHING about the running audio - afterwards 'standard' is
 # still active. The switch only happens with: audioctl try pw-hal

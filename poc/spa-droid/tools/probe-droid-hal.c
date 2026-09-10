@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* Opens the Android audio HAL through the ported code.
  *
  * CAUTION: the HAL may be exclusive. While PulseAudio is running this call

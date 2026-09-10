@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* SPA node: playback and capture through the Android audio HAL.
  *
  * The HAL write blocks until the data has been taken. It must therefore not

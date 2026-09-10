@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 # Builds a .deb from the work tree.
 #
 # Without debhelper - dpkg-deb is enough for a package of this size, and a
@@ -51,6 +53,62 @@ install -Dm644 gui/de.furios.audioswitch.desktop \
 install -Dm644 gui/de.furios.audioswitch.svg \
     "$STAGE/usr/share/icons/hicolor/scalable/apps/de.furios.audioswitch.svg"
 install -Dm644 README.md "$STAGE/usr/share/doc/$PKG/README.md"
+
+# The sources here are MIT, but the plugin links LGPL-2.1 code from
+# pulseaudio-modules-droid-modern - so the package as a whole is LGPL-2.1.
+# Debian expects that stated in the copyright file, not in the control file.
+install -Dm644 LICENSE "$STAGE/usr/share/doc/$PKG/LICENSE"
+cat > "$STAGE/usr/share/doc/$PKG/copyright" <<'COPY'
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: furios_pipewire
+Source: https://github.com/misc-de/furios_pipewire
+
+Files: *
+Copyright: 2026 misc-de
+License: MIT
+
+Files: libspa-droid.so
+Copyright: 2026 misc-de
+           2013-2022 Jolla Ltd.
+Comment: The plugin is built from the MIT sources of this project together
+ with source files of pulseaudio-modules-droid-modern (droid-util.c,
+ droid-config.c, config-parser-xml.c, conversion.c, sllist.c, utils.c).
+ The binary is a combined work and is distributed under the LGPL-2.1.
+License: LGPL-2.1
+
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a
+ copy of this software and associated documentation files (the "Software"),
+ to deal in the Software without restriction, including without limitation
+ the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ and/or sell copies of the Software, and to permit persons to whom the
+ Software is furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included
+ in all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+ OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+ MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+ IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+ TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+License: LGPL-2.1
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation, version 2.1 of the License.
+ .
+ This library is distributed in the hope that it will be useful, but
+ WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Lesser
+ General Public License for more details.
+ .
+ On Debian systems the full text is in
+ /usr/share/common-licenses/LGPL-2.1.
+COPY
+chmod 644 "$STAGE/usr/share/doc/$PKG/copyright"
 
 # --- control file ---
 mkdir -p "$STAGE/DEBIAN"

@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* SPA device for the Android audio HAL.
  *
  * The device is the card: it reports profiles and routes and creates the two

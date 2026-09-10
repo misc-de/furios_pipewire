@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 """Generates pipewire-hal.conf from the FuriOS file pipewire-droid.conf.
 
 Instead of a copy, only one thing is inserted:

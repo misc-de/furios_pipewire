@@ -1,3 +1,5 @@
+-- SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+-- SPDX-License-Identifier: MIT
 -- The microphone should follow the output choice.
 --
 -- Pick a headset as the output and the microphone would otherwise stay on the

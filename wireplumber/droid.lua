@@ -1,3 +1,5 @@
+-- SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+-- SPDX-License-Identifier: MIT
 -- Droid monitor for WirePlumber.
 --
 -- Loads the SPA device api.droid.device and turns its objects into adapter

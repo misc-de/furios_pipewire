@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 project('spa-droid', 'c',
   version : '0.1',
   meson_version : '>=1.1',

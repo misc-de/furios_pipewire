@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 # Installs the switching infrastructure. Changes nothing about the running
 # audio stack - after installation the 'standard' profile is still active.
 set -e

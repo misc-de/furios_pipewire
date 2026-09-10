@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 /* Implementations of the PulseAudio helper functions the ported droid code
  * calls. Replaces pulsecore for the SPA port. */
 #include <stdlib.h>

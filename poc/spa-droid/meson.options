@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 option('droid_src', type : 'string', value : '',
   description : 'Path to the pulseaudio-modules-droid-modern source tree ' +
                 '(the directory containing src/common). Empty means ' +
