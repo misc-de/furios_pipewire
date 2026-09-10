@@ -9,7 +9,12 @@ expat_dep = dependency('expat')
 # TODO: pa_channel_map_*/pa_sample_spec_*/pa_proplist_* sind reine Utilities
 # aus libpulse (Client-Lib, nicht der Daemon). Fuer das fertige Plugin durch
 # SPA-Aequivalente ersetzen, dann faellt diese Abhaengigkeit weg.
-libpulse_dep = dependency('libpulse')
+# Kein libpulse mehr: die 14 Kleinigkeiten, fuer die es noetig war
+# (Kanalkarten, Abtastformate, eine winzige Eigenschaftsliste), stehen in
+# compat/pa-audio.c. Die Kopfdateien von libpulse bleiben in Gebrauch - die
+# Typen muessen zusammenpassen -, nur der Programmcode kommt jetzt von uns.
+libpulse_dep = dependency('libpulse', required : false)
+pulse_inc = include_directories()
 hybris_dep = cc.find_library('hybris-common', required : false)
 hw_dep = cc.find_library('hardware', required : false)
 
@@ -35,6 +40,7 @@ droid_common = static_library('droid-common',
   [ droid_util_spa,
     'compat/pa-compat.c',
     'compat/pa-containers.c',
+    'compat/pa-audio.c',
     droid_src / 'common/sllist.c',
     droid_src / 'common/utils.c',
     droid_src / 'common/conversion.c',
@@ -54,7 +60,7 @@ shared_module('spa-droid',
   ['src/droid-device.c', 'src/droid-pcm.c'],
   name_prefix : 'lib',
   include_directories : [compat_inc, droid_inc, android_inc],
-  dependencies : [spa_dep, libpulse_dep, hybris_dep, hw_dep,
+  dependencies : [spa_dep, hybris_dep, hw_dep,
                   cc.find_library('pthread', required : false)],
   link_with : droid_common,
   install : false)
@@ -65,7 +71,7 @@ executable('probe-droid-device', 'tools/probe-droid-device.c',
 executable('probe-droid-hal', 'tools/probe-droid-hal.c',
   include_directories : [compat_inc, droid_inc, android_inc],
   link_with : droid_common,
-  dependencies : [libpulse_dep, hybris_dep, hw_dep,
+  dependencies : [hybris_dep, hw_dep,
                   cc.find_library('pthread', required : false)])
 
 executable('probe-droid-node', 'tools/probe-droid-node.c',
