@@ -50,6 +50,8 @@ install -Dm644 wireplumber/droid-input-follows-output.lua \
     "$STAGE/usr/share/wireplumber/scripts/monitors/droid-input-follows-output.lua"
 install -Dm644 wireplumber/droid-default-sink-policy.lua \
     "$STAGE/usr/share/wireplumber/scripts/monitors/droid-default-sink-policy.lua"
+install -Dm644 wireplumber/droid-bluetooth-call.lua \
+    "$STAGE/usr/share/wireplumber/scripts/monitors/droid-bluetooth-call.lua"
 install -Dm644 wireplumber/50-droid.conf      "$STAGE/usr/share/wireplumber/wireplumber.conf.d/50-droid.conf"
 install -Dm644 wireplumber/51-bluez-ofono.conf "$STAGE/usr/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf"
 

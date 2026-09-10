@@ -347,6 +347,35 @@ call or ringtone and never taken back). The pin is dropped rather than
 replaced, so the phone takes over again the moment the headset is gone. Never
 during a call.
 
+**A call moves to a connected headset by itself.** On this device the voice
+path of a mobile call never reaches the host - it runs modem <-> DSP. The
+headset is served by the HAL, which puts the path onto the Bluetooth PCM line
+when the card is routed to a BT SCO device. `droid-bluetooth-call.lua` does the
+three things that have to happen together: headset into a hands-free profile so
+an SCO channel exists, card onto `output-bluetooth_sco` and
+`input-bluetooth_sco_headset`, and the route set again whenever callaudiod
+moves it back to the earpiece. Everything is undone when the call ends.
+
+Dry run with a simulated call - what the HAL reports:
+
+    hw set_parameters(BT_SCO=on)
+    Created output audio patch "primary output"->"BT SCO"
+    Audio mode AUDIO_MODE_IN_CALL, overriding audio source mic with voice call
+    Created input audio patch "primary input"<-"BT SCO Headset Mic"
+
+The microphone comes along on the same channel; there is nothing separate to
+switch. Forcing the port back to the earpiece mid-call was reverted within
+seconds, and hanging up restored speaker, built-in microphone and A2DP.
+**A real call has not confirmed this yet.**
+
+**The host-side headset microphone delivers nothing**, and that is not a
+configuration mistake: with the card in `headset-head-unit` and the native
+backend, eight seconds of capture produced 64000 bytes in which every single
+sample is zero. The SCO link does not carry audio to the host on this device -
+the controller keeps it in hardware between the BT chip and the audio DSP. So
+VoIP calls (Signal, SIP) over a headset cannot work here, while mobile calls
+can, because those never needed the host in the first place.
+
 **Playback pauses when Bluetooth disconnects.** Earbuds run out of battery, or
 one goes back into its case, and without this the audio moves to the next best
 output - which on a phone is the loudspeaker, in whatever room you are standing
