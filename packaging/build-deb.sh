@@ -11,7 +11,16 @@ cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
 PLUGIN=poc/spa-droid/build/libspa-droid.so
-[ -f "$PLUGIN" ] || { echo "plugin missing - build it first: ninja -C poc/spa-droid/build"; exit 1; }
+BUILDDIR=poc/spa-droid/build
+[ -d "$BUILDDIR" ] || { echo "no build tree - see \"Building\" in README.md"; exit 1; }
+
+# Build before packaging. Skipping this once produced a .deb from a plugin
+# that was three edits old, installed it, and left the change looking like it
+# had failed - the source was right and the binary was not.
+if command -v ninja >/dev/null 2>&1; then
+    ninja -C "$BUILDDIR" >/dev/null || { echo "build failed" >&2; exit 1; }
+fi
+[ -f "$PLUGIN" ] || { echo "plugin missing - build it first: ninja -C $BUILDDIR"; exit 1; }
 
 ARCH=$(dpkg --print-architecture)
 TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)

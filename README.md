@@ -219,6 +219,14 @@ only the node holds the HAL stream.
   The capture node now hears about the end of the call and sets its source
   again. Measured after hanging up: RMS 548 across 3304 distinct sample values,
   where before the fix it was RMS 0.0 and exactly one value.
+- **Two input ports are not microphones, and both used to rank like one.**
+  `Voice Call In` is the tap on the call itself - outside a call it delivers
+  digital silence - and `Built-In Back Mic` is the second capsule the DSP pairs
+  with the first for noise reduction. PulseAudio's droid-card gives all three
+  the same priority of 200, which leaves the choice of default microphone to
+  the order the ports happen to appear in the vendor's XML. They are 50 and 150
+  here, so the real microphone cannot lose that coin toss. Both stay
+  selectable; neither can be picked by accident.
 - **A dead capture path and a quiet room are easy to tell apart.** Count the
   distinct sample values, not the level. A live microphone in a silent room
   still delivers thousands of them - thermal noise, quantisation, dither. One

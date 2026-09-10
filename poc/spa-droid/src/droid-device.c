@@ -147,8 +147,16 @@ static uint32_t route_priority(audio_devices_t type)
 		return 300;
 	case AUDIO_DEVICE_OUT_EARPIECE:
 	case AUDIO_DEVICE_IN_BUILTIN_MIC:
-	case AUDIO_DEVICE_IN_VOICE_CALL:
 		return 200;
+	/* Never by accident. This is not a microphone at all - it is the tap on
+	 * the call itself, and outside a call it delivers digital silence
+	 * (measured: 48000 samples, one distinct value, and that value zero).
+	 * PulseAudio's droid-card ranks it 200, level with the real microphone,
+	 * so which of the two becomes the default comes down to the order of the
+	 * vendor's XML. Losing that coin toss would leave the phone recording
+	 * nothing at all, and the cause is nowhere near the symptom. */
+	case AUDIO_DEVICE_IN_VOICE_CALL:
+		return 50;
 	/* Below the main microphone on purpose. PulseAudio's droid-card gives
 	 * both 200, and then which one is picked comes down to the order they
 	 * happen to appear in the vendor's XML - the front one only wins because

@@ -75,6 +75,8 @@ static void test_route_priority(void)
 			200, route_priority(AUDIO_DEVICE_IN_BUILTIN_MIC));
 	check_uint("the back microphone ranks below the main one",
 			150, route_priority(AUDIO_DEVICE_IN_BACK_MIC));
+	check_uint("the call tap ranks last - it is not a microphone",
+			50, route_priority(AUDIO_DEVICE_IN_VOICE_CALL));
 	check_uint("wired accessories rank below the built-in ones",
 			100, route_priority(AUDIO_DEVICE_OUT_WIRED_HEADSET));
 	check_uint("anything unknown ranks last",
@@ -90,6 +92,17 @@ static void test_route_priority(void)
 	else {
 		failures++;
 		printf("  \033[31mFAIL\033[0m the back microphone can win by accident\n");
+	}
+
+	/* Losing this one is the worst case of the three: the call tap is silent
+	 * outside a call, so the phone would record nothing at all. */
+	checks++;
+	if (route_priority(AUDIO_DEVICE_IN_BUILTIN_MIC) >
+	    route_priority(AUDIO_DEVICE_IN_VOICE_CALL))
+		printf("  \033[32mok\033[0m   the main microphone cannot lose to the call tap\n");
+	else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the call tap can become the default microphone\n");
 	}
 
 	checks++;
