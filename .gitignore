@@ -9,3 +9,10 @@ src/pulseaudio-modules-droid-modern/
 
 # Erzeugte Konfiguration (entsteht aus der FuriOS-Vorlage)
 pipewire-hal.conf
+
+# Testaufnahmen und Bauartefakte gehoeren nicht ins Repo - eine Mikrofon-
+# aufnahme aus einem Testlauf ist Umgebungston des Besitzers.
+*.wav
+*.deb
+__pycache__/
+*.pyc
