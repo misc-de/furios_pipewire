@@ -347,6 +347,13 @@ call or ringtone and never taken back). The pin is dropped rather than
 replaced, so the phone takes over again the moment the headset is gone. Never
 during a call.
 
+**The VoIP nodes never become the default.** Low priority is not enough:
+WirePlumber keeps earlier choices as a fallback chain and walks it when a
+device disappears. Unplugging a headset mid playback left the default on
+`droid-voip-sink` - which feeds the HAL's voice path and does not reach the
+speaker, so the phone simply went quiet. `droid-default-sink-policy.lua` puts
+it back.
+
 **The microphone deliberately stays on the phone.** The BT card offers a source
 and it reads happily - 192000 bytes of pure silence, RMS 0, peak 0. It is a
 loopback node that exists so that opening it triggers the headset profile, and
