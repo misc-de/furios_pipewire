@@ -82,12 +82,22 @@ executable('dump-droid-config', 'tools/dump-droid-config.c',
 # --- SPA-Plugin ---
 spa_dep = dependency('libspa-0.2')
 
+# -z nodelete: the plugin must never be unloaded.
+#
+# PipeWire drops an SPA plugin once nothing uses it any more - which happens
+# whenever WirePlumber restarts and the nodes go away. That takes libhybris'
+# Android linker state with it, and creating the nodes again re-initialises it
+# inside a process that has meanwhile filled its address space (Bluetooth
+# codecs, for one). The linker does not get the region it wants and faults, and
+# the whole daemon goes down. Keeping the library resident keeps that state
+# alive for the life of the process, which is what libhybris expects.
 shared_module('spa-droid',
   ['src/droid-device.c', 'src/droid-pcm.c'],
   name_prefix : 'lib',
   include_directories : [compat_inc, droid_inc, android_inc],
   dependencies : [spa_dep, hybris_dep, hw_dep,
                   cc.find_library('pthread', required : false)],
+  link_args : ['-Wl,-z,nodelete'],
   link_with : droid_common,
   install : false)
 

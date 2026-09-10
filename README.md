@@ -190,6 +190,11 @@ only the node holds the HAL stream.
   AudioFlinger, above the HAL. So `droid.lua` puts the level from the route
   back onto the node, where the graph applies it for real - measured again,
   RMS 5693 against 263 at 25 %.
+- **The plugin must never be unloaded** (`-Wl,-z,nodelete`). PipeWire drops an
+  SPA plugin as soon as nothing uses it, which happens on every WirePlumber
+  restart. That takes libhybris' Android linker state with it, and building the
+  nodes again re-initialises it inside a process that has since filled its
+  address space - the linker does not get the region it wants and faults.
 - **Load the HAL module early, and never let it go.** libhybris brings its own
   Android linker, and that linker wants a particular region of the address
   space. Opened late - after the Bluetooth codecs are in the process, say - it
@@ -321,6 +326,18 @@ the sink drives the graph. That makes the node beat even an explicit user
 choice, which is weighted 30000: no other output device could be selected at
 all, no Bluetooth headphones, nothing. The symptom is nasty because the
 selection in the UI simply has no effect, without any error message.
+
+**Only the Bluetooth roles a phone has.** `51-bluez-ofono.conf` sets
+`bluez5.roles = [ a2dp_source hfp_ag hsp_ag ]`. The names are from this
+device's point of view and the card profiles from the remote's, so the role
+behind the profile called `a2dp-sink` (High Fidelity Playback) is
+`a2dp_source`: we send, the headset receives. With the headset-side roles left
+on, the card also offers `audio-gateway` - **priority 256 against a2dp-sink's
+132, and no sinks or sources at all**. When a headset connects on its own the
+handsfree side comes up first, WirePlumber picks the highest-priority profile
+it can get, and that is the empty one; nothing re-evaluates when A2DP arrives
+later. The headset then sits there connected and silent, with a tick next to it
+in the settings.
 
 **A Bluetooth speaker takes over when it connects.** Not by priority - the BT
 sink ranks 1010 against the phone's 1000, which would be enough - but because
