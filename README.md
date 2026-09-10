@@ -348,6 +348,7 @@ the Jolla code.
 | libpulse headers (`pulse/*.h`) | LGPL-2.1+ | types the ported code expects; the code behind them is ours (`compat/pa-audio.c`) |
 | [libhybris](https://github.com/libhybris/libhybris) / Android headers | Apache-2.0 | `hardware/audio.h`, the HAL interface |
 | [expat](https://libexpat.github.io/) | MIT | parsing `audio_policy_configuration.xml` |
+| [pipewire-config-droid](https://github.com/furilabs/pipewire-config-droid) | BSD-3-Clause | `poc/spa-droid/test-crash.conf` is derived from its `pipewire-droid.conf` |
 | GTK4 / [libadwaita](https://gitlab.gnome.org/GNOME/libadwaita) | LGPL-2.1+ | the switcher app, through PyGObject |
 
 The headers under `poc/spa-droid/compat/pulsecore/` re-declare PulseAudio
