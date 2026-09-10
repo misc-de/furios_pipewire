@@ -40,14 +40,18 @@ printf '\nsettings we ask for exist\n'
 if [ -f "$SCHEMA" ]; then
     for f in "$ROOT"/wireplumber/*.conf; do
         for key in $(keys_in_block "$f" "wireplumber.settings"); do
+            TESTS_RUN=$((TESTS_RUN + 1))
+            # Either WirePlumber knows it, or we declare it ourselves in the
+            # same place - a setting of our own needs a schema entry too, or
+            # reading it comes back empty.
             if grep -q "^  $key = {" "$SCHEMA"; then
                 ok "$(basename "$f"): $key is in WirePlumber's schema"
-                TESTS_RUN=$((TESTS_RUN + 1))
+            elif keys_in_block "$f" "wireplumber.settings.schema" | grep -qx "$key"; then
+                ok "$(basename "$f"): $key is declared in the same file"
             else
-                TESTS_RUN=$((TESTS_RUN + 1))
                 TESTS_FAILED=$((TESTS_FAILED + 1))
-                fail "$(basename "$f"): $key is in WirePlumber's schema" \
-                     "no such setting - it would be ignored without a word"
+                fail "$(basename "$f"): $key is known" \
+                     "in neither WirePlumber's schema nor this file - it would be ignored without a word"
             fi
         done
     done

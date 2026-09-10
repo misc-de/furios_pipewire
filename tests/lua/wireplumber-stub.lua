@@ -155,11 +155,13 @@ end
 local script_state = {
   "last_route", "last_route_volume", "last_mode", "last_volume",
   "in_bt_call", "saved_routes", "mixer", "device", "log",
+  "gave_up", "defends",
 }
 
 function M.install()
   M.reset()
   M.objects = { node = {}, device = {}, metadata = {} }
+  M.settings = {}
   for _, name in ipairs(script_state) do _G[name] = nil end
 
   local log = {}
@@ -193,6 +195,17 @@ function M.install()
   }
 
   Feature = { SpaDevice = { ENABLED = 1 }, Proxy = { BOUND = 2 } }
+
+  -- WirePlumber's settings. A script reading one that nobody set gets
+  -- nothing back, which is what happens on a device where the schema entry is
+  -- missing - and the scripts have to behave then too.
+  M.settings = {}
+  Settings = {
+    get_boolean = function (key)
+      record("settings_get", key)
+      return M.settings[key]
+    end,
+  }
 
   Plugin = { find = function (name)
     record("plugin_find", name)

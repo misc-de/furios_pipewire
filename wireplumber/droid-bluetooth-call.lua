@@ -14,8 +14,19 @@
 -- This does the same as a hook: it reacts when the card enters the voicecall
 -- profile, and puts everything back when the call ends.
 --
--- callaudiod resets the port during a call - it only knows earpiece and
--- speaker - so the route is set again whenever it moves away.
+-- THIS IS OFF BY DEFAULT, and the reason is a real call that had no audio at
+-- all - not on the headset, not on the earpiece, not in either direction.
+-- callaudiod resets the port during a call because it only knows earpiece and
+-- speaker; this script set it back; callaudiod set it again. Two to three
+-- round trips a second, and the HAL tore the voice path down and rebuilt it
+-- every time (BT_SCO=off, BT_SCO=on, ...). Picking the earpiece by hand did
+-- not help either, because this script overrode that too.
+--
+-- So: the automatic routing only runs when the setting
+-- furios.bluetooth-call-routing is on (see 51-bluez-ofono.conf), and even
+-- then it gives up after a few rounds of that fight and hands the call back
+-- to the phone. A call on the earpiece is a nuisance. A call with no audio is
+-- not, and the phone has to keep working.
 --
 -- Everything here is wrapped in pcall. This runs inside the monitor, and an
 -- error would take the whole script down with it: no card, no nodes, no sound.
@@ -28,8 +39,27 @@ log = Log.open_topic ("s-node")
 BT_SINK_ROUTE   = "output-bluetooth_sco"
 BT_SOURCE_ROUTE = "input-bluetooth_sco_headset"
 
+SETTING = "furios.bluetooth-call-routing"
+
+-- How often the route may be pushed away before this gives up for the rest of
+-- the call. Three is enough to survive callaudiod setting the port once or
+-- twice while the call is being set up, and short enough that a fight is over
+-- in well under a second.
+MAX_DEFENDS = 3
+
 in_bt_call = false
+gave_up = false
+defends = 0
 saved_routes = nil
+
+-- Off unless someone turned it on. An unknown setting, an older WirePlumber,
+-- anything unexpected: all of that has to come out as "leave the call alone".
+function autoRoutingEnabled ()
+  local ok, value = pcall (function ()
+    return Settings.get_boolean (SETTING)
+  end)
+  return ok and value == true
+end
 
 function btCard ()
   return cutils.get_object_manager ("device"):lookup {
@@ -102,6 +132,7 @@ end
 function enterBtCall (dev, card)
   saved_routes = activeRoutes (dev)
   in_bt_call = true
+  defends = 0
 
   local prof = setBtProfile (card, "headset-head-unit")
              or setBtProfile (card, "headset-head-unit-cvsd")
@@ -133,14 +164,40 @@ function leaveBtCall (dev, card)
   log:info ("bluetooth call: over, back to the phone")
 end
 
--- callaudiod sets the port back to the earpiece during the call. Put it back.
-function defendRoute (dev)
+-- Hand the call back to the phone and do not try again until it is over.
+function giveUp (dev, card, why)
+  log:warning ("bluetooth call: " .. why .. " - the call goes back to the phone")
+  in_bt_call = false
+  gave_up = true
+  defends = 0
+  if saved_routes then
+    for _, name in pairs (saved_routes) do
+      setRouteByName (dev, name)
+    end
+    saved_routes = nil
+  end
+  setBtProfile (card, "a2dp-sink")
+end
+
+-- callaudiod sets the port back to the earpiece during the call. Put it back -
+-- but not forever. callaudiod does not yield, and a route that changes two or
+-- three times a second means the HAL rebuilds the voice path just as often;
+-- the call then carries no audio in either direction, which is worse than a
+-- call that stayed on the phone.
+function defendRoute (dev, card)
   local active = activeRoutes (dev)
   for _, name in pairs (active) do
     if name == BT_SINK_ROUTE then
       return
     end
   end
+
+  defends = defends + 1
+  if defends > MAX_DEFENDS then
+    giveUp (dev, card, "the route will not stay on the headset")
+    return
+  end
+
   log:info ("bluetooth call: route moved away, setting it again")
   setRouteByName (dev, BT_SINK_ROUTE)
   setRouteByName (dev, BT_SOURCE_ROUTE)
@@ -168,20 +225,26 @@ bluetooth_call_hook = SimpleEventHook {
       local call = inVoiceCall (dev)
       local card = btCard ()
 
-      if call and not in_bt_call then
+      if call and not in_bt_call and not gave_up then
         -- No headset, nothing to do: the call stays on the phone, which is
-        -- exactly right.
-        if card ~= nil then
+        -- exactly right. Same when the automatic routing is switched off.
+        if card ~= nil and autoRoutingEnabled () then
           enterBtCall (dev, card)
         end
       elseif not call and in_bt_call then
         leaveBtCall (dev, card)
+      elseif not call and gave_up then
+        -- Already handed back mid-call; the call is over, so try again next
+        -- time.
+        gave_up = false
       elseif call and in_bt_call then
-        defendRoute (dev)
+        defendRoute (dev, card)
       end
     end)
     if not ok then
       in_bt_call = false
+      gave_up = false
+      defends = 0
       saved_routes = nil
       log:warning ("bluetooth call: giving up - " .. tostring (err))
     end

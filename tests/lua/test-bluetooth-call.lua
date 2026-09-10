@@ -31,8 +31,11 @@ local function bt_card()
   } })
 end
 
-local function setup()
+-- The automatic routing is off unless someone turns it on; every test that
+-- wants to see it work has to say so, exactly like the phone does.
+local function setup(enabled)
   wp.install()
+  wp.settings["furios.bluetooth-call-routing"] = enabled ~= false
   T.load_script(T.root .. "/wireplumber/droid-bluetooth-call.lua")
 end
 
@@ -143,5 +146,57 @@ for _, c in ipairs(wp.calls_of("log")) do
   if tostring(c.args[2]):find("giving up", 1, true) then warned = true end
 end
 T.check("an error inside is caught and reported, not thrown", warned)
+
+-- Off is off: a call with a headset connected is left entirely alone. This is
+-- the state the phone ships in, and it is the state a real call needs until
+-- the automatic routing has been shown to work in one.
+setup(false)
+dev = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card())
+fire(dev)
+T.check_equal("with the setting off a call is not touched at all", 0,
+              #wp.calls_of("set_params"))
+
+-- A setting nobody declared reads as nothing, and nothing has to mean off.
+setup(false)
+wp.settings["furios.bluetooth-call-routing"] = nil
+dev = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card())
+fire(dev)
+T.check_equal("a setting that does not exist leaves the call alone too", 0,
+              #wp.calls_of("set_params"))
+
+-- The fight that cost a real call: callaudiod keeps pulling the port back.
+-- After a few rounds the call has to go back to the phone rather than have
+-- the voice path rebuilt two or three times a second.
+setup()
+dev = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card())
+fire(dev)                                   -- the call starts on the headset
+for _ = 1, 4 do
+  dev.params.Route = { { name = "output-earpiece", device = 0 } }
+  fire(dev)
+end
+local gave_up = false
+for _, c in ipairs(wp.calls_of("log")) do
+  if tostring(c.args[2]):find("back to the phone", 1, true) then gave_up = true end
+end
+T.check("a route that will not stay put makes it give up", gave_up)
+
+wp.reset()
+dev.params.Route = { { name = "output-earpiece", device = 0 } }
+fire(dev)
+T.check_equal("and then it stops trying for the rest of the call", 0,
+              #wp.calls_of("set_params"))
+
+-- Once that call is over the next one may try again.
+wp.reset()
+dev.params.Profile = { { name = "default" } }
+fire(dev)
+dev.params.Profile = { { name = "voicecall" } }
+dev.params.Route = { { name = "output-earpiece", device = 0 } }
+fire(dev)
+T.check("the next call is not held against the last one",
+        #wp.calls_of("set_params") >= 1)
 
 T.done()
