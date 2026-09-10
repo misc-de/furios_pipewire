@@ -160,6 +160,12 @@ Standardmaessig merkt sich der Schalter die Auswahl **nicht**: ein Neustart
 fuehrt zum Auslieferungszustand zurueck. Wer es anders will, legt vorher den
 zweiten Schalter um.
 
+Waehrend des Umschaltens laeuft ein **pulsierender Fortschrittsbalken**, in dem
+steht, was audioctl gerade meldet - die Zeilen werden gelesen, waehrend das
+Programm noch laeuft. Bewusst ohne Prozentzahl: wie lange es dauert, weiss
+vorher niemand, denn audioctl wartet bis zu 15 Sekunden auf einen Sink. Eine
+erfundene Zahl, die bei 90 % haengen bleibt, waere schlechter als gar keine.
+
 ## Bluetooth
 
 Damit PipeWire Bluetooth-Audio kann, muss `libspa-0.2-bluetooth` installiert
