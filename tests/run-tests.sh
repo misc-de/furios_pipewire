@@ -31,13 +31,19 @@ run "python: config generator, app/audioctl seam, bluetooth watcher" \
     python3 "$HERE/test-python.py"
 
 # The C test needs a build tree. Without one, say so rather than pass quietly.
+# Always rebuild it first. The test is not a default target - it is not part
+# of the plugin - so a plain "ninja" leaves it untouched, and running a stale
+# binary against changed sources is worse than not running it at all. That
+# happened once: two new checks appeared to pass without ever being compiled.
 BUILD="$ROOT/poc/spa-droid/build"
-if [ -x "$BUILD/test-droid-device" ]; then
-    run "spa-droid: card decisions" "$BUILD/test-droid-device"
-elif [ -d "$BUILD" ]; then
+if [ -d "$BUILD" ]; then
     printf '\n\033[1m== spa-droid: card decisions\033[0m\n'
     if ninja -C "$BUILD" test-droid-device >/dev/null 2>&1; then
-        run "spa-droid: card decisions" "$BUILD/test-droid-device"
+        if "$BUILD/test-droid-device"; then
+            :
+        else
+            FAILED=$((FAILED + 1))
+        fi
     else
         printf '  \033[33mskipped\033[0m - test-droid-device did not build\n'
     fi

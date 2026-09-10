@@ -147,9 +147,18 @@ static uint32_t route_priority(audio_devices_t type)
 		return 300;
 	case AUDIO_DEVICE_OUT_EARPIECE:
 	case AUDIO_DEVICE_IN_BUILTIN_MIC:
-	case AUDIO_DEVICE_IN_BACK_MIC:
 	case AUDIO_DEVICE_IN_VOICE_CALL:
 		return 200;
+	/* Below the main microphone on purpose. PulseAudio's droid-card gives
+	 * both 200, and then which one is picked comes down to the order they
+	 * happen to appear in the vendor's XML - the front one only wins because
+	 * it is listed first. A vendor update reordering that file would move
+	 * every recording to the back microphone, silently. Measured with the
+	 * same tone from the speaker, the two are within 5 % of each other
+	 * anyway (RMS 87.5 against 83.7), so nothing is lost by making the
+	 * choice deterministic. */
+	case AUDIO_DEVICE_IN_BACK_MIC:
+		return 150;
 	case AUDIO_DEVICE_OUT_WIRED_HEADSET:
 	case AUDIO_DEVICE_OUT_WIRED_HEADPHONE:
 	case AUDIO_DEVICE_IN_WIRED_HEADSET:

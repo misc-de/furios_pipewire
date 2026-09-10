@@ -73,10 +73,24 @@ static void test_route_priority(void)
 			200, route_priority(AUDIO_DEVICE_OUT_EARPIECE));
 	check_uint("the built-in microphone ranks like the earpiece",
 			200, route_priority(AUDIO_DEVICE_IN_BUILTIN_MIC));
+	check_uint("the back microphone ranks below the main one",
+			150, route_priority(AUDIO_DEVICE_IN_BACK_MIC));
 	check_uint("wired accessories rank below the built-in ones",
 			100, route_priority(AUDIO_DEVICE_OUT_WIRED_HEADSET));
 	check_uint("anything unknown ranks last",
 			50, route_priority(AUDIO_DEVICE_OUT_BLUETOOTH_SCO));
+
+	/* The one that matters: with both at 200 the winner came down to the
+	 * order of the vendor's XML, and a reordering would have moved every
+	 * recording to the back microphone without a word. */
+	checks++;
+	if (route_priority(AUDIO_DEVICE_IN_BUILTIN_MIC) >
+	    route_priority(AUDIO_DEVICE_IN_BACK_MIC))
+		printf("  \033[32mok\033[0m   the main microphone cannot lose to the back one\n");
+	else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the back microphone can win by accident\n");
+	}
 
 	checks++;
 	if (route_priority(AUDIO_DEVICE_OUT_SPEAKER) >
