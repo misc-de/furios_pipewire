@@ -1,0 +1,4 @@
+option('droid_src', type : 'string', value : '',
+  description : 'Path to the pulseaudio-modules-droid-modern source tree ' +
+                '(the directory containing src/common). Empty means ' +
+                '<repo>/src/pulseaudio-modules-droid-modern.')

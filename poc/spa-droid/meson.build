@@ -1,13 +1,35 @@
 project('spa-droid', 'c',
   version : '0.1',
+  meson_version : '>=1.1',
   default_options : ['c_std=gnu11', 'warning_level=1'])
 
-# Derived from the project directory so that moving the work tree does not
-# break anything. Via fs.parent rather than '..', because
-# include_directories() does not accept paths containing '..'.
+# The upstream droid sources are not versioned in this repo; they are cloned
+# next to it. The default is derived from the project directory, so the work
+# tree can live anywhere - clone it wherever you like. Via fs.parent rather
+# than '..', because include_directories() does not accept paths with '..'.
+#
+# A clone somewhere else entirely:
+#   meson setup build . -Ddroid_src=/path/to/pulseaudio-modules-droid-modern
 fs = import('fs')
 repo_root = fs.parent(fs.parent(meson.project_source_root()))
-droid_src = repo_root / 'src/pulseaudio-modules-droid-modern/src'
+droid_root = get_option('droid_src')
+if droid_root == ''
+  droid_root = repo_root / 'src/pulseaudio-modules-droid-modern'
+endif
+droid_src = droid_root / 'src'
+
+if not fs.is_dir(droid_src / 'common')
+  error('upstream droid sources not found at ' + droid_src + '''/common.
+
+  Clone them next to this repo:
+    mkdir -p ''' + repo_root + '''/src
+    git clone https://github.com/FuriLabs/pulseaudio-modules-droid-modern \
+        "''' + repo_root + '''/src/pulseaudio-modules-droid-modern"
+
+  Or point at an existing clone:
+    meson setup <builddir> <srcdir> -Ddroid_src=/path/to/pulseaudio-modules-droid-modern
+''')
+endif
 
 cc = meson.get_compiler('c')
 expat_dep = dependency('expat')

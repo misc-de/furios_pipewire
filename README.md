@@ -102,6 +102,9 @@ would be no sound after the next reboot.
 
 ## Building
 
+The clone can live anywhere - every path in this repo is relative to the
+scripts themselves, nothing assumes a particular directory.
+
 The upstream sources are not versioned here:
 
     mkdir -p src && git clone https://github.com/FuriLabs/pulseaudio-modules-droid-modern \
@@ -110,6 +113,12 @@ The upstream sources are not versioned here:
     meson setup poc/spa-droid/build poc/spa-droid
     ninja -C poc/spa-droid/build
     ./install-hal.sh        # needs sudo, does NOT change the active profile
+
+If you already have those sources somewhere else, point at them instead of
+cloning again:
+
+    meson setup poc/spa-droid/build poc/spa-droid \
+        -Ddroid_src=/path/to/pulseaudio-modules-droid-modern
 
 Alternatively build the package (see above) - that is the way that survives a
 system update.
