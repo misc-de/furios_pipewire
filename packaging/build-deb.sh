@@ -37,6 +37,8 @@ install -Dm755 experiments/dmnr-handsfree.sh  "$STAGE/usr/bin/furios-audio-dmnr"
 # fdk-aac, and building it locally is a different thing from redistributing
 # it. The script that builds it comes along instead.
 install -Dm755 tools/build-bluez5-aac.sh      "$STAGE/usr/share/furios-audio/build-bluez5-aac.sh"
+install -Dm755 tools/furios-audio-pause-on-disconnect.py \
+    "$STAGE/usr/bin/furios-audio-pause-on-disconnect"
 
 install -Dm644 tunnel.conf                    "$STAGE/usr/share/furios-audio/tunnel.conf"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$STAGE/tmp-hal.conf" >/dev/null
@@ -53,6 +55,8 @@ install -Dm644 wireplumber/51-bluez-ofono.conf "$STAGE/usr/share/wireplumber/wir
 
 install -Dm644 furios-pw-tunnel.service       "$STAGE/usr/lib/systemd/user/furios-pw-tunnel.service"
 install -Dm644 furios-audio-apply.service     "$STAGE/usr/lib/systemd/user/furios-audio-apply.service"
+install -Dm644 furios-audio-pause-on-disconnect.service \
+    "$STAGE/usr/lib/systemd/user/furios-audio-pause-on-disconnect.service"
 
 install -Dm644 gui/de.furios.audioswitch.desktop \
     "$STAGE/usr/share/applications/de.furios.audioswitch.desktop"

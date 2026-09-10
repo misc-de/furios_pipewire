@@ -248,6 +248,18 @@ restart_audio_clients() {
 # The safety net has to be enabled: it discards a test profile on reboot.
 # A package cannot enable it - a user unit is only enabled by the user
 # themselves. So it happens here, on the first switch.
+# Pausing instead of blaring: when a Bluetooth headset disconnects the audio
+# would otherwise move to the loudspeaker, wherever you happen to be standing.
+# Like the safety net, a user unit can only be enabled by the user.
+ensure_pause_on_disconnect() {
+    uctl is-enabled furios-audio-pause-on-disconnect.service >/dev/null 2>&1 && return 0
+    if uctl cat furios-audio-pause-on-disconnect.service >/dev/null 2>&1; then
+        run uctl enable --now furios-audio-pause-on-disconnect.service >/dev/null 2>&1 \
+            && info "playback now pauses when Bluetooth disconnects"
+    fi
+    return 0
+}
+
 ensure_safety_net() {
     uctl is-enabled furios-audio-apply.service >/dev/null 2>&1 && return 0
     if uctl cat furios-audio-apply.service >/dev/null 2>&1; then
@@ -261,6 +273,7 @@ switch_to() {
     local p=$1 mode=$2 prev
     prev=$(current_profile)
     ensure_safety_net
+    ensure_pause_on_disconnect
     preflight "$p"
     printf 'switching: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"

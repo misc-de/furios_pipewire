@@ -1,0 +1,14 @@
+[Unit]
+# Pauses playback when a Bluetooth audio device disconnects, instead of
+# letting the audio fall back to the loudspeaker.
+Description=Pause playback when Bluetooth audio disconnects
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/furios-audio-pause-on-disconnect
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

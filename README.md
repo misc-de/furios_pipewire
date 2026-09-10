@@ -347,6 +347,16 @@ call or ringtone and never taken back). The pin is dropped rather than
 replaced, so the phone takes over again the moment the headset is gone. Never
 during a call.
 
+**Playback pauses when Bluetooth disconnects.** Earbuds run out of battery, or
+one goes back into its case, and without this the audio moves to the next best
+output - which on a phone is the loudspeaker, in whatever room you are standing
+in. `furios-audio-pause-on-disconnect` watches BlueZ and asks every MPRIS
+player that is currently playing to pause, the way Android does. It leaves
+nothing behind: no muted sink, no changed default, nothing to undo. A player
+without MPRIS cannot be paused this way - papering over that with a mute would
+be a trap of its own, since a phone that is silent for reasons nobody remembers
+is worse than one that was briefly too loud.
+
 **The VoIP nodes never become the default.** Low priority is not enough:
 WirePlumber keeps earlier choices as a fallback chain and walks it when a
 device disappears. Unplugging a headset mid playback left the default on
