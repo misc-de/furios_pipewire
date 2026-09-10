@@ -58,6 +58,7 @@ install -Dm644 README.md "$STAGE/usr/share/doc/$PKG/README.md"
 # pulseaudio-modules-droid-modern - so the package as a whole is LGPL-2.1.
 # Debian expects that stated in the copyright file, not in the control file.
 install -Dm644 LICENSE "$STAGE/usr/share/doc/$PKG/LICENSE"
+install -Dm644 NOTICE  "$STAGE/usr/share/doc/$PKG/NOTICE"
 cat > "$STAGE/usr/share/doc/$PKG/copyright" <<'COPY'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: furios_pipewire

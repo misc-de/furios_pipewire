@@ -19,13 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-NOTE: this MIT licence covers the source files in this repository.
-
-The plugin `libspa-droid.so` is built from these sources TOGETHER WITH source
-files from pulseaudio-modules-droid-modern, which are LGPL-2.1 (Copyright (C)
-2013-2022 Jolla Ltd.). The resulting binary is therefore a combined work and
-can only be distributed under the terms of the LGPL-2.1. See the "Licence and
-credits" section of README.md.

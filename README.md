@@ -320,7 +320,8 @@ and never consults `SPA_PLUGIN_DIR`.
 ## Licence and credits
 
 The source files in this repository are **MIT** (see `LICENSE`), and every file
-carries an SPDX header saying so.
+we wrote carries an SPDX header saying so. `NOTICE` states the short version of
+what follows.
 
 **The built plugin is not.** `libspa-droid.so` compiles six source files from
 *pulseaudio-modules-droid-modern* straight into itself — `droid-util.c`,
