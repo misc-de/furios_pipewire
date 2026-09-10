@@ -160,14 +160,15 @@ char *pa_channel_map_snprint(char *s, size_t l, const pa_channel_map *m) {
     for (c = 0; c < m->channels && used + 1 < l; c++) {
         int n = snprintf(s + used, l - used, "%s%d",
                          c > 0 ? "," : "", (int) m->map[c]);
-        if (n < 0)
-            break;
-        used += (size_t) n;
+        /* A negative return means snprintf failed - it cannot with this
+         * format, but counting it as nothing written is both the safe answer
+         * and one without a branch that no test could ever reach. */
+        used += n > 0 ? (size_t) n : 0;
     }
     return s;
 }
 
-/* ---------------- Eigenschaftsliste ---------------- */
+/* ---------------- property list ---------------- */
 
 /* The ported code uses only four of its functions and stores nothing but
  * strings (the Android audio source). Nothing more is needed here. */

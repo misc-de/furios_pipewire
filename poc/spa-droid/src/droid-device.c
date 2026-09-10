@@ -285,6 +285,23 @@ static const char *route_description(const char *pa_name, const char *fallback)
 	return fallback;
 }
 
+/* The PulseAudio name for a device port, or nothing.
+ *
+ * Without such a name the route is worthless to callaudiod and every other
+ * tool, because they all match on these names - so a port that has none is
+ * left out rather than published as something nothing can address.
+ *
+ * On this device every type the configuration parser understands happens to
+ * have a name, so the refusal never fires in practice. It stays because the
+ * next vendor's file is not this one's, and it is a separate function so a
+ * test can ask it directly rather than hunting for a port type that has no
+ * name and can still be parsed - there is none. */
+static bool route_pa_name(audio_devices_t type, bool output, const char **name)
+{
+	return output ? pa_droid_output_port_name(type, name)
+		      : pa_droid_input_port_name(type, name);
+}
+
 static void collect_routes(struct impl *this)
 {
 	dm_config_port *port;
@@ -299,15 +316,8 @@ static void collect_routes(struct impl *this)
 		if (this->n_routes >= MAX_ROUTES)
 			break;
 
-		/* Without a PulseAudio name the route would be worthless to
-		 * callaudiod and friends - we leave such ports out. */
-		if (output) {
-			if (!pa_droid_output_port_name(port->type, &pa_name))
-				continue;
-		} else {
-			if (!pa_droid_input_port_name(port->type, &pa_name))
-				continue;
-		}
+		if (!route_pa_name(port->type, output, &pa_name))
+			continue;
 
 		r = &this->routes[this->n_routes++];
 		r->port = port;

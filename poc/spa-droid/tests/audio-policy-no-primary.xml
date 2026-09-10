@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 misc-de -->
+<!-- SPDX-License-Identifier: MIT -->
+<!--
+  The same configuration, with the module named something other than
+  "primary". Everything the card does hangs off that module, so it has to
+  refuse rather than come up half-built.
+
+  Hand-written rather than copied from the device: a fixture that comes from
+  one vendor's file would make the tests pass for that phone and say nothing
+  about the code. This one has the shape the parser expects and the few ports
+  the card's behaviour hangs on - a speaker and an earpiece to rank against
+  each other, two microphones, and the call tap that is not one. Bluetooth is
+  deliberately absent, because the real file leaves it out too and the card is
+  supposed to add it itself.
+-->
+<audioPolicyConfiguration version="1.0">
+    <modules>
+        <module name="a2dp" halVersion="3.0">
+            <attachedDevices>
+                <item>Speaker</item>
+                <item>Earpiece</item>
+                <item>Built-In Mic</item>
+                <item>Built-In Back Mic</item>
+                <item>Voice Call In</item>
+            </attachedDevices>
+            <defaultOutputDevice>Speaker</defaultOutputDevice>
+            <mixPorts>
+                <mixPort name="primary output" role="source" flags="AUDIO_OUTPUT_FLAG_PRIMARY">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </mixPort>
+                <mixPort name="voip_rx" role="source" flags="AUDIO_OUTPUT_FLAG_VOIP_RX">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="16000" channelMasks="AUDIO_CHANNEL_OUT_MONO"/>
+                </mixPort>
+                <mixPort name="primary input" role="sink">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </mixPort>
+                <mixPort name="voip_tx" role="sink">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="16000" channelMasks="AUDIO_CHANNEL_IN_MONO"/>
+                </mixPort>
+            </mixPorts>
+            <devicePorts>
+                <devicePort tagName="Speaker" role="sink" type="AUDIO_DEVICE_OUT_SPEAKER">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Earpiece" role="sink" type="AUDIO_DEVICE_OUT_EARPIECE">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Wired Headset" role="sink" type="AUDIO_DEVICE_OUT_WIRED_HEADSET">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Built-In Mic" role="source" type="AUDIO_DEVICE_IN_BUILTIN_MIC">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Built-In Back Mic" role="source" type="AUDIO_DEVICE_IN_BACK_MIC">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Voice Call In" role="source" type="AUDIO_DEVICE_IN_VOICE_CALL">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </devicePort>
+            </devicePorts>
+            <routes>
+                <route type="mix" sink="Speaker" sources="primary output,voip_rx"/>
+                <route type="mix" sink="Earpiece" sources="primary output,voip_rx"/>
+                <route type="mix" sink="Wired Headset" sources="primary output"/>
+                <route type="mix" sink="primary input"
+                       sources="Built-In Mic,Built-In Back Mic,Voice Call In"/>
+                <route type="mix" sink="voip_tx" sources="Built-In Mic"/>
+            </routes>
+        </module>
+    </modules>
+</audioPolicyConfiguration>

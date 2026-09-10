@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 misc-de -->
+<!-- SPDX-License-Identifier: MIT -->
+<!--
+  A configuration with more device ports than the card has room for.
+
+  MAX_ROUTES is 16. A vendor file with more than that must leave the card
+  with the ones it took and no memory written past the end of its array -
+  which is the sort of thing that does not fail where it happens.
+
+  Hand-written rather than copied from the device: a fixture that comes from
+  one vendor's file would make the tests pass for that phone and say nothing
+  about the code. This one has the shape the parser expects and the few ports
+  the card's behaviour hangs on - a speaker and an earpiece to rank against
+  each other, two microphones, and the call tap that is not one. Bluetooth is
+  deliberately absent, because the real file leaves it out too and the card is
+  supposed to add it itself.
+-->
+<audioPolicyConfiguration version="1.0">
+    <modules>
+        <module name="primary" halVersion="3.0">
+            <attachedDevices>
+                <item>Speaker</item>
+                <item>Earpiece</item>
+                <item>Built-In Mic</item>
+                <item>Built-In Back Mic</item>
+                <item>Voice Call In</item>
+            </attachedDevices>
+            <defaultOutputDevice>Speaker</defaultOutputDevice>
+            <mixPorts>
+                <mixPort name="primary output" role="source" flags="AUDIO_OUTPUT_FLAG_PRIMARY">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </mixPort>
+                <mixPort name="voip_rx" role="source" flags="AUDIO_OUTPUT_FLAG_VOIP_RX">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="16000" channelMasks="AUDIO_CHANNEL_OUT_MONO"/>
+                </mixPort>
+                <mixPort name="primary input" role="sink">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </mixPort>
+                <mixPort name="voip_tx" role="sink">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="16000" channelMasks="AUDIO_CHANNEL_IN_MONO"/>
+                </mixPort>
+            </mixPorts>
+            <devicePorts>
+                <devicePort tagName="Speaker" role="sink" type="AUDIO_DEVICE_OUT_SPEAKER">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Earpiece" role="sink" type="AUDIO_DEVICE_OUT_EARPIECE">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Wired Headset" role="sink" type="AUDIO_DEVICE_OUT_WIRED_HEADSET">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Built-In Mic" role="source" type="AUDIO_DEVICE_IN_BUILTIN_MIC">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Built-In Back Mic" role="source" type="AUDIO_DEVICE_IN_BACK_MIC">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Voice Call In" role="source" type="AUDIO_DEVICE_IN_VOICE_CALL">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_IN_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 0" role="sink" type="AUDIO_DEVICE_OUT_ANLG_DOCK_HEADSET">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 1" role="sink" type="AUDIO_DEVICE_OUT_AUX_DIGITAL">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 2" role="sink" type="AUDIO_DEVICE_OUT_AUX_LINE">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 3" role="sink" type="AUDIO_DEVICE_OUT_BLUETOOTH_A2DP">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 4" role="sink" type="AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_HEADPHONES">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 5" role="sink" type="AUDIO_DEVICE_OUT_BLUETOOTH_A2DP_SPEAKER">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 6" role="sink" type="AUDIO_DEVICE_OUT_BLUETOOTH_SCO">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 7" role="sink" type="AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 8" role="sink" type="AUDIO_DEVICE_OUT_BUS">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 9" role="sink" type="AUDIO_DEVICE_OUT_DGTL_DOCK_HEADSET">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 10" role="sink" type="AUDIO_DEVICE_OUT_ECHO_CANCELLER">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 11" role="sink" type="AUDIO_DEVICE_OUT_FM">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 12" role="sink" type="AUDIO_DEVICE_OUT_HDMI_ARC">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 13" role="sink" type="AUDIO_DEVICE_OUT_HEARING_AID">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 14" role="sink" type="AUDIO_DEVICE_OUT_IP">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 15" role="sink" type="AUDIO_DEVICE_OUT_LINE">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 16" role="sink" type="AUDIO_DEVICE_OUT_PROXY">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 17" role="sink" type="AUDIO_DEVICE_OUT_REMOTE_SUBMIX">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 18" role="sink" type="AUDIO_DEVICE_OUT_SPDIF">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+                <devicePort tagName="Spare 19" role="sink" type="AUDIO_DEVICE_OUT_SPEAKER_SAFE">
+                    <profile name="" format="AUDIO_FORMAT_PCM_16_BIT"
+                             samplingRates="48000" channelMasks="AUDIO_CHANNEL_OUT_STEREO"/>
+                </devicePort>
+            </devicePorts>
+            <routes>
+                <route type="mix" sink="Speaker" sources="primary output,voip_rx"/>
+                <route type="mix" sink="Earpiece" sources="primary output,voip_rx"/>
+                <route type="mix" sink="Wired Headset" sources="primary output"/>
+                <route type="mix" sink="primary input"
+                       sources="Built-In Mic,Built-In Back Mic,Voice Call In"/>
+                <route type="mix" sink="voip_tx" sources="Built-In Mic"/>
+                <route type="mix" sink="Spare 0" sources="primary output"/>
+                <route type="mix" sink="Spare 1" sources="primary output"/>
+                <route type="mix" sink="Spare 2" sources="primary output"/>
+                <route type="mix" sink="Spare 3" sources="primary output"/>
+                <route type="mix" sink="Spare 4" sources="primary output"/>
+                <route type="mix" sink="Spare 5" sources="primary output"/>
+                <route type="mix" sink="Spare 6" sources="primary output"/>
+                <route type="mix" sink="Spare 7" sources="primary output"/>
+                <route type="mix" sink="Spare 8" sources="primary output"/>
+                <route type="mix" sink="Spare 9" sources="primary output"/>
+                <route type="mix" sink="Spare 10" sources="primary output"/>
+                <route type="mix" sink="Spare 11" sources="primary output"/>
+                <route type="mix" sink="Spare 12" sources="primary output"/>
+                <route type="mix" sink="Spare 13" sources="primary output"/>
+                <route type="mix" sink="Spare 14" sources="primary output"/>
+                <route type="mix" sink="Spare 15" sources="primary output"/>
+                <route type="mix" sink="Spare 16" sources="primary output"/>
+                <route type="mix" sink="Spare 17" sources="primary output"/>
+                <route type="mix" sink="Spare 18" sources="primary output"/>
+                <route type="mix" sink="Spare 19" sources="primary output"/>
+            </routes>
+        </module>
+    </modules>
+</audioPolicyConfiguration>

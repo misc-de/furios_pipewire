@@ -107,7 +107,9 @@ shared_module('spa-droid',
 # plugin. It opens no HAL: what it exercises are the decisions, not the device.
 droid_device_test = executable('test-droid-device',
   'tests/test-droid-device.c',
-  c_args : ['-DTEST_FIXTURE="' + meson.current_source_dir() / 'tests/audio-policy-fixture.xml' + '"'],
+  c_args : ['-DTEST_FIXTURE="' + meson.current_source_dir() / 'tests/audio-policy-fixture.xml' + '"',
+            '-DTEST_FIXTURE_NO_PRIMARY="' + meson.current_source_dir() / 'tests/audio-policy-no-primary.xml' + '"',
+            '-DTEST_FIXTURE_TOO_MANY="' + meson.current_source_dir() / 'tests/audio-policy-too-many.xml' + '"'],
   include_directories : [compat_inc, droid_inc, android_inc],
   dependencies : [spa_dep, hybris_dep, hw_dep,
                   cc.find_library('m', required : false),
@@ -115,6 +117,14 @@ droid_device_test = executable('test-droid-device',
   link_with : droid_common,
   build_by_default : false)
 test('droid-device', droid_device_test)
+
+compat_test = executable('test-compat',
+  'tests/test-compat.c',
+  include_directories : [compat_inc, droid_inc, android_inc],
+  dependencies : [spa_dep, cc.find_library('pthread', required : false)],
+  link_with : droid_common,
+  build_by_default : false)
+test('compat', compat_test)
 
 executable('probe-droid-device', 'tools/probe-droid-device.c',
   dependencies : [spa_dep, cc.find_library('dl', required : false)])

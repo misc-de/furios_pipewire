@@ -145,12 +145,32 @@ ear.
 
     ./tests/coverage.sh
 
-reports line coverage of `droid-device.c` per function. It stands at **89 % of
-481 lines**. The card is started the way the daemon starts it - init, listen,
-enumerate, set - against `tests/audio-policy-fixture.xml` rather than the
+reports line coverage. The four C files that can be reached without hardware
+are at **100 %**:
+
+| | |
+|---|---|
+| `droid-device.c` | 100 % of 481 lines |
+| `compat/pa-audio.c` | 100 % of 87 |
+| `compat/pa-compat.c` | 100 % of 77 |
+| `compat/pa-containers.c` | 100 % of 172 |
+
+The card is started the way the daemon starts it - init, listen, enumerate,
+set, sync, clear - against `tests/audio-policy-fixture.xml` rather than the
 phone's own configuration, so the tests say something about the code and not
-about one vendor's file. No HAL is opened: the device parses XML and hands out
-parameters, and it is the node that would touch hardware.
+about one vendor's file. Two more fixtures cover what a bad file does: one with
+no `primary` module, one with more ports than the card has room for. No HAL is
+opened: the device parses XML and hands out parameters, and it is the node that
+would touch hardware.
+
+Getting the last lines took two decisions worth recording. A port with no
+PulseAudio name has to be left out, but no vendor file can produce one - every
+device type the parser understands has a name, and one it does not understand
+is dropped before the card sees it. That test builds the module in memory
+instead. And a `snprintf` whose return value cannot be negative had a branch
+for the case that it is; counting a negative as nothing written keeps the same
+protection without a line no test could reach. Removing a check to please a
+coverage number would have been the other way to get there, and the wrong one.
 
 `droid-pcm.c` has no test at all, and will not have one of this kind: it opens
 the HAL to do anything.

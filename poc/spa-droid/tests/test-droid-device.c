@@ -15,6 +15,12 @@
 #ifndef TEST_FIXTURE
 #define TEST_FIXTURE "tests/audio-policy-fixture.xml"
 #endif
+#ifndef TEST_FIXTURE_NO_PRIMARY
+#define TEST_FIXTURE_NO_PRIMARY "tests/audio-policy-no-primary.xml"
+#endif
+#ifndef TEST_FIXTURE_TOO_MANY
+#define TEST_FIXTURE_TOO_MANY "tests/audio-policy-too-many.xml"
+#endif
 #include "../src/droid-device.c"
 
 /* droid-device.c names the node factories that live in droid-pcm.c. The test
@@ -30,15 +36,45 @@ const struct spa_handle_factory droid_pcm_source_factory = {
 /* Same idea: in the daemon this reaches a node that holds a HAL stream. Here
  * it reports that no node is listening, which is what set_route() is written
  * to tolerate. */
+static int node_route_result = -ENOENT;
+
 int droid_node_set_route(const char *mix_port, const char *device_port)
 {
 	(void) mix_port;
 	(void) device_port;
-	return -ENOENT;
+	return node_route_result;
 }
 
 static int failures;
 static int checks;
+
+static void ok(const char *what)
+{
+	checks++;
+	printf("  \033[32mok\033[0m   %s\n", what);
+}
+
+static void check(const char *what, bool cond)
+{
+	checks++;
+	if (cond) {
+		printf("  \033[32mok\033[0m   %s\n", what);
+	} else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m %s: condition does not hold\n", what);
+	}
+}
+
+static void check_str(const char *what, const char *want, const char *got)
+{
+	checks++;
+	if (spa_streq(want, got)) {
+		printf("  \033[32mok\033[0m   %s\n", what);
+	} else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m %s: expected %s, got %s\n", what, want, got);
+	}
+}
 
 static void check_uint(const char *what, uint32_t want, uint32_t got)
 {
@@ -203,6 +239,24 @@ static void test_route_props(void)
 			build_props(buffer, sizeof(buffer), two, 2, true));
 	check_uint("mute comes across", 1, this->mute[DEV_SINK] ? 1 : 0);
 
+	/* The single volume alongside the per-channel one, and a prop we have no
+	 * use for - both arrive in practice, and neither may upset the rest. */
+	this = fresh_impl();
+	{
+		uint8_t buf[512];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+		struct spa_pod_frame f;
+		spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
+		spa_pod_builder_prop(&b, SPA_PROP_volume, 0);
+		spa_pod_builder_float(&b, 0.6f);
+		spa_pod_builder_prop(&b, SPA_PROP_latencyOffsetNsec, 0);
+		spa_pod_builder_long(&b, 1000);
+		apply_route_props(this, DEV_SINK, spa_pod_builder_pop(&b, &f));
+	}
+	check_float("a single volume arrives", 0.6f, this->volume[DEV_SINK]);
+	check_float("and a prop we have no use for changes nothing", 1.0f,
+			this->channel_volumes[DEV_SINK][0]);
+
 	/* A channel map of the right length is taken; a short one is not, because
 	 * it would rename the channels - that is how front-left once became the
 	 * nameless aux0. */
@@ -261,6 +315,26 @@ static void test_route_props(void)
 static void test_route_description(void)
 {
 	printf("\nport descriptions\n");
+
+	/* A port with no PulseAudio name is left out of the card entirely.
+	 * Nothing in a real configuration triggers this - every type the parser
+	 * understands has a name - which is exactly why it is worth a test: the
+	 * next vendor's file is not this one's. */
+	{
+		const char *name = NULL;
+		check("a known output has a name",
+				route_pa_name(AUDIO_DEVICE_OUT_SPEAKER, true, &name));
+		check_str("and it is the one callaudiod looks for", "output-speaker", name);
+		check("a known input has one too",
+				route_pa_name(AUDIO_DEVICE_IN_BUILTIN_MIC, false, &name));
+		check_str("likewise", "input-builtin_mic", name);
+		/* Values Android defines no device for. Most bits do have a name,
+		 * which is why these were found by asking rather than by guessing. */
+		check("a device type nobody named has none",
+				!route_pa_name((audio_devices_t) 0x20000000, true, &name));
+		check("on the input side as well",
+				!route_pa_name((audio_devices_t) 0x80200000, false, &name));
+	}
 
 	checks++;
 	if (strstr(route_description("input-voice_call", "Voice Call In"),
@@ -327,16 +401,6 @@ static const char *picked(struct impl *this, uint32_t device)
 	return idx == SPA_ID_INVALID ? "(none)" : this->routes[idx].pa_name;
 }
 
-static void check_str(const char *what, const char *want, const char *got)
-{
-	checks++;
-	if (spa_streq(want, got)) {
-		printf("  \033[32mok\033[0m   %s\n", what);
-	} else {
-		failures++;
-		printf("  \033[31mFAIL\033[0m %s: expected %s, got %s\n", what, want, got);
-	}
-}
 
 static void test_default_route(void)
 {
@@ -491,6 +555,19 @@ static void test_device_description(void)
 		check_uint("and no more than that", 0, res);
 	}
 
+	/* The three factories the plugin exports, in the order PipeWire asks for
+	 * them - the card and the two nodes. */
+	{
+		const struct spa_handle_factory *fac = NULL;
+		uint32_t index = 0, found = 0;
+		while (spa_handle_factory_enum(&fac, &index) == 1 && fac != NULL)
+			found++;
+		check_uint("the plugin exports three factories", 3, found);
+	}
+
+	check("without a configuration it falls back to the vendor's own file",
+			strstr(default_config_file(), "audio_policy_configuration.xml") != NULL);
+
 	desc = device_description();
 	check_uint("the card has a description at all", 1,
 			(desc != NULL && desc[0] != '\0') ? 1 : 0);
@@ -608,6 +685,45 @@ static bool profile_save_flag(struct impl *this, uint32_t index)
 	return save;
 }
 
+/* A configuration with no "primary" module: the card has nothing to work with
+ * and must refuse rather than come up half-built. */
+static void test_no_primary(const char *fixture)
+{
+	struct spa_handle *handle;
+
+	printf("\na configuration the card cannot use\n");
+	handle = start_device(fixture);
+	check_uint("a file without a primary module is refused", 1,
+			handle == NULL ? 1 : 0);
+
+	handle = start_device("/nonexistent/audio_policy.xml");
+	check_uint("and so is a file that is not there", 1, handle == NULL ? 1 : 0);
+
+	/* More ports than the card has room for: it keeps what fits and stops,
+	 * rather than writing past the end of its array. */
+	handle = start_device(TEST_FIXTURE_TOO_MANY);
+	check_uint("a file with more ports than fit still starts", 1,
+			handle != NULL ? 1 : 0);
+	if (handle != NULL) {
+		struct impl *this = (struct impl *) handle;
+		check_uint("and the card stops at the limit", MAX_ROUTES, this->n_routes);
+		spa_handle_clear(handle);
+		free(handle);
+	}
+
+	/* No configuration named at all: it falls back to the vendor's own file.
+	 * Whether that file exists depends on the machine, and either answer is
+	 * fine - what is tested is that it looks there rather than at nothing. */
+	{
+		struct spa_handle *h = calloc(1, sizeof(struct impl));
+		int res = droid_device_factory.init(&droid_device_factory, h, NULL, NULL, 0);
+		if (res == 0)
+			spa_handle_clear(h);
+		free(h);
+		ok("with no configuration named it falls back to the vendor's file");
+	}
+}
+
 static void test_device_lifecycle(const char *fixture)
 {
 	struct spa_handle *handle;
@@ -629,6 +745,12 @@ static void test_device_lifecycle(const char *fixture)
 
 	spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Device, (void **) &dev);
 	check_uint("and hands out a device interface", 1, dev != NULL ? 1 : 0);
+	{
+		void *other = NULL;
+		check_uint("but only that one", 1,
+				spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Node,
+					&other) < 0 ? 1 : 0);
+	}
 	if (dev == NULL)
 		goto out;
 
@@ -764,6 +886,152 @@ static void test_device_lifecycle(const char *fixture)
 
 	/* sync answers with a result the caller can wait on - WirePlumber uses it
 	 * to know the card has finished announcing itself. */
+	/* The profile "off" takes the nodes away again - the other half of
+	 * emit_nodes, and the one nobody exercises by accident. */
+	{
+		uint8_t buffer[512];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		struct spa_pod *param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(PROFILE_OFF));
+		counts.removed = 0;
+		spa_device_set_param(dev, SPA_PARAM_Profile, 0, param);
+		check_uint("switching off takes the nodes away", 4, counts.removed);
+
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(PROFILE_DEFAULT));
+		counts.objects = 0;
+		spa_device_set_param(dev, SPA_PARAM_Profile, 0, param);
+		check_uint("and switching back brings them", 4, counts.objects);
+	}
+
+	/* Things the graph can ask for that we do not answer. */
+	check_uint("an unknown parameter is not enumerated", 0,
+			count_params(dev, &counts, SPA_PARAM_Props));
+
+	/* Asking for one at a time is what WirePlumber does, and the paging is
+	 * easy to get wrong in a way nothing notices - it just stops early. */
+	counts.results = 0;
+	spa_device_enum_params(dev, 0, SPA_PARAM_EnumRoute, 0, 1, NULL);
+	check_uint("asking for a single route gives one", 1, counts.results);
+	counts.results = 0;
+	spa_device_enum_params(dev, 0, SPA_PARAM_EnumRoute, this->n_routes, 1, NULL);
+	check_uint("asking past the last one gives none", 0, counts.results);
+	counts.results = 0;
+	spa_device_enum_params(dev, 0, SPA_PARAM_Profile, 1, 1, NULL);
+	check_uint("there is only ever one current profile", 0, counts.results);
+
+	/* A filter that nothing matches: the device has to keep walking rather
+	 * than stop at the first parameter it cannot deliver. */
+	{
+		uint8_t fbuf[512];
+		struct spa_pod_builder fb = SPA_POD_BUILDER_INIT(fbuf, sizeof(fbuf));
+		struct spa_pod *filter = spa_pod_builder_add_object(&fb,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_EnumRoute,
+				SPA_PARAM_ROUTE_name, SPA_POD_String("nothing-is-called-this"));
+		counts.results = 0;
+		spa_device_enum_params(dev, 0, SPA_PARAM_EnumRoute, 0, UINT32_MAX, filter);
+		check_uint("a filter nothing matches yields nothing", 0, counts.results);
+	}
+
+	/* A profile number the card does not have. Nothing sets this from
+	 * outside - set_param refuses it - but the enumeration must not build a
+	 * parameter out of it either. */
+	{
+		uint32_t saved = this->profile;
+		this->profile = 99;
+		counts.results = 0;
+		spa_device_enum_params(dev, 0, SPA_PARAM_Profile, 0, UINT32_MAX, NULL);
+		check_uint("a profile that does not exist yields no parameter", 0,
+				counts.results);
+		this->profile = saved;
+	}
+
+	/* One direction with no active route at all - the card skips it instead
+	 * of publishing a route that is not there. */
+	{
+		uint32_t saved = this->active[DEV_SOURCE];
+		this->active[DEV_SOURCE] = SPA_ID_INVALID;
+		counts.results = 0;
+		spa_device_enum_params(dev, 0, SPA_PARAM_Route, 0, UINT32_MAX, NULL);
+		check_uint("a direction without a route is skipped, the other still reported",
+				1, counts.results);
+		this->active[DEV_SOURCE] = saved;
+	}
+	{
+		uint8_t buffer[512];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		struct spa_pod *param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(PROFILE_DEFAULT));
+
+		check_uint("and setting one is refused", 1,
+				spa_device_set_param(dev, SPA_PARAM_Props, 0, param) < 0 ? 1 : 0);
+		check_uint("setting nothing at all is refused", 1,
+				spa_device_set_param(dev, SPA_PARAM_Profile, 0, NULL) < 0 ? 1 : 0);
+		check_uint("and so is setting no route", 1,
+				spa_device_set_param(dev, SPA_PARAM_Route, 0, NULL) < 0 ? 1 : 0);
+
+		/* A pod of the right id but the wrong shape. */
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route,
+				SPA_PARAM_ROUTE_name, SPA_POD_String("nonsense"));
+		check_uint("a route without an index is refused", 1,
+				spa_device_set_param(dev, SPA_PARAM_Route, 0, param) < 0 ? 1 : 0);
+
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_name, SPA_POD_String("nonsense"));
+		check_uint("a profile without an index is refused", 1,
+				spa_device_set_param(dev, SPA_PARAM_Profile, 0, param) < 0 ? 1 : 0);
+
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(99));
+		check_uint("a profile that does not exist is refused", 1,
+				spa_device_set_param(dev, SPA_PARAM_Profile, 0, param) < 0 ? 1 : 0);
+
+		/* Setting the profile it is already in is not an error, and must not
+		 * tear the nodes down and build them again for nothing. */
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(PROFILE_DEFAULT));
+		counts.objects = 0;
+		check_uint("setting the profile it is already in changes nothing", 0,
+				spa_device_set_param(dev, SPA_PARAM_Profile, 0, param));
+		check_uint("and the nodes are left alone", 0, counts.objects);
+	}
+
+	/* The node may refuse a route for a reason other than "nobody is
+	 * listening" - the card says so and carries on rather than giving up. */
+	{
+		uint8_t buffer[512];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		struct spa_pod *param;
+		uint32_t i, speaker = 0;
+
+		for (i = 0; i < this->n_routes; i++)
+			if (spa_streq(this->routes[i].pa_name, "output-speaker"))
+				speaker = i;
+
+		node_route_result = -EIO;
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route,
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(speaker),
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(DEV_SINK));
+		check_uint("a route the node rejects is still the card's choice", 0,
+				spa_device_set_param(dev, SPA_PARAM_Route, 0, param));
+		check_str("and the card remembers it", "output-speaker",
+				this->routes[this->active[DEV_SINK]].pa_name);
+		node_route_result = -ENOENT;
+	}
+
 	counts.answers = counts.results = 0;
 	spa_device_sync(dev, 42);
 	check_uint("sync answers, with an empty result", 1,
@@ -775,12 +1043,60 @@ out:
 	free(handle);
 }
 
+/* --- a port the parser would never hand us -------------------------------
+ *
+ * collect_routes() leaves out any port it has no PulseAudio name for. No
+ * vendor file can produce one: every device type the configuration parser
+ * understands happens to have a name, and a type it does not understand is
+ * dropped before the card ever sees it. The refusal still has to work, because
+ * the next parser table and the next name table are not these ones - so the
+ * module is built here by hand, with one port that has no name.
+ */
+static void test_port_without_a_name(void)
+{
+	struct impl *this = fresh_impl();
+	dm_config_module module;
+	dm_config_port named, unnamed;
+
+	printf("\na port with no name of its own\n");
+
+	memset(&module, 0, sizeof(module));
+	memset(&named, 0, sizeof(named));
+	memset(&unnamed, 0, sizeof(unnamed));
+
+	named.name = (char *) "Speaker";
+	named.role = DM_CONFIG_ROLE_SINK;
+	named.type = AUDIO_DEVICE_OUT_SPEAKER;
+
+	/* A value Android defines no device for, so nothing can name it. */
+	unnamed.name = (char *) "Whatever";
+	unnamed.role = DM_CONFIG_ROLE_SINK;
+	unnamed.type = (audio_devices_t) 0x20000000;
+
+	module.device_ports = dm_list_new();
+	dm_list_push_back(module.device_ports, &named);
+	dm_list_push_back(module.device_ports, &unnamed);
+	this->module = &module;
+
+	collect_routes(this);
+
+	/* One real route, plus the two Bluetooth ones the card adds itself. */
+	check_uint("the nameless port is left out", 3, this->n_routes);
+	check_str("and the one that has a name is kept", "output-speaker",
+			this->routes[0].pa_name);
+
+	dm_list_free(module.device_ports, NULL);
+	this->module = NULL;
+}
+
 int main(void)
 {
 	test_route_description();
+	test_port_without_a_name();
 	test_device_description();
 	test_route_body();
 	test_device_lifecycle(TEST_FIXTURE);
+	test_no_primary(TEST_FIXTURE_NO_PRIMARY);
 	test_default_route();
 	test_route_priority();
 	test_route_props();
