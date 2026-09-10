@@ -68,6 +68,16 @@ function forwardProfile (dev)
           -- The HAL does not know the current level yet.
           last_volume = nil
           forwardVolume (node)
+
+          -- The capture node needs to hear about it too. Not to set the mode -
+          -- that belongs to playback - but because the HAL takes the mix
+          -- port's audio source for the call and never gives it back. Without
+          -- this the microphone reads digital silence after every call, until
+          -- something restarts the audio stack.
+          local src = findNode (dev, 1)
+          if src then
+            setNodeProp (src, "droid.mode", mode)
+          end
         end
       end
     end

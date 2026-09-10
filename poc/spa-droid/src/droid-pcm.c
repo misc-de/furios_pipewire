@@ -1648,14 +1648,47 @@ static int apply_voice_volume(struct impl *this, const char *value)
  * AUDIO_MODE_IN_CALL (some devices start the call wrong otherwise). That is
  * why the HAL is opened here if need be - PulseAudio does the same with a
  * virtual stream (voice_virtual_stream). */
+/* Tell the HAL again which audio source we want.
+ *
+ * When a call starts the HAL takes the mix port's source for itself
+ * ("overriding audio source mic with voice call") and does not give it back
+ * when the call ends. Everything recording afterwards reads digital silence -
+ * measured: 48000 samples, every one of them zero, against RMS 633 and 4287
+ * distinct values from the same microphone a moment later. Nothing short of
+ * reopening the stream fixed it, so the source has to be set again by hand. */
+static void reapply_audio_source(struct impl *this)
+{
+	pa_sample_spec spec;
+	pa_channel_map map;
+	pa_proplist *pl;
+
+	if (!this->stream || !this->audio_source[0])
+		return;
+
+	spec.format = PA_SAMPLE_S16LE;
+	spec.rate = this->port.have_format
+		? this->port.current_format.info.raw.rate : DEFAULT_RATE;
+	spec.channels = this->port.have_format
+		? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS;
+	if (spec.channels == 1)
+		pa_channel_map_init_mono(&map);
+	else
+		pa_channel_map_init_stereo(&map);
+
+	pl = pa_proplist_new();
+	pa_proplist_sets(pl, EXT_PROP_AUDIO_SOURCE, this->audio_source);
+	if (!pa_droid_stream_reconfigure_input(this->stream, &spec, &map, pl))
+		spa_log_warn(this->log, NAME " audio source \"%s\" could not be restored",
+				this->audio_source);
+	else
+		DIAG(this, "audio source back to %s", this->audio_source);
+	pa_proplist_free(pl);
+}
+
 static int apply_mode(struct impl *this, const char *mode)
 {
 	audio_mode_t m;
 	int res;
-
-	/* Playback node only: it holds the primary output. */
-	if (this->capture)
-		return 0;
 
 	if (spa_streq(mode, "call"))
 		m = AUDIO_MODE_IN_CALL;
@@ -1665,6 +1698,15 @@ static int apply_mode(struct impl *this, const char *mode)
 		m = AUDIO_MODE_RINGTONE;
 	else
 		m = AUDIO_MODE_NORMAL;
+
+	/* The mode itself is the playback node's business - it holds the primary
+	 * output. The capture node only has to undo what the call did to its
+	 * audio source, see reapply_audio_source(). */
+	if (this->capture) {
+		if (m == AUDIO_MODE_NORMAL)
+			reapply_audio_source(this);
+		return 0;
+	}
 
 	if (m != AUDIO_MODE_NORMAL) {
 		if ((res = hal_open(this)) < 0) {
@@ -1692,7 +1734,7 @@ static int apply_mode(struct impl *this, const char *mode)
 	if (pa_droid_option(this->hw, DM_OPTION_REALCALL)) {
 		const char *param = this->in_call ? "realcall=on" : "realcall=off";
 		if (pa_droid_set_parameters(this->hw, param) < 0)
-			spa_log_warn(this->log, NAME " HAL rejects \"%s\" ab", param);
+			spa_log_warn(this->log, NAME " HAL rejects \"%s\"", param);
 		else
 			DIAG(this, "%s sent to the HAL", param);
 	}

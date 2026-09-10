@@ -190,6 +190,20 @@ only the node holds the HAL stream.
   AudioFlinger, above the HAL. So `droid.lua` puts the level from the route
   back onto the node, where the graph applies it for real - measured again,
   RMS 5693 against 263 at 25 %.
+- **The HAL keeps the microphone after a call unless you take it back.** When a
+  call starts the HAL takes the mix port's audio source for itself
+  ("overriding audio source mic with voice call") and does not return it when
+  the call ends. Everything recording afterwards reads digital silence, until
+  something restarts the audio stack - which is a long way from the symptom.
+  The capture node now hears about the end of the call and sets its source
+  again. Measured after hanging up: RMS 548 across 3304 distinct sample values,
+  where before the fix it was RMS 0.0 and exactly one value.
+- **A dead capture path and a quiet room are easy to tell apart.** Count the
+  distinct sample values, not the level. A live microphone in a silent room
+  still delivers thousands of them - thermal noise, quantisation, dither. One
+  distinct value, and that value zero, means no signal path at all. That is how
+  the headset microphone was ruled out: 96000 samples, one distinct value,
+  against 4287 from the phone's own microphone in the same room.
 - **The plugin must never be unloaded** (`-Wl,-z,nodelete`). PipeWire drops an
   SPA plugin as soon as nothing uses it, which happens on every WirePlumber
   restart. That takes libhybris' Android linker state with it, and building the
