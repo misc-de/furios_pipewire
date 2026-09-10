@@ -101,6 +101,20 @@ shared_module('spa-droid',
   link_with : droid_common,
   install : false)
 
+# --- tests ---
+#
+# The test includes droid-device.c, so it needs the same surroundings as the
+# plugin. It opens no HAL: what it exercises are the decisions, not the device.
+droid_device_test = executable('test-droid-device',
+  'tests/test-droid-device.c',
+  include_directories : [compat_inc, droid_inc, android_inc],
+  dependencies : [spa_dep, hybris_dep, hw_dep,
+                  cc.find_library('m', required : false),
+                  cc.find_library('pthread', required : false)],
+  link_with : droid_common,
+  build_by_default : false)
+test('droid-device', droid_device_test)
+
 executable('probe-droid-device', 'tools/probe-droid-device.c',
   dependencies : [spa_dep, cc.find_library('dl', required : false)])
 

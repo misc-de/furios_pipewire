@@ -223,7 +223,9 @@ verify() {
         # real device came up. Accepting it would let the safety net pass on a
         # plugin that failed to load - the switch would look successful and
         # leave the phone silent, which is the one case this check exists for.
-        if pactl list sinks short 2>/dev/null | awk '{print $2}' \
+        # NF skips blank lines: a stray empty line would otherwise count as
+        # a sink, and this is the check the auto-revert hangs on.
+        if pactl list sinks short 2>/dev/null | awk 'NF {print $2}' \
                 | grep -qvx auto_null; then
             return 0
         fi
@@ -505,6 +507,13 @@ status() {
         printf '  %-28s %-10s %s\n' "$u" "$(uctl is-enabled "$u" 2>&1 | head -1)" "$(uctl is-active "$u" 2>&1 | head -1)"
     done
 }
+
+# Sourcing this file with AUDIOCTL_LIB=1 gives access to the functions without
+# running anything - that is how tests/test-audioctl.sh gets at verify() and
+# effective_profile() with stubbed pactl and systemctl.
+if [ -n "${AUDIOCTL_LIB:-}" ]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 args=(); for a in "$@"; do [ "$a" = --dry-run ] && DRY=1 || args+=("$a"); done
 set -- ${args+"${args[@]}"}

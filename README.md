@@ -127,6 +127,27 @@ system update.
 `common/droid-util.c` that dereference PulseAudio graph objects. Run it again
 after an upstream update; the script reports when its patterns no longer match.
 
+## Tests
+
+    ./tests/run-tests.sh
+
+What is checked is the *decisions*: how a port is ranked, what the card does
+with the volume the graph hands it, when the safety net fires, whether the app
+and `audioctl` still speak the same words. No framework - this has to run on
+the phone, where every extra dependency is one more thing that can be missing
+at the moment the tests matter most.
+
+What is deliberately not checked is whether sound comes out. That needs the
+HAL, a headset, a real call, and the way to establish it is to measure - play a
+tone, record it, count distinct sample values - not to assert. The tests exist
+so that the things which *can* be decided at a desk stop being rediscovered by
+ear.
+
+Each test says which mistake it is there to prevent, because every one of them
+was a real one: `auto_null` passing the safety net; a single stored channel
+volume silencing the right channel of the microphone; renaming an `audioctl`
+label and quietly breaking the app that reads it.
+
 ## Structure
 
 `libspa-droid.so` exports three factories:
