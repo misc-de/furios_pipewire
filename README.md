@@ -143,10 +143,22 @@ tone, record it, count distinct sample values - not to assert. The tests exist
 so that the things which *can* be decided at a desk stop being rediscovered by
 ear.
 
+    ./tests/coverage.sh
+
+reports line coverage of `droid-device.c` per function. It stands at **17 % of
+479 lines**, and that number is meant to be read together with the shape of the
+file: the functions that decide something are covered - `route_priority`,
+`default_route`, `build_route_body` at 100 %, `apply_route_props` at 62 % -
+while everything that talks to PipeWire or the HAL is not, because exercising
+that needs a running graph rather than a test binary. `droid-pcm.c` has no test
+at all: it opens the HAL to do anything.
+
 Each test says which mistake it is there to prevent, because every one of them
 was a real one: `auto_null` passing the safety net; a single stored channel
 volume silencing the right channel of the microphone; renaming an `audioctl`
-label and quietly breaking the app that reads it.
+label and quietly breaking the app that reads it; a route published without
+volume props, which makes every PulseAudio client see 0 % and drop what it
+sets.
 
 ## Structure
 

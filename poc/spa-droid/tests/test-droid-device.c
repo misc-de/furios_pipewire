@@ -267,9 +267,178 @@ static void test_route_description(void)
 	}
 }
 
+/* --- which route is picked when nobody chose ------------------------------
+ *
+ * The priorities are only half the story: this is the function that turns them
+ * into a decision, and it had no test at all while a commit message claimed
+ * the main microphone could not lose. It can now be asked directly.
+ */
+static void add_route(struct impl *this, const char *pa_name, uint32_t device,
+		uint32_t priority, uint32_t available)
+{
+	struct route *r = &this->routes[this->n_routes++];
+
+	/* pa_name is a pointer, not a buffer - in the real thing it points into
+	 * the parsed HAL configuration. String literals outlive this test. */
+	r->pa_name = pa_name;
+	r->device = device;
+	r->priority = priority;
+	r->available = available;
+}
+
+static const char *picked(struct impl *this, uint32_t device)
+{
+	uint32_t idx = default_route(this, device);
+	return idx == SPA_ID_INVALID ? "(none)" : this->routes[idx].pa_name;
+}
+
+static void check_str(const char *what, const char *want, const char *got)
+{
+	checks++;
+	if (spa_streq(want, got)) {
+		printf("  \033[32mok\033[0m   %s\n", what);
+	} else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m %s: expected %s, got %s\n", what, want, got);
+	}
+}
+
+static void test_default_route(void)
+{
+	struct impl *this;
+
+	printf("\nwhich route is picked when nobody chose\n");
+
+	/* The real thing, in the order the vendor's XML lists them. */
+	this = fresh_impl();
+	add_route(this, "input-builtin_mic", DEV_SOURCE, 200, SPA_PARAM_AVAILABILITY_yes);
+	add_route(this, "input-back_mic", DEV_SOURCE, 150, SPA_PARAM_AVAILABILITY_yes);
+	add_route(this, "input-wired_headset", DEV_SOURCE, 100, SPA_PARAM_AVAILABILITY_no);
+	add_route(this, "input-voice_call", DEV_SOURCE, 50, SPA_PARAM_AVAILABILITY_yes);
+	check_str("the main microphone wins", "input-builtin_mic",
+			picked(this, DEV_SOURCE));
+
+	/* The same set in the reverse order. This is the case that matters: with
+	 * everything at 200, as PulseAudio ranks them, the winner used to be
+	 * whichever the XML happened to list first, and a vendor reordering would
+	 * have moved every recording to the call tap. */
+	this = fresh_impl();
+	add_route(this, "input-voice_call", DEV_SOURCE, 50, SPA_PARAM_AVAILABILITY_yes);
+	add_route(this, "input-back_mic", DEV_SOURCE, 150, SPA_PARAM_AVAILABILITY_yes);
+	add_route(this, "input-builtin_mic", DEV_SOURCE, 200, SPA_PARAM_AVAILABILITY_yes);
+	check_str("and still wins when it is listed last", "input-builtin_mic",
+			picked(this, DEV_SOURCE));
+
+	/* Wired accessories are reported unavailable - there is no jack detection
+	 * on this device - and must not be preselected even when they outrank
+	 * what is left. */
+	this = fresh_impl();
+	add_route(this, "output-wired_headset", DEV_SINK, 900, SPA_PARAM_AVAILABILITY_no);
+	add_route(this, "output-speaker", DEV_SINK, 300, SPA_PARAM_AVAILABILITY_yes);
+	check_str("an unavailable route is not picked, however high it ranks",
+			"output-speaker", picked(this, DEV_SINK));
+
+	/* Bluetooth reports "unknown": selectable, never automatic. */
+	this = fresh_impl();
+	add_route(this, "output-bluetooth_sco", DEV_SINK, 50,
+			SPA_PARAM_AVAILABILITY_unknown);
+	add_route(this, "output-speaker", DEV_SINK, 300, SPA_PARAM_AVAILABILITY_yes);
+	check_str("nor is one whose availability is unknown", "output-speaker",
+			picked(this, DEV_SINK));
+
+	/* Routes belong to one direction. Picking an output for the microphone
+	 * would be a fine way to lose an afternoon. */
+	this = fresh_impl();
+	add_route(this, "output-speaker", DEV_SINK, 300, SPA_PARAM_AVAILABILITY_yes);
+	check_str("a direction with no routes picks nothing", "(none)",
+			picked(this, DEV_SOURCE));
+
+	this = fresh_impl();
+	check_str("no routes at all picks nothing", "(none)", picked(this, DEV_SINK));
+}
+
+/* --- what the card actually publishes about a route -----------------------
+ *
+ * build_route_body() produces the Route param the rest of the system reads.
+ * Everything that went wrong with the volume this morning went wrong here:
+ * a route without volume props makes pipewire-pulse report 0 % and drop every
+ * change, while wpctl keeps working, so the fault looks like the caller's.
+ */
+static void test_route_body(void)
+{
+	uint8_t buffer[4096];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	struct spa_pod_frame f;
+	struct spa_pod *param;
+	struct impl *this;
+	struct spa_pod_object *obj;
+	struct spa_pod_prop *prop;
+	bool saw_volume = false, saw_mute = false, saw_channels = false;
+	bool saw_map = false, saw_params = false, saw_name = false;
+
+	printf("\nwhat a route tells the rest of the system\n");
+
+	this = fresh_impl();
+	add_route(this, "output-speaker", DEV_SINK, 300, SPA_PARAM_AVAILABILITY_yes);
+	snprintf(this->routes[0].description, sizeof(this->routes[0].description),
+			"%s", "Speaker");
+	this->channel_volumes[DEV_SINK][0] = 0.5f;
+
+	spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
+	build_route_body(this, &b, &this->routes[0], 0, true);
+	param = spa_pod_builder_pop(&b, &f);
+
+	obj = (struct spa_pod_object *) param;
+	SPA_POD_OBJECT_FOREACH(obj, prop) {
+		if (prop->key == SPA_PARAM_ROUTE_name)
+			saw_name = true;
+		if (prop->key != SPA_PARAM_ROUTE_props)
+			continue;
+		{
+			struct spa_pod_object *po = (struct spa_pod_object *) &prop->value;
+			struct spa_pod_prop *pp;
+			SPA_POD_OBJECT_FOREACH(po, pp) {
+				switch (pp->key) {
+				case SPA_PROP_volume:        saw_volume = true; break;
+				case SPA_PROP_mute:          saw_mute = true; break;
+				case SPA_PROP_channelVolumes: saw_channels = true; break;
+				case SPA_PROP_channelMap:    saw_map = true; break;
+				case SPA_PROP_params:        saw_params = true; break;
+				default: break;
+				}
+			}
+		}
+	}
+
+	check_uint("the route carries its name", 1, saw_name ? 1 : 0);
+	check_uint("and a volume, without which PulseAudio clients see 0 %",
+			1, saw_volume ? 1 : 0);
+	check_uint("and a mute", 1, saw_mute ? 1 : 0);
+	check_uint("and per-channel volumes", 1, saw_channels ? 1 : 0);
+	check_uint("and the channel map that goes with them - without it "
+			"front-left becomes aux0", 1, saw_map ? 1 : 0);
+	check_uint("and the props pair that carries the route across to the node",
+			1, saw_params ? 1 : 0);
+
+	/* Without the device index the route is not a route anyone can set. */
+	b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
+	build_route_body(this, &b, &this->routes[0], 0, false);
+	param = spa_pod_builder_pop(&b, &f);
+	obj = (struct spa_pod_object *) param;
+	saw_params = false;
+	SPA_POD_OBJECT_FOREACH(obj, prop)
+		if (prop->key == SPA_PARAM_ROUTE_props)
+			saw_params = true;
+	check_uint("an enumerated route carries no props - only the active one does",
+			0, saw_params ? 1 : 0);
+}
+
 int main(void)
 {
 	test_route_description();
+	test_route_body();
+	test_default_route();
 	test_route_priority();
 	test_route_props();
 	printf("\n  %d checks, %d failed\n", checks, failures);

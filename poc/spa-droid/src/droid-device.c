@@ -70,7 +70,7 @@ int droid_node_set_route(const char *mix_port, const char *device_port);
 
 struct route {
 	dm_config_port *port;      /* device port from the HAL configuration */
-	const char *pa_name;       /* "output-speaker" usw. */
+	const char *pa_name;       /* "output-speaker" and so on */
 	char description[64];
 	enum spa_direction dir;
 	uint32_t device;           /* DEV_SINK or DEV_SOURCE */
