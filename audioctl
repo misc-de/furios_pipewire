@@ -77,6 +77,18 @@ plugin_version_check() {
     return 0
 }
 
+# Der Droid-Monitor von WirePlumber darf nur laufen, wenn PipeWire den HAL
+# auch halten soll. Im Profil pw-tunnel haelt ihn PulseAudio - wuerde der
+# Monitor dort starten, riefe er nach demselben Geraet.
+WPCONF=/usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf
+droid_monitor() {
+    case "$1" in
+    an)  [ -e "$WPCONF.aus" ] && run sudo mv "$WPCONF.aus" "$WPCONF" ;;
+    aus) [ -e "$WPCONF" ]     && run sudo mv "$WPCONF" "$WPCONF.aus" ;;
+    esac
+    return 0
+}
+
 # --- Vorbedingungen je Profil ----------------------------------------------
 preflight() {
     case "$1" in
@@ -102,6 +114,7 @@ apply() {
     local p=$1
     case "$p" in
     standard)
+        droid_monitor an
         run uctl stop furios-pw-tunnel.service 2>/dev/null
         run uctl disable furios-pw-tunnel.service 2>/dev/null
         # Maskieren stoppt einen LAUFENDEN Dienst nicht - erst stoppen,
@@ -123,15 +136,24 @@ apply() {
     pw-tunnel)
         # PulseAudio behaelt HAL und Pulse-Socket. PipeWire bekommt zusaetzlich
         # einen Tunnel-Sink. Telefonie bleibt unberuehrt.
-        mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
-        unmask pulseaudio.service pulseaudio.socket
+        #
+        # WirePlumber MUSS hier laufen: ohne Sitzungsverwalter verknuepft
+        # niemand die Stroeme, und der Tunnel-Sink bliebe unbenutzt - genau
+        # daran ist dieses Profil beim ersten Test gescheitert. Sein
+        # Droid-Monitor bleibt dabei aus, sonst riefe er nach dem HAL, den
+        # PulseAudio haelt.
+        droid_monitor aus
+        mask   pipewire-pulse.service pipewire-pulse.socket
+        unmask pulseaudio.service pulseaudio.socket wireplumber.service
         run sudo rm -f "$DROPIN"
         run uctl daemon-reload
         run uctl start pulseaudio.socket pulseaudio.service
+        run uctl restart wireplumber.service
         run uctl enable --now furios-pw-tunnel.service
         ;;
     pw-hal)
         # PipeWire uebernimmt den HAL. PulseAudio muss weichen (HAL ist exklusiv).
+        droid_monitor an
         run uctl stop furios-pw-tunnel.service 2>/dev/null
         run uctl disable furios-pw-tunnel.service 2>/dev/null
         run uctl stop pulseaudio.service pulseaudio.socket
