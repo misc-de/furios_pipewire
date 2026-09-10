@@ -214,11 +214,18 @@ Die Abstimmungsdatei des Herstellers sagt auf diesem Geraet:
     MTK_VOIP_HANDSFREE_DMNR      no
     MTK_VOIP_NORMAL_DMNR         no
 
-`experiments/dmnr-handsfree.sh an` legt per Bind-Mount eine geaenderte Kopie
-ueber die Datei (die Partition ist schreibgeschuetzt und per dm-verity
-abgesichert - daran wird nicht geschraubt) und startet den Audiostack neu,
-damit der HAL sie liest. `aus` nimmt sie weg, ein Neustart ebenfalls.
-**Ungetestet** - das kann nur ein echtes Gespraech zeigen.
+Zum Ausprobieren gibt es einen Schalter - in der Umschalter-App unter "Call
+echo", oder auf der Kommandozeile:
+
+    furios-audio-dmnr an       # geaenderte Kopie einhaengen
+    furios-audio-dmnr aus      # zurueck zum Original
+    furios-audio-dmnr status
+
+Er legt per Bind-Mount eine geaenderte Kopie ueber die Datei - die Partition
+ist schreibgeschuetzt und per dm-verity abgesichert, daran wird nicht
+geschraubt - und startet den Audiostack neu (`audioctl restart`, das Profil
+bleibt), damit der HAL sie liest. Ein Neustart des Geraets raeumt alles weg.
+**Ob es hilft, ist ungetestet** - das kann nur ein echtes Gespraech zeigen.
 
 Zwei Spuren, die sich als Sackgasse erwiesen haben:
 

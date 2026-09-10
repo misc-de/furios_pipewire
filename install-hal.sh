@@ -34,7 +34,10 @@ sudo install -m644 wireplumber/droid.lua /usr/local/share/wireplumber/scripts/mo
 sudo install -m644 wireplumber/50-droid.conf /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf
 sudo install -m644 wireplumber/51-bluez-ofono.conf /usr/local/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf
 
-echo "4) audioctl aktualisieren (Plugin-Pfad)"
+echo "4) Echo-Versuch (DMNR)"
+sudo install -m755 experiments/dmnr-handsfree.sh /usr/local/bin/furios-audio-dmnr
+
+echo "5) audioctl aktualisieren (Plugin-Pfad)"
 sudo install -m755 audioctl /usr/local/bin/audioctl
 
 echo

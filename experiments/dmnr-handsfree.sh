@@ -29,6 +29,12 @@ ORIG=/android/vendor/etc/audio_param/AudioParamOptions.xml
 COPY=/var/lib/furios-audio/AudioParamOptions.dmnr.xml
 
 show() {
+    # Erste Zeile bewusst maschinenlesbar - die Umschalter-App liest sie.
+    if grep -q " $ORIG " /proc/mounts 2>/dev/null; then
+        printf 'state=on\n'
+    else
+        printf 'state=off\n'
+    fi
     printf 'Datei:  %s\n' "$ORIG"
     if mountpoint -q "$ORIG" 2>/dev/null || grep -q " $ORIG " /proc/mounts 2>/dev/null; then
         printf 'Zustand: geaenderte Kopie liegt darueber\n'
@@ -56,7 +62,7 @@ an)
     fi
     sudo mount --bind "$COPY" "$ORIG"
     echo "Geaenderte Kopie eingehaengt. Audiostack neu starten, damit der HAL sie liest:"
-    audioctl set standard >/dev/null 2>&1 || true
+    audioctl restart >/dev/null 2>&1 || true
     echo
     show
     echo
@@ -71,7 +77,7 @@ aus)
     else
         echo "Es lag nichts darueber."
     fi
-    audioctl set standard >/dev/null 2>&1 || true
+    audioctl restart >/dev/null 2>&1 || true
     show
     ;;
 

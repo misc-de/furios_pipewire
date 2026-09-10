@@ -425,6 +425,7 @@ audioctl - Audiostack umschalten
   audioctl list                Profile auflisten
   audioctl try <profil>        umschalten, faellt beim Neustart zurueck
   audioctl set <profil>        umschalten und persistent merken
+  audioctl restart             Audiostack neu starten, Profil bleibt
   audioctl rescue              Ton wieder hoerbar machen: Auslieferungszustand,
                                Lautsprecher, 65 %, nicht stumm
   audioctl bt-call watch       vor dem Anruf starten: legt das Gespraech dann
@@ -476,6 +477,14 @@ case "${1:-status}" in
     list)   printf '%s\n' $PROFILES ;;
     try)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" try ;;
     set)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" sticky ;;
+    # Neu starten, ohne das Profil zu wechseln - etwa damit der HAL eine
+    # geaenderte Abstimmungsdatei neu liest.
+    restart) p=$(effective_profile)
+             [ "$p" = unklar ] && p=$(current_profile)
+             printf 'Starte Audiostack neu (Profil %s)\n' "$p"
+             apply "$p"
+             verify && info "OK - Sink vorhanden: $(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, -)" \
+                    || printf 'ACHTUNG: kein Sink nach dem Neustart.\n' >&2 ;;
     rescue) rescue ;;
     bt-call) [ $# -ge 2 ] || die "bt-call braucht 'on', 'off' oder 'watch'."; bt_call "$2" ;;
     revert) switch_to standard sticky ;;

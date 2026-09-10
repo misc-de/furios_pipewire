@@ -30,6 +30,7 @@ printf '%s\n' "$PWVER" > "$STAGE/usr/lib/$TRIPLET/spa-0.2/droid/gebaut-gegen"
 
 install -Dm755 audioctl                       "$STAGE/usr/bin/audioctl"
 install -Dm755 gui/furios-audio-switch.py     "$STAGE/usr/bin/furios-audio-switch"
+install -Dm755 experiments/dmnr-handsfree.sh  "$STAGE/usr/bin/furios-audio-dmnr"
 
 install -Dm644 tunnel.conf                    "$STAGE/usr/share/furios-audio/tunnel.conf"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$STAGE/tmp-hal.conf" >/dev/null
