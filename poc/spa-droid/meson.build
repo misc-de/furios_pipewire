@@ -2,7 +2,12 @@ project('spa-droid', 'c',
   version : '0.1',
   default_options : ['c_std=gnu11', 'warning_level=1'])
 
-droid_src = '/home/furios/furios-audio/src/pulseaudio-modules-droid-modern/src'
+# Aus dem Projektverzeichnis abgeleitet, damit ein Verschieben des
+# Arbeitsbaums nichts kaputtmacht. Ueber fs.parent statt '..', denn
+# include_directories() vertraegt keine Pfade mit .. darin.
+fs = import('fs')
+repo_root = fs.parent(fs.parent(meson.project_source_root()))
+droid_src = repo_root / 'src/pulseaudio-modules-droid-modern/src'
 
 cc = meson.get_compiler('c')
 expat_dep = dependency('expat')

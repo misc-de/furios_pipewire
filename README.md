@@ -1,10 +1,10 @@
-# furios-audio
+# furios_pipewire
 
 Audio auf dem FuriPhone (FuriOS, MediaTek mt6877) laeuft ab Werk ueber
 **PulseAudio + module-droid-card**; das mitgelieferte PipeWire ist auf Kamera
 und Screencast beschraenkt (`pipewire-droid.conf` laedt kein `api.alsa.*`).
 
-Dieses Verzeichnis enthaelt zweierlei:
+Dieses Verzeichnis (`~/Projekte/furios_pipewire`) enthaelt zweierlei:
 
 1. **`audioctl`** - Umschaltung zwischen Audio-Profilen, jederzeit reversibel.
 2. **`poc/spa-droid/`** - ein SPA-Plugin, das den Android-Audio-HAL direkt an
