@@ -27,6 +27,15 @@ dem Wechsel ein Sink, schaltet audioctl von selbst auf `standard` zurueck.
 **`audioctl verify` prueft nur, ob ein Sink existiert - nicht, ob Ton fliesst.**
 Nach einem Wechsel wirklich etwas abspielen.
 
+Vor dem Wechsel nach `pw-hal` prueft audioctl, ob das Plugin noch zur
+installierten PipeWire-Fassung passt (`gebaut-gegen` neben der Plugin-Datei).
+Bricht ein Systemupdate die SPA-Schnittstelle, waere `pw-hal` sonst
+kommentarlos stumm - jetzt kommt eine Warnung mit dem Hinweis, neu zu bauen.
+
+`audioctl rescue` macht den Ton wieder hoerbar: Auslieferungszustand,
+Lautsprecher statt Ohrmuschel, nicht stumm, 65 %. `bt-call` faengt Abbrueche
+mit einer Trap ab, damit ein unterbrochener Test nichts Stummes hinterlaesst.
+
 Beim Wechsel beendet audioctl ausserdem `callaudiod` und `feedbackd`. Beide
 halten dauerhafte Verbindungen zum Audioserver und ueberleben einen
 Serverwechsel nicht: callaudiod findet danach keine Karte mehr, feedbackd

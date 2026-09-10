@@ -15,6 +15,13 @@ echo "1) SPA-Plugin nach $SPA_DIR"
 sudo mkdir -p "$SPA_DIR"
 sudo install -m644 "$PLUGIN" "$SPA_DIR/libspa-droid.so"
 
+# Gegen die PipeWire-Version merken, gegen die gebaut wurde. Bricht ein
+# Update die SPA-Schnittstelle, waere pw-hal sonst kommentarlos stumm -
+# audioctl warnt jetzt vorher.
+BUILT_AGAINST=$(pkg-config --modversion libpipewire-0.3 2>/dev/null || echo unbekannt)
+echo "$BUILT_AGAINST" | sudo tee "$SPA_DIR/gebaut-gegen" >/dev/null
+echo "   gebaut gegen PipeWire $BUILT_AGAINST"
+
 echo "2) PipeWire-Konfiguration erzeugen"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf /tmp/pipewire-hal.conf
 sudo mkdir -p /usr/local/share/furios-audio

@@ -56,6 +56,27 @@ pulse_owner() {
     [ -n "$s" ] && printf '%s' "$s" || printf 'nicht erreichbar'
 }
 
+# Passt das Plugin noch zur installierten PipeWire-Fassung?
+#
+# Das Plugin wird gegen eine bestimmte SPA-Schnittstelle gebaut. Bricht ein
+# Systemupdate sie, waere pw-hal kommentarlos stumm - der Auto-Revert faengt
+# das zwar ab, aber eine Warnung vorher erspart die Suche.
+plugin_version_check() {
+    local dir=/usr/lib/aarch64-linux-gnu/spa-0.2/droid built now
+    [ -r "$dir/gebaut-gegen" ] || return 0
+    built=$(cat "$dir/gebaut-gegen")
+    now=$(pkg-config --modversion libpipewire-0.3 2>/dev/null)
+    [ -n "$now" ] || now=$(pipewire --version 2>/dev/null | sed -n 's/.*libpipewire \([0-9.]*\).*/\1/p' | head -1)
+    [ -n "$now" ] || return 0
+    if [ "$built" != "$now" ]; then
+        printf 'WARNUNG: Das Plugin wurde gegen PipeWire %s gebaut, installiert ist %s.\n' \
+            "$built" "$now" >&2
+        printf '         Wenn kein Ton kommt: im Projektverzeichnis neu bauen und\n' >&2
+        printf '         ./install-hal.sh erneut ausfuehren.\n' >&2
+    fi
+    return 0
+}
+
 # --- Vorbedingungen je Profil ----------------------------------------------
 preflight() {
     case "$1" in
@@ -66,6 +87,7 @@ preflight() {
         [ -e "$LOCAL/tunnel.conf" ] || die "$LOCAL/tunnel.conf fehlt."
         ;;
     pw-hal)
+        plugin_version_check
         [ -e /usr/lib/aarch64-linux-gnu/spa-0.2/droid/libspa-droid.so ] \
             || die "SPA-Droid-Plugin noch nicht gebaut - Profil pw-hal ist bis dahin gesperrt."
         command -v wireplumber >/dev/null \
