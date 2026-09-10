@@ -122,6 +122,8 @@ struct impl {
 	char wanted_port[64];       /* vom Device gewuenschte Route */
 	bool mode_holds_hal;        /* HAL nur wegen Anrufmodus offen */
 	bool in_call;               /* Modus ist AUDIO_MODE_IN_CALL */
+	uint64_t hal_latency_ns;    /* beim Oeffnen gemerkt, s. latency_ns() */
+	bool hal_failed;            /* HAL nimmt dauerhaft nichts mehr an */
 
 	/* Uebergabe an den Schreib-Thread */
 	struct spa_ringbuffer ring;
@@ -236,6 +238,7 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	else
 		DIAG(this, "Eingabegeraet gesetzt: %s", dev->name);
 
+	this->hal_latency_ns = (uint64_t) pa_droid_stream_get_latency(this->stream) * 1000;
 	latency_changed(this);
 	spa_log_info(this->log, NAME " Aufnahmestream offen: %s, %u Hz, %u Kanaele, Puffer %zu B",
 			this->mix_port_name, spec->rate, spec->channels,
@@ -277,6 +280,7 @@ static int hal_open(struct impl *this)
 		this->bytes_queued = this->bytes_written = 0;
 		this->n_process = this->n_write = 0;
 		this->n_write_err = this->n_overrun = this->n_underrun = 0;
+		this->hal_failed = false;
 		return 0;
 	}
 
@@ -318,6 +322,7 @@ static int hal_open(struct impl *this)
 		return -EIO;
 	}
 
+	this->hal_latency_ns = (uint64_t) pa_droid_stream_get_latency(this->stream) * 1000;
 	latency_changed(this);
 	spa_log_info(this->log, NAME " Stream offen: %s -> %s, %u Hz, %u Kanaele, Puffer %zu B",
 			mix->name, dev->name, spec.rate, spec.channels,
@@ -343,6 +348,7 @@ static int hal_open(struct impl *this)
 	this->bytes_queued = this->bytes_written = 0;
 	this->n_process = this->n_write = 0;
 	this->n_write_err = this->n_overrun = this->n_underrun = 0;
+	this->hal_failed = false;
 	return 0;
 }
 
@@ -361,6 +367,7 @@ static void hal_close(struct impl *this)
 	/* Ohne Stream gibt es keine Verzoegerung mehr - sonst bliebe der alte
 	 * Wert stehen und der Graph rechnete mit einer Latenz, die es nicht
 	 * mehr gibt. */
+	this->hal_latency_ns = 0;
 	if (had_stream)
 		latency_changed(this);
 }
@@ -373,17 +380,18 @@ static void hal_close(struct impl *this)
 static uint64_t latency_ns(struct impl *this)
 {
 	uint32_t stride, idx;
-	uint64_t ns = 0;
+	uint64_t ns;
 	int32_t avail;
 
-	if (this->stream)
-		ns = (uint64_t) pa_droid_stream_get_latency(this->stream) * 1000;
+	/* Der HAL-Anteil wird beim Oeffnen einmal erfragt und gemerkt:
+	 * pa_droid_stream_get_latency() ruft in den HAL, und diese Funktion laeuft
+	 * im Datenpfad des Graphen. Ein blockierender Aufruf waere dort ein
+	 * Aussetzer. */
+	ns = this->hal_latency_ns;
 
 	stride = 2 * (this->port.have_format
 			? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS);
-	avail = this->capture
-		? spa_ringbuffer_get_read_index(&this->ring, &idx)
-		: spa_ringbuffer_get_read_index(&this->ring, &idx);
+	avail = spa_ringbuffer_get_read_index(&this->ring, &idx);
 	if (avail > 0 && this->rate && stride)
 		ns += (uint64_t) avail * SPA_NSEC_PER_SEC / ((uint64_t) this->rate * stride);
 
@@ -498,6 +506,7 @@ static void *writer_thread(void *arg)
 	struct impl *this = arg;
 	size_t chunk = pa_droid_stream_buffer_size(this->stream);
 	uint8_t *buf;
+	unsigned consecutive_errors = 0;
 
 	if (chunk == 0 || chunk > RING_SIZE / 2)
 		chunk = 4096;
@@ -544,7 +553,19 @@ static void *writer_thread(void *arg)
 				if (this->n_write_err++ == 0)
 					spa_log_warn(this->log, NAME " HAL-Write fehlgeschlagen: %zd "
 							"(weitere werden nur gezaehlt)", w);
+				/* Drei Fehlschlaege hintereinander heissen: der Stream ist
+				 * hin. Weiterschreiben bringt nichts und verbrennt nur Strom.
+				 * Aufgeben, aber sauber - beim naechsten Start macht
+				 * hal_open() alles neu auf. Genau dahin kommt der Knoten von
+				 * selbst, sobald WirePlumber ihn im Leerlauf schlafen legt. */
+				if (++consecutive_errors >= 3 && !this->hal_failed) {
+					this->hal_failed = true;
+					spa_log_error(this->log, NAME " HAL nimmt nichts mehr an - "
+							"Ausgabe angehalten. Beim naechsten Start wird "
+							"neu geoeffnet.");
+				}
 			} else {
+				consecutive_errors = 0;
 				if (this->n_write == 0)
 					DIAG(this, "erster HAL-Write ok: %zd von %zu B", w, chunk);
 				this->bytes_written += (uint64_t) w;
@@ -564,6 +585,7 @@ static void *reader_thread(void *arg)
 	struct impl *this = arg;
 	size_t chunk = pa_droid_stream_buffer_size(this->stream);
 	uint8_t *buf;
+	unsigned consecutive_errors = 0;
 
 	if (chunk == 0 || chunk > RING_SIZE / 2)
 		chunk = 4096;
@@ -588,10 +610,17 @@ static void *reader_thread(void *arg)
 			if (this->n_write_err++ == 0)
 				spa_log_warn(this->log, NAME " HAL-Read fehlgeschlagen: %zd "
 						"(weitere werden nur gezaehlt)", r);
+			if (++consecutive_errors >= 3 && !this->hal_failed) {
+				this->hal_failed = true;
+				spa_log_error(this->log, NAME " HAL liefert nichts mehr - "
+						"Aufnahme angehalten. Beim naechsten Start wird "
+						"neu geoeffnet.");
+			}
 			/* Nicht heisslaufen, wenn der HAL dauerhaft sofort scheitert. */
 			usleep((useconds_t) (this->period_ns / 1000));
 			continue;
 		}
+		consecutive_errors = 0;
 
 		if (this->n_write == 0)
 			DIAG(this, "erster HAL-Read ok: %zd von %zu B", r, chunk);
@@ -1103,6 +1132,13 @@ static int impl_process(void *object)
 	d = &buf->datas[0];
 	offs = SPA_MIN(d->chunk->offset, d->maxsize);
 	size = SPA_MIN(d->chunk->size, d->maxsize - offs);
+
+	/* Wenn der HAL nichts mehr annimmt, den Ring nicht weiter fuellen -
+	 * sonst laeuft er ueber und wir zaehlen sinnlos Verluste. */
+	if (this->hal_failed) {
+		io->status = SPA_STATUS_NEED_DATA;
+		return SPA_STATUS_NEED_DATA;
+	}
 
 	filled = spa_ringbuffer_get_write_index(&this->ring, &idx);
 	if (filled + size > RING_SIZE) {
