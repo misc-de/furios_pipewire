@@ -242,6 +242,18 @@ static void add_synthetic_bt_routes(struct impl *this)
  * thing is. "Voice Call In" reads like a microphone and is not one - it is the
  * tap on the call audio path, silent outside a call. Someone picking it as
  * their recording input gets nothing and has no way to guess why. */
+/* What the card calls itself.
+ *
+ * Desktops list an input as "<port> - <card>", so this word is repeated behind
+ * every microphone and speaker the phone has. "Android HAL" told the owner of
+ * the phone nothing they could use. It cannot simply be left out either: with
+ * an empty description WirePlumber creates no card at all, so the shorter
+ * label would cost all sound. */
+static const char *device_description(void)
+{
+	return "Phone";
+}
+
 static const char *route_description(const char *pa_name, const char *fallback)
 {
 	static const struct {
@@ -510,7 +522,7 @@ static void emit_node(struct impl *this, uint32_t device)
 
 	items[n++] = SPA_DICT_ITEM_INIT("node.name", sink ? "droid-sink" : "droid-source");
 	items[n++] = SPA_DICT_ITEM_INIT("node.description",
-			sink ? "Android HAL (Playback)" : "Android HAL (Capture)");
+			sink ? "Phone (Playback)" : "Phone (Capture)");
 	items[n++] = SPA_DICT_ITEM_INIT("media.class", sink ? "Audio/Sink" : "Audio/Source");
 	items[n++] = SPA_DICT_ITEM_INIT("device.api", DROID_API_NAME);
 	items[n++] = SPA_DICT_ITEM_INIT("device.class", "sound");
@@ -557,7 +569,7 @@ static void emit_voip_node(struct impl *this, bool sink)
 	items[n++] = SPA_DICT_ITEM_INIT("node.name",
 			sink ? "droid-voip-sink" : "droid-voip-source");
 	items[n++] = SPA_DICT_ITEM_INIT("node.description",
-			sink ? "Android HAL (VoIP Playback)" : "Android HAL (VoIP Capture)");
+			sink ? "Phone (VoIP Playback)" : "Phone (VoIP Capture)");
 	items[n++] = SPA_DICT_ITEM_INIT("media.class",
 			sink ? "Audio/Sink" : "Audio/Source");
 	items[n++] = SPA_DICT_ITEM_INIT("device.api", DROID_API_NAME);
@@ -618,7 +630,7 @@ static void emit_info(struct impl *this, bool full)
 	items[n++] = SPA_DICT_ITEM_INIT("device.class", "sound");
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_MEDIA_CLASS, "Audio/Device");
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NAME, "droid");
-	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, "Android HAL");
+	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_DESCRIPTION, device_description());
 	items[n++] = SPA_DICT_ITEM_INIT(SPA_KEY_DEVICE_NICK, "droid");
 	items[n++] = SPA_DICT_ITEM_INIT("api.droid.module",
 			this->module ? this->module->name : "primary");

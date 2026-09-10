@@ -434,9 +434,32 @@ static void test_route_body(void)
 			0, saw_params ? 1 : 0);
 }
 
+/* The card's own description is repeated behind every port a desktop lists, so
+ * it has to be a word the owner of the phone can use - and it cannot be empty,
+ * because WirePlumber then creates no card at all and there is no sound. */
+static void test_device_description(void)
+{
+	const char *desc;
+
+	printf("\nwhat the card calls itself\n");
+
+	desc = device_description();
+	check_uint("the card has a description at all", 1,
+			(desc != NULL && desc[0] != '\0') ? 1 : 0);
+
+	checks++;
+	if (strstr(desc, "HAL") == NULL) {
+		printf("  \033[32mok\033[0m   and it is not jargon - no \"HAL\" behind every port\n");
+	} else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the card description is back to jargon\n");
+	}
+}
+
 int main(void)
 {
 	test_route_description();
+	test_device_description();
 	test_route_body();
 	test_default_route();
 	test_route_priority();

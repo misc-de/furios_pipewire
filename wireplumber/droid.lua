@@ -231,7 +231,7 @@ end
 
 device = SpaDevice ("api.droid.device", {
   ["device.name"] = "droid_card.primary",
-  ["device.description"] = "Android HAL",
+  ["device.description"] = "Phone",
   ["device.nick"] = "droid",
   ["device.api"] = "droid-hal",
   ["media.class"] = "Audio/Device",
