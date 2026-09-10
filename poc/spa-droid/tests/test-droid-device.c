@@ -222,8 +222,45 @@ static void test_route_props(void)
 			this->channel_volumes[DEV_SINK][0]);
 }
 
+/* --- what a port is called ------------------------------------------------ */
+static void test_route_description(void)
+{
+	printf("\nport descriptions\n");
+
+	checks++;
+	if (strstr(route_description("input-voice_call", "Voice Call In"),
+				"not a microphone") != NULL)
+		printf("  \033[32mok\033[0m   the call tap says it is not a microphone\n");
+	else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the call tap still reads like an input device\n");
+	}
+
+	/* Everything else keeps the manufacturer's own word for their hardware.
+	 * Inventing better names is how a description ends up claiming a thing
+	 * nobody checked - "Built-In Top Mic" would be a fine example, on a
+	 * device whose vendor configuration says it has one microphone. */
+	checks++;
+	if (spa_streq(route_description("input-builtin_mic", "Built-In Mic"),
+				"Built-In Mic"))
+		printf("  \033[32mok\033[0m   the microphone keeps the vendor's own label\n");
+	else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the microphone label was invented somewhere\n");
+	}
+
+	checks++;
+	if (spa_streq(route_description("output-speaker", "Speaker"), "Speaker"))
+		printf("  \033[32mok\033[0m   an unknown port falls back unchanged\n");
+	else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the fallback description was altered\n");
+	}
+}
+
 int main(void)
 {
+	test_route_description();
 	test_route_priority();
 	test_route_props();
 	printf("\n  %d checks, %d failed\n", checks, failures);

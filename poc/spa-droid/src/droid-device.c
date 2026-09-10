@@ -231,6 +231,33 @@ static void add_synthetic_bt_routes(struct impl *this)
 	}
 }
 
+/* What to call a port, where the vendor's own label misleads.
+ *
+ * The descriptions otherwise come straight from the tagName in Android's
+ * audio_policy XML, which is the right default: it is the manufacturer's own
+ * word for their own hardware, and inventing better ones is how a description
+ * ends up claiming something nobody verified.
+ *
+ * The exception is a label that is not just terse but wrong about what the
+ * thing is. "Voice Call In" reads like a microphone and is not one - it is the
+ * tap on the call audio path, silent outside a call. Someone picking it as
+ * their recording input gets nothing and has no way to guess why. */
+static const char *route_description(const char *pa_name, const char *fallback)
+{
+	static const struct {
+		const char *pa_name;
+		const char *description;
+	} overrides[] = {
+		{ "input-voice_call", "Voice Call Tap (not a microphone)" },
+	};
+	size_t i;
+
+	for (i = 0; i < SPA_N_ELEMENTS(overrides); i++)
+		if (spa_streq(pa_name, overrides[i].pa_name))
+			return overrides[i].description;
+	return fallback;
+}
+
 static void collect_routes(struct impl *this)
 {
 	dm_config_port *port;
@@ -277,7 +304,8 @@ static void collect_routes(struct impl *this)
 			r->available = SPA_PARAM_AVAILABILITY_yes;
 			break;
 		}
-		snprintf(r->description, sizeof(r->description), "%s", port->name);
+		snprintf(r->description, sizeof(r->description), "%s",
+				route_description(r->pa_name, port->name));
 	}
 
 	add_synthetic_bt_routes(this);
