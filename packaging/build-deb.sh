@@ -33,6 +33,10 @@ printf '%s\n' "$PWVER" > "$STAGE/usr/lib/$TRIPLET/spa-0.2/droid/built-against"
 install -Dm755 audioctl                       "$STAGE/usr/bin/audioctl"
 install -Dm755 gui/furios-audio-switch.py     "$STAGE/usr/bin/furios-audio-switch"
 install -Dm755 experiments/dmnr-handsfree.sh  "$STAGE/usr/bin/furios-audio-dmnr"
+# The AAC codec module is deliberately NOT shipped as a binary: it links
+# fdk-aac, and building it locally is a different thing from redistributing
+# it. The script that builds it comes along instead.
+install -Dm755 tools/build-bluez5-aac.sh      "$STAGE/usr/share/furios-audio/build-bluez5-aac.sh"
 
 install -Dm644 tunnel.conf                    "$STAGE/usr/share/furios-audio/tunnel.conf"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$STAGE/tmp-hal.conf" >/dev/null

@@ -352,6 +352,25 @@ and it reads happily - 192000 bytes of pure silence, RMS 0, peak 0. It is a
 loopback node that exists so that opening it triggers the headset profile, and
 that path carries no audio here either.
 
+**Bluetooth music quality is a codec question, and Debian is one codec short.**
+`libspa-0.2-bluetooth` ships modules for SBC, LDAC, aptX, Opus and LC3 - but
+not AAC, which needs fdk-aac. Most earbuds offer AAC and SBC and nothing else,
+so without it PipeWire falls back to SBC, and the headset decides how good that
+gets: the one measured here caps SBC at bitpool 39, which even SBC-XQ runs into.
+`tools/build-bluez5-aac.sh` builds the missing module from the matching PipeWire
+sources and drops it in beside the others - additive, replacing nothing dpkg
+owns. `audioctl` warns when a PipeWire update has moved past it, because the
+only symptom would otherwise be that Bluetooth music quietly sounds worse than
+it did yesterday.
+
+Reading what a headset actually offers, rather than guessing:
+
+    busctl tree org.bluez | grep sep          # one entry per codec it offers
+    busctl get-property org.bluez /org/bluez/hci0/dev_<MAC>/sep1 \
+        org.bluez.MediaEndpoint1 Codec        # 0 = SBC, 2 = AAC
+    busctl get-property org.bluez /org/bluez/hci0/dev_<MAC>/sep3 \
+        org.bluez.MediaEndpoint1 Capabilities # SBC: 4th byte is the max bitpool
+
 **Reconnect the headset once after a profile switch.** audioctl restarts
 WirePlumber; a device that was already connected before does not fully
 re-register its profiles - the card then shows only part of them (say only HFP,

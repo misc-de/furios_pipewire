@@ -88,6 +88,28 @@ plugin_version_check() {
     return 0
 }
 
+# The hand-built AAC codec module has the same problem, for Bluetooth.
+#
+# Debian ships no AAC module, so most earbuds fall back to SBC - see
+# tools/build-bluez5-aac.sh. That module is built against PipeWire's internal
+# codec interface; after an update it may simply stop loading, and the only
+# symptom would be that Bluetooth music quietly sounds worse than yesterday.
+aac_version_check() {
+    local dir built now
+    dir=$(pkg-config --variable=libdir libpipewire-0.3 2>/dev/null)/spa-0.2/bluez5
+    [ -r "$dir/aac-built-against" ] || return 0
+    built=$(cat "$dir/aac-built-against")
+    now=$(pkg-config --modversion libpipewire-0.3 2>/dev/null)
+    [ -n "$now" ] || return 0
+    if [ "$built" != "$now" ]; then
+        printf 'NOTE: the Bluetooth AAC module was built against PipeWire %s, installed is %s.\n' \
+            "$built" "$now" >&2
+        printf '      Bluetooth music falls back to SBC until it is rebuilt:\n' >&2
+        printf '      ./tools/build-bluez5-aac.sh\n' >&2
+    fi
+    return 0
+}
+
 # WirePlumber's droid monitor may only run when PipeWire is meant to hold the
 # HAL. In the pw-tunnel profile PulseAudio holds it - if the monitor started
 # there it would reach for the same device.
@@ -115,6 +137,7 @@ preflight() {
         ;;
     pw-hal)
         plugin_version_check
+        aac_version_check
         [ -e /usr/lib/aarch64-linux-gnu/spa-0.2/droid/libspa-droid.so ] \
             || die "SPA droid plugin not built yet - the pw-hal profile stays locked until then."
         command -v wireplumber >/dev/null \
