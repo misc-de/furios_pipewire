@@ -240,7 +240,14 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	else
 		DIAG(this, "Eingabegeraet gesetzt: %s", dev->name);
 
-	this->hal_latency_ns = (uint64_t) pa_droid_stream_get_latency(this->stream) * 1000;
+	/* Fuer Eingabestroeme liefert pa_droid_stream_get_latency() 0 - upstream
+	 * berechnet sie gar nicht. Also selbst schaetzen: eine HAL-Periode. */
+	{
+		size_t bufsz = pa_droid_stream_buffer_size(this->stream);
+		uint64_t bytes_per_sec = (uint64_t) spec->rate * 2 * spec->channels;
+		this->hal_latency_ns = (bufsz && bytes_per_sec)
+			? (uint64_t) bufsz * SPA_NSEC_PER_SEC / bytes_per_sec : 0;
+	}
 	latency_changed(this);
 	spa_log_info(this->log, NAME " Aufnahmestream offen: %s, %u Hz, %u Kanaele, Puffer %zu B",
 			this->mix_port_name, spec->rate, spec->channels,
