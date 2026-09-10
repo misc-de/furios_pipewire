@@ -190,6 +190,15 @@ only the node holds the HAL stream.
   AudioFlinger, above the HAL. So `droid.lua` puts the level from the route
   back onto the node, where the graph applies it for real - measured again,
   RMS 5693 against 263 at 25 %.
+- **Load the HAL module early, and never let it go.** libhybris brings its own
+  Android linker, and that linker wants a particular region of the address
+  space. Opened late - after the Bluetooth codecs are in the process, say - it
+  does not get it and faults inside `android_linker_init()`, taking the whole
+  daemon down with it. Closing the last reference and opening it again faults
+  the same way, which used to happen on every suspend/resume. The first node
+  now loads the module while the process is still young and keeps it for good;
+  the stream, which is the exclusive part, is still opened only when something
+  plays.
 - **`spa_log_info` is invisible below PipeWire's default log level.** Turn
   diagnostics on with:
 
@@ -312,6 +321,19 @@ the sink drives the graph. That makes the node beat even an explicit user
 choice, which is weighted 30000: no other output device could be selected at
 all, no Bluetooth headphones, nothing. The symptom is nasty because the
 selection in the UI simply has no effect, without any error message.
+
+**A Bluetooth speaker takes over when it connects.** Not by priority - the BT
+sink ranks 1010 against the phone's 1000, which would be enough - but because
+`droid-bluetooth-takes-over.lua` drops the configured default that callaudiod
+pins on the phone card (`SET_DEFAULT_SINK`, weighted 30000, set on the first
+call or ringtone and never taken back). The pin is dropped rather than
+replaced, so the phone takes over again the moment the headset is gone. Never
+during a call.
+
+**The microphone deliberately stays on the phone.** The BT card offers a source
+and it reads happily - 192000 bytes of pure silence, RMS 0, peak 0. It is a
+loopback node that exists so that opening it triggers the headset profile, and
+that path carries no audio here either.
 
 **Reconnect the headset once after a profile switch.** audioctl restarts
 WirePlumber; a device that was already connected before does not fully

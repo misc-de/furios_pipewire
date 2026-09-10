@@ -1472,6 +1472,37 @@ static int impl_init(const struct spa_handle_factory *factory,
 		return -ENOENT;
 	}
 
+	/* Load the HAL module now, while the process is still young.
+	 *
+	 * libhybris brings its own Android linker, and that linker wants a
+	 * particular region of the address space. Opened late - after the
+	 * Bluetooth codecs have been loaded, say - it does not get it and faults
+	 * inside android_linker_init(), taking the whole daemon down. That is how
+	 * playback falling back from a headset to the phone killed the sound:
+	 * the process had played over Bluetooth all along and reached for the HAL
+	 * for the very first time at the worst possible moment.
+	 *
+	 * So the first node to be created opens the module and never gives it
+	 * back (see the keepalive below). The module is not the exclusive part -
+	 * the stream is, and that one is still opened only when something plays. */
+	if (hw_module_keepalive == NULL) {
+		char args[512];
+		pa_modargs *ma;
+
+		snprintf(args, sizeof(args), "config=%s %s",
+				this->config_file, this->hw_options);
+		if ((ma = pa_modargs_new(args, NULL)) != NULL) {
+			pa_droid_hw_module *hw;
+			hw = pa_droid_hw_module_get2(pa_compat_core(), ma, "primary");
+			pa_modargs_free(ma);
+			if (hw != NULL)
+				hw_module_keepalive = hw;
+			else
+				spa_log_warn(this->log, NAME
+						" HAL module not loadable up front");
+		}
+	}
+
 	this->ring_data = malloc(RING_SIZE);
 	if (!this->ring_data) {
 		dm_config_free(this->config);
