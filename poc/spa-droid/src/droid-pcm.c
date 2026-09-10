@@ -38,6 +38,7 @@
 #include <spa/node/utils.h>
 #include <spa/param/audio/format-utils.h>
 #include <spa/param/param.h>
+#include <spa/param/latency-utils.h>
 #include <spa/pod/builder.h>
 #include <spa/pod/filter.h>
 #include <spa/pod/parser.h>
@@ -167,6 +168,9 @@ struct impl {
 
 static int apply_route(struct impl *this, const char *route);
 static int apply_mode(struct impl *this, const char *mode);
+struct port;
+static void emit_port_info(struct impl *this, struct port *port, bool full);
+static void latency_changed(struct impl *this);
 static int apply_voice_volume(struct impl *this, const char *value);
 
 /* ------------------------------------------------------------------ HAL */
@@ -232,6 +236,7 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	else
 		DIAG(this, "Eingabegeraet gesetzt: %s", dev->name);
 
+	latency_changed(this);
 	spa_log_info(this->log, NAME " Aufnahmestream offen: %s, %u Hz, %u Kanaele, Puffer %zu B",
 			this->mix_port_name, spec->rate, spec->channels,
 			pa_droid_stream_buffer_size(this->stream));
@@ -313,6 +318,7 @@ static int hal_open(struct impl *this)
 		return -EIO;
 	}
 
+	latency_changed(this);
 	spa_log_info(this->log, NAME " Stream offen: %s -> %s, %u Hz, %u Kanaele, Puffer %zu B",
 			mix->name, dev->name, spec.rate, spec.channels,
 			pa_droid_stream_buffer_size(this->stream));
@@ -342,6 +348,8 @@ static int hal_open(struct impl *this)
 
 static void hal_close(struct impl *this)
 {
+	bool had_stream = this->stream != NULL;
+
 	if (this->stream) {
 		pa_droid_stream_unref(this->stream);
 		this->stream = NULL;
@@ -350,6 +358,48 @@ static void hal_close(struct impl *this)
 		pa_droid_hw_module_unref(this->hw);
 		this->hw = NULL;
 	}
+	/* Ohne Stream gibt es keine Verzoegerung mehr - sonst bliebe der alte
+	 * Wert stehen und der Graph rechnete mit einer Latenz, die es nicht
+	 * mehr gibt. */
+	if (had_stream)
+		latency_changed(this);
+}
+
+/* Wie weit hinkt der Ton der Anzeige hinterher?
+ *
+ * PipeWire kann das nicht erraten: es kennt weder die Puffer des HAL noch
+ * unseren Ringpuffer dazwischen. Ohne Meldung nimmt es null an - dann laeuft
+ * bei Video der Ton dem Bild voraus. Gemeldet wird die Summe aus beidem. */
+static uint64_t latency_ns(struct impl *this)
+{
+	uint32_t stride, idx;
+	uint64_t ns = 0;
+	int32_t avail;
+
+	if (this->stream)
+		ns = (uint64_t) pa_droid_stream_get_latency(this->stream) * 1000;
+
+	stride = 2 * (this->port.have_format
+			? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS);
+	avail = this->capture
+		? spa_ringbuffer_get_read_index(&this->ring, &idx)
+		: spa_ringbuffer_get_read_index(&this->ring, &idx);
+	if (avail > 0 && this->rate && stride)
+		ns += (uint64_t) avail * SPA_NSEC_PER_SEC / ((uint64_t) this->rate * stride);
+
+	return ns;
+}
+
+/* Die Latenz aendert sich, wenn der HAL-Stream aufgeht - dann muss sie neu
+ * gemeldet werden. Das SERIAL-Bit kippt, sonst merkt es niemand. */
+static void latency_changed(struct impl *this)
+{
+	uint32_t i;
+	for (i = 0; i < SPA_N_ELEMENTS(this->port.params); i++)
+		if (this->port.params[i].id == SPA_PARAM_Latency)
+			this->port.params[i].flags ^= SPA_PARAM_INFO_SERIAL;
+	this->port.info.change_mask |= SPA_PORT_CHANGE_MASK_PARAMS;
+	emit_port_info(this, &this->port, false);
 }
 
 /* ------------------------------------------------------- Taktgeber */
@@ -401,7 +451,9 @@ static void on_timeout(struct spa_source *source)
 		this->clock->rate = this->clock->target_rate;
 		this->clock->position += this->clock->duration;
 		this->clock->duration = this->quantum;
-		this->clock->delay = 0;
+		/* In Abtastwerten, wie PipeWire es erwartet. */
+		this->clock->delay = this->rate
+			? (int64_t) (latency_ns(this) * this->rate / SPA_NSEC_PER_SEC) : 0;
 		this->clock->rate_diff = 1.0;
 		this->clock->next_nsec = nsec + this->period_ns;
 	}
@@ -855,6 +907,21 @@ next:
 			SPA_PARAM_IO_id,   SPA_POD_Id(SPA_IO_Buffers),
 			SPA_PARAM_IO_size, SPA_POD_Int(sizeof(struct spa_io_buffers)));
 		break;
+	case SPA_PARAM_Latency:
+	{
+		struct spa_latency_info info;
+		uint64_t ns;
+		if (result.index > 0)
+			return 0;
+		ns = latency_ns(this);
+		/* Ein Sink meldet die Verzoegerung stromabwaerts, eine Quelle die
+		 * stromaufwaerts - deshalb die Richtung des eigenen Ports. */
+		info = SPA_LATENCY_INFO(this->dir,
+				.min_ns = (int64_t) ns,
+				.max_ns = (int64_t) ns);
+		result.param = spa_latency_build(&b, id, &info);
+		break;
+	}
 	default:
 		return -ENOENT;
 	}
@@ -1233,8 +1300,9 @@ static int impl_init(const struct spa_handle_factory *factory,
 	port->params[1] = SPA_PARAM_INFO(SPA_PARAM_Format, SPA_PARAM_INFO_WRITE);
 	port->params[2] = SPA_PARAM_INFO(SPA_PARAM_Buffers, SPA_PARAM_INFO_READ);
 	port->params[3] = SPA_PARAM_INFO(SPA_PARAM_IO, SPA_PARAM_INFO_READ);
+	port->params[4] = SPA_PARAM_INFO(SPA_PARAM_Latency, SPA_PARAM_INFO_READ);
 	port->info.params = port->params;
-	port->info.n_params = 4;
+	port->info.n_params = 5;
 
 	/* Welcher mixPort? Standard ist der primaere Aus- bzw. Eingang. */
 	str = info ? spa_dict_lookup(info, "droid.mix-port") : NULL;
