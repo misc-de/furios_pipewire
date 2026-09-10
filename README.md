@@ -79,6 +79,25 @@ Damit callaudiod das tut, muss dreierlei stimmen, und jedes davon hat gekostet:
   diesem Geraet ebenfalls als nicht verfuegbar; eine Klinkenerkennung gibt es
   hier nicht (in `/sys/class/extcon` steht nur USB).
 
+## Als Paket
+
+    ./packaging/build-deb.sh
+    sudo dpkg -i packaging/furios-audio-pipewire_*.deb
+
+Das Paket bringt alles mit: Plugin, WirePlumber-Monitor und -Konfiguration,
+audioctl, die Umschalter-App samt Symbol, die systemd-Units. Es installiert
+nach `/usr`, die Skripte unten nach `/usr/local` - audioctl findet seine
+Dateien in beiden Pfaden.
+
+Die Abhaengigkeit auf `pipewire (>= X, << X+1)` ist Absicht: das Plugin wird
+gegen eine bestimmte SPA-Schnittstelle gebaut. Bricht ein Update sie, waere der
+Ton sonst kommentarlos weg - so haelt apt das Paket zurueck, und `audioctl`
+warnt zusaetzlich vor dem Umschalten.
+
+Entfernen mit `sudo dpkg -r furios-audio-pipewire`. Steht dabei `pw-hal`
+persistent, warnt das Paket vorher - sonst waere nach dem naechsten Neustart
+kein Ton mehr da.
+
 ## Bauen
 
 Die Upstream-Quellen werden nicht mitversioniert:
@@ -89,6 +108,9 @@ Die Upstream-Quellen werden nicht mitversioniert:
     meson setup poc/spa-droid/build poc/spa-droid
     ninja -C poc/spa-droid/build
     ./install-hal.sh        # braucht sudo, aendert das aktive Profil NICHT
+
+Alternativ das Paket bauen (siehe oben) - das ist der Weg, der ein
+Systemupdate uebersteht.
 
 `poc/spa-droid/tools/port-droid-util.py` schneidet reproduzierbar die
 Funktionen aus `common/droid-util.c`, die PulseAudio-Graphobjekte

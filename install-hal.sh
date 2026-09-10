@@ -26,7 +26,6 @@ echo "2) PipeWire-Konfiguration erzeugen"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf /tmp/pipewire-hal.conf
 sudo mkdir -p /usr/local/share/furios-audio
 sudo install -m644 /tmp/pipewire-hal.conf /usr/local/share/furios-audio/pipewire-hal.conf
-sudo install -m644 pipewire-hal.conf.dropin /usr/local/share/furios-audio/pipewire-hal.conf.dropin
 rm -f /tmp/pipewire-hal.conf
 
 echo "3) WirePlumber-Monitor"

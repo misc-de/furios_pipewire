@@ -10,7 +10,15 @@ STICKY=$STATE_DIR/profile
 TRY=$STATE_DIR/profile.try
 ETCU=/etc/systemd/user
 DROPIN=$ETCU/pipewire.service.d/50-furios-audio.conf
-LOCAL=/usr/local/share/furios-audio
+# Dateien koennen aus zwei Quellen kommen: aus dem Quellbaum installiert
+# (/usr/local) oder aus dem Paket (/usr). Beides muss gefunden werden.
+first_existing() {
+    local f
+    for f in "$@"; do [ -e "$f" ] && { printf '%s' "$f"; return 0; }; done
+    printf '%s' "$1"
+}
+LOCAL=$(dirname "$(first_existing /usr/local/share/furios-audio/pipewire-hal.conf \
+                                  /usr/share/furios-audio/pipewire-hal.conf)")
 
 PROFILES="standard pw-tunnel pw-hal"
 DRY=0
@@ -80,7 +88,11 @@ plugin_version_check() {
 # Der Droid-Monitor von WirePlumber darf nur laufen, wenn PipeWire den HAL
 # auch halten soll. Im Profil pw-tunnel haelt ihn PulseAudio - wuerde der
 # Monitor dort starten, riefe er nach demselben Geraet.
-WPCONF=/usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf
+WPCONF=$(first_existing /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf \
+                        /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf \
+                        /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf.aus \
+                        /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf.aus)
+WPCONF=${WPCONF%.aus}
 droid_monitor() {
     case "$1" in
     an)  [ -e "$WPCONF.aus" ] && run sudo mv "$WPCONF.aus" "$WPCONF" ;;
@@ -160,7 +172,16 @@ apply() {
         mask   pulseaudio.service pulseaudio.socket
         unmask pipewire-pulse.service pipewire-pulse.socket wireplumber.service
         run sudo mkdir -p "$ETCU/pipewire.service.d"
-        run sudo ln -sf "$LOCAL/pipewire-hal.conf.dropin" "$DROPIN"
+        # Den systemd-Zusatz erzeugen statt eine feste Datei zu verlinken:
+        # der Pfad zur Konfiguration haengt davon ab, ob aus dem Quellbaum
+        # (/usr/local) oder aus dem Paket (/usr) installiert wurde.
+        if [ "$DRY" = 1 ]; then
+            printf '  [Trockenlauf] %s schreiben (-c %s/pipewire-hal.conf)\n' \
+                "$DROPIN" "$LOCAL"
+        else
+            printf '[Service]\nExecStart=\nExecStart=/usr/bin/pipewire -c %s/pipewire-hal.conf\n' \
+                "$LOCAL" | sudo tee "$DROPIN" >/dev/null
+        fi
         run uctl daemon-reload
         run uctl restart pipewire.service
         run uctl start wireplumber.service pipewire-pulse.socket pipewire-pulse.service
@@ -191,9 +212,23 @@ restart_audio_clients() {
     return 0
 }
 
+# Das Sicherheitsnetz muss aktiv sein: es verwirft beim Neustart ein
+# Testprofil. Aus einem Paket heraus kann das niemand einschalten - eine
+# Benutzer-Unit aktiviert nur der Benutzer selbst. Also hier, beim ersten
+# Umschalten.
+ensure_safety_net() {
+    uctl is-enabled furios-audio-apply.service >/dev/null 2>&1 && return 0
+    if uctl cat furios-audio-apply.service >/dev/null 2>&1; then
+        run uctl enable furios-audio-apply.service >/dev/null 2>&1 \
+            && info "Sicherheitsnetz aktiviert (verwirft Testprofile beim Neustart)"
+    fi
+    return 0
+}
+
 switch_to() {
     local p=$1 mode=$2 prev
     prev=$(current_profile)
+    ensure_safety_net
     preflight "$p"
     printf 'Wechsel: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"
