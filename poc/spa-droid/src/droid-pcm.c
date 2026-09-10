@@ -240,7 +240,7 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 		spa_log_warn(this->log, NAME " input device %#x not found - "
 				"HAL keeps its current routing", this->input_device);
 	else if (!pa_droid_hw_set_input_device(this->stream, dev))
-		spa_log_warn(this->log, NAME " Routing auf \"%s\" failed", dev->name);
+		spa_log_warn(this->log, NAME " routing to \"%s\" failed", dev->name);
 	else
 		DIAG(this, "input device set: %s", dev->name);
 
@@ -387,6 +387,10 @@ static int hal_open(struct impl *this)
 	else
 		DIAG(this, "routing set: %s", dev->name);
 
+	/* Full scale, and it stays there: the level is applied in the graph.
+	 * This HAL accepts set_volume on the primary output and returns success,
+	 * but the measured level does not move (RMS 5796 at 100 %, 5734 at 20 %)
+	 * - on Android that gain sits in AudioFlinger, above the HAL. */
 	pa_droid_hw_module_lock(this->hw);
 	if (this->stream->output->stream->set_volume) {
 		int r = this->stream->output->stream->set_volume(

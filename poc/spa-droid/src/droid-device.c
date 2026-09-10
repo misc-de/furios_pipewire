@@ -44,6 +44,7 @@
 #define DROID_API_NAME  "droid-hal"
 
 #define MAX_ROUTES  16
+#define MAX_CHANNELS 8
 #define DEV_SINK    0
 #define DEV_SOURCE  1
 #define N_DEVICES   2
@@ -99,6 +100,19 @@ struct impl {
 	uint32_t profile;
 	bool profile_save;         /* was this a deliberate choice? */
 	bool nodes_emitted;
+
+	/* Volume and mute per direction, as the active route reports them.
+	 *
+	 * A node that belongs to a card gets its volume from the props of the
+	 * active route - that is where pipewire-pulse reads it, and a card
+	 * whose routes carry none reports 0 % to every PulseAudio client and
+	 * silently drops what they set. The attenuation itself stays in the
+	 * graph; these values are the card's side of it. */
+	float volume[N_DEVICES];
+	float channel_volumes[N_DEVICES][MAX_CHANNELS];
+	uint32_t channel_map[N_DEVICES][MAX_CHANNELS];
+	uint32_t n_channel_volumes[N_DEVICES];
+	bool mute[N_DEVICES];
 };
 
 /* As in the node: info by default (invisible below the standard log level),
@@ -377,6 +391,23 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 		 * in different processes. */
 		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_props, 0);
 		spa_pod_builder_push_object(b, &pf, SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
+
+		spa_pod_builder_prop(b, SPA_PROP_volume, 0);
+		spa_pod_builder_float(b, this->volume[r->device]);
+		spa_pod_builder_prop(b, SPA_PROP_mute, 0);
+		spa_pod_builder_bool(b, this->mute[r->device]);
+		/* The positions have to travel with the volumes, and before them:
+		 * per-channel volumes without a map turn front-left/front-right into
+		 * the nameless aux0/aux1 on the PulseAudio side. */
+		spa_pod_builder_prop(b, SPA_PROP_channelMap, 0);
+		spa_pod_builder_array(b, sizeof(uint32_t), SPA_TYPE_Id,
+				this->n_channel_volumes[r->device],
+				this->channel_map[r->device]);
+		spa_pod_builder_prop(b, SPA_PROP_channelVolumes, 0);
+		spa_pod_builder_array(b, sizeof(float), SPA_TYPE_Float,
+				this->n_channel_volumes[r->device],
+				this->channel_volumes[r->device]);
+
 		spa_pod_builder_prop(b, SPA_PROP_params, 0);
 		spa_pod_builder_push_struct(b, &sf);
 		spa_pod_builder_string(b, "droid.route");
@@ -648,6 +679,64 @@ static int set_profile(struct impl *this, uint32_t index, bool save)
 	return 0;
 }
 
+/* Take over volume and mute from a route the graph has just set.
+ *
+ * Everything that changes the volume of a card-backed node arrives here -
+ * pactl through pipewire-pulse, and WirePlumber when it restores a stored
+ * level. We only keep the values and hand them back out in the route; the
+ * gain itself is applied in the graph, which is where it already worked
+ * before any of this existed. */
+static void apply_route_props(struct impl *this, uint32_t device,
+		const struct spa_pod *props)
+{
+	struct spa_pod_object *obj = (struct spa_pod_object *) props;
+	struct spa_pod_prop *prop;
+
+	if (device >= N_DEVICES || !spa_pod_is_object_type(props, SPA_TYPE_OBJECT_Props))
+		return;
+
+	SPA_POD_OBJECT_FOREACH(obj, prop) {
+		switch (prop->key) {
+		case SPA_PROP_volume:
+			spa_pod_get_float(&prop->value, &this->volume[device]);
+			break;
+		case SPA_PROP_mute:
+			spa_pod_get_bool(&prop->value, &this->mute[device]);
+			break;
+		case SPA_PROP_channelVolumes:
+		{
+			uint32_t n, i;
+			n = spa_pod_copy_array(&prop->value, SPA_TYPE_Float,
+					this->channel_volumes[device], MAX_CHANNELS);
+			/* Both nodes are stereo, so the count stays at two even when
+			 * fewer values arrive - a stored state from an earlier version
+			 * held a single channel, and taking that at face value left the
+			 * right channel of the microphone at zero. */
+			for (i = n; i < this->n_channel_volumes[device]; i++)
+				this->channel_volumes[device][i] =
+					n > 0 ? this->channel_volumes[device][n - 1] : 1.0f;
+			break;
+		}
+		case SPA_PROP_channelMap:
+		{
+			uint32_t map[MAX_CHANNELS], n;
+			/* Same reasoning as above: a shorter map would rename the
+			 * channels, which is how front-left/front-right once turned into
+			 * the nameless aux0/aux1. */
+			n = spa_pod_copy_array(&prop->value, SPA_TYPE_Id, map, MAX_CHANNELS);
+			if (n == this->n_channel_volumes[device])
+				memcpy(this->channel_map[device], map, n * sizeof(uint32_t));
+			break;
+		}
+		default:
+			break;
+		}
+	}
+	DIAG(this, "route props for device %u: volume %.3f, %u channels, %s",
+			device, this->volume[device], this->n_channel_volumes[device],
+			this->mute[device] ? "muted" : "not muted");
+}
+
 static int set_route(struct impl *this, uint32_t index, uint32_t device)
 {
 	struct route *r;
@@ -694,12 +783,16 @@ static int impl_set_param(void *object, uint32_t id, uint32_t flags,
 	case SPA_PARAM_Route:
 	{
 		uint32_t index, device = 0;
+		struct spa_pod *props = NULL;
 		if (param == NULL)
 			return -EINVAL;
 		if (spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamRoute, NULL,
 					SPA_PARAM_ROUTE_index, SPA_POD_Int(&index),
-					SPA_PARAM_ROUTE_device, SPA_POD_OPT_Int(&device)) < 0)
+					SPA_PARAM_ROUTE_device, SPA_POD_OPT_Int(&device),
+					SPA_PARAM_ROUTE_props, SPA_POD_OPT_Pod(&props)) < 0)
 			return -EINVAL;
+		if (props != NULL)
+			apply_route_props(this, device, props);
 		return set_route(this, index, device);
 	}
 	default:
@@ -833,8 +926,21 @@ static int impl_init(const struct spa_handle_factory *factory,
 	}
 
 	collect_routes(this);
-	for (i = 0; i < N_DEVICES; i++)
+	for (i = 0; i < N_DEVICES; i++) {
+		uint32_t c;
 		this->active[i] = default_route(this, i);
+		/* Full volume until somebody says otherwise - the same starting
+		 * point PulseAudio uses for a card it has never seen. */
+		this->volume[i] = 1.0f;
+		this->mute[i] = false;
+		this->n_channel_volumes[i] = 2;
+		for (c = 0; c < MAX_CHANNELS; c++) {
+			this->channel_volumes[i][c] = 1.0f;
+			this->channel_map[i][c] = SPA_AUDIO_CHANNEL_UNKNOWN;
+		}
+		this->channel_map[i][0] = SPA_AUDIO_CHANNEL_FL;
+		this->channel_map[i][1] = SPA_AUDIO_CHANNEL_FR;
+	}
 	this->profile = PROFILE_DEFAULT;
 
 	spa_log_info(this->log, NAME " HAL configuration loaded: %s (%u routes)",

@@ -196,7 +196,14 @@ apply() {
 verify() {
     local i=0
     while [ $i -lt 15 ]; do
-        if pactl list sinks short 2>/dev/null | grep -q .; then return 0; fi
+        # auto_null is PipeWire's fallback sink: it exists precisely when no
+        # real device came up. Accepting it would let the safety net pass on a
+        # plugin that failed to load - the switch would look successful and
+        # leave the phone silent, which is the one case this check exists for.
+        if pactl list sinks short 2>/dev/null | awk '{print $2}' \
+                | grep -qvx auto_null; then
+            return 0
+        fi
         i=$((i+1)); sleep 1
     done
     return 1

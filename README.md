@@ -179,6 +179,17 @@ only the node holds the HAL stream.
 - **The buffer size is the graph quantum, not the HAL period.** On output both
   happen to be 4096 B, on input the HAL delivers 3840 B - too small a buffer
   makes libspa-audioconvert crash.
+- **A card-backed node takes its volume from the active route.** That is where
+  pipewire-pulse reads it - a card whose routes carry no volume reports 0 % to
+  every PulseAudio client and silently drops what they set, while `wpctl` works
+  fine. Reporting it has a price: PipeWire then stops applying the level in
+  software, because it assumes the hardware does.
+- **This HAL cannot attenuate.** It accepts `set_volume` on the primary output
+  and returns success, but the level does not move: measured over the speaker,
+  RMS 5796 at 100 % against 5734 at 20 %. On Android that gain lives in
+  AudioFlinger, above the HAL. So `droid.lua` puts the level from the route
+  back onto the node, where the graph applies it for real - measured again,
+  RMS 5693 against 263 at 25 %.
 - **`spa_log_info` is invisible below PipeWire's default log level.** Turn
   diagnostics on with:
 

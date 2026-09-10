@@ -19,6 +19,7 @@ log = Log.open_topic ("s-monitors")
 -- Last delivered state. The events also fire when nothing has changed - the
 -- HAL should not notice that.
 last_route = {}
+last_route_volume = {}
 last_mode = nil
 last_volume = nil
 
@@ -62,7 +63,7 @@ function forwardProfile (dev)
         local node = findNode (dev, 0)
         if node then
           last_mode = mode
-          log:info ("droid: Audiomodus " .. mode)
+          log:info ("droid: audio mode " .. mode)
           setNodeProp (node, "droid.mode", mode)
           -- The HAL does not know the current level yet.
           last_volume = nil
@@ -87,8 +88,61 @@ function forwardVolume (node)
   local v = string.format ("%.3f", vol.mute and 0.0 or vol.volume)
   if last_volume ~= v then
     last_volume = v
-    log:info ("droid: Sprachlautstaerke " .. v)
+    log:info ("droid: voice level " .. v)
     setNodeProp (node, "droid.voice-volume", v)
+  end
+end
+
+-- The playback level travels with the route.
+--
+-- A node that belongs to a card takes its volume from the props of the active
+-- route - that is where pipewire-pulse reads it, and a card whose routes carry
+-- none reports 0 % to every PulseAudio client and drops what they set.
+--
+-- Reporting it there has a price: PipeWire then stops applying the level in
+-- software, because it assumes the hardware does. This HAL does not. It accepts
+-- set_volume on the primary output and returns success, but the measured level
+-- does not move (RMS 5796 at 100 %, 5734 at 20 %) - on Android that gain sits
+-- in AudioFlinger, above the HAL. So we put the level back onto the node, where
+-- the graph applies it for real. The route keeps it for everyone who reads it.
+function forwardRouteVolume (route, node)
+  if node == nil or route.props == nil then
+    return
+  end
+  -- parseParam hands back the pod wrapper, not the values: the props sit one
+  -- level down under .properties. Reading route.props.volume directly gives
+  -- nil, silently and without an error.
+  local props = route.props.properties or route.props
+  local cv = props.channelVolumes
+  local v = (type (cv) == "table" and cv[1]) or props.volume
+  if v == nil then
+    return
+  end
+  local mute = props.mute and true or false
+
+  local key = string.format ("%.4f/%s", v, tostring (mute))
+  if last_route_volume[route.device] == key then
+    return
+  end
+  last_route_volume[route.device] = key
+
+  -- pcall: this runs in the monitor, and an error here takes the whole script
+  -- down with it - which means no card, no nodes, no sound at all. A volume
+  -- that fails to apply must not cost more than the volume.
+  local ok, err = pcall (function ()
+    local n = (type (cv) == "table" and #cv > 0) and #cv or 2
+    local vols = {}
+    for i = 1, n do vols[i] = v end
+    node:set_param ("Props", Pod.Object {
+      "Spa:Pod:Object:Param:Props", "Props",
+      mute = mute,
+      channelVolumes = Pod.Array { "Spa:Float", table.unpack (vols) },
+    })
+  end)
+  if ok then
+    log:info ("droid: level " .. key .. " for " .. tostring (route.name))
+  else
+    log:warning ("droid: level not applied: " .. tostring (err))
   end
 end
 
@@ -96,16 +150,16 @@ function forwardRoutes (dev)
   for p in dev:iterate_params ("Route") do
     local route = cutils.parseParam (p, "Route")
     if route and route.device ~= nil and route.name then
-      local node = nil
-      if last_route[route.device] ~= route.name then
-        node = findNode (dev, route.device)
-      end
-      if node then
+      -- The volume changes far more often than the route, so the node has to
+      -- be looked up even when the route itself stayed the same.
+      local node = findNode (dev, route.device)
+      if node and last_route[route.device] ~= route.name then
         last_route[route.device] = route.name
         log:info ("droid: route " .. route.name .. " to " ..
                   tostring (node.properties["node.name"]))
         setNodeProp (node, "droid.route", route.name)
       end
+      forwardRouteVolume (route, node)
     end
   end
 end
