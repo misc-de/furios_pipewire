@@ -259,6 +259,9 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	return 0;
 }
 
+/* One reference that is never returned; see the note in hal_open(). */
+static pa_droid_hw_module *hw_module_keepalive;
+
 static int hal_open(struct impl *this)
 {
 	dm_config_port *mix, *dev;
@@ -294,6 +297,22 @@ static int hal_open(struct impl *this)
 		spa_log_error(this->log, NAME " could not open the HAL module");
 		return -EIO;
 	}
+	/* Keep the module loaded for the life of the process.
+	 *
+	 * Letting the last reference go unloads the Android side through
+	 * libhybris, and the next open faults inside the Android linker's own
+	 * initialisation:
+	 *
+	 *   android_linker_init () -> android_dlopen () -> hw_get_module_by_class ()
+	 *   -> droid_hw_module_open () -> hal_open ()            SIGSEGV
+	 *
+	 * That is one open and close per suspend/resume, so it was a matter of
+	 * time; it took down the whole daemon when playback fell back from a
+	 * Bluetooth headset to the phone. PulseAudio keeps the module for as long
+	 * as it runs, and so do we now. The module is not the exclusive part -
+	 * the stream is, and that is still opened and closed as before. */
+	if (hw_module_keepalive == NULL)
+		hw_module_keepalive = pa_droid_hw_module_ref(this->hw);
 	DIAG(this, "HAL options: %s", this->hw_options[0] ? this->hw_options : "(none)");
 
 	if (this->capture) {

@@ -66,6 +66,23 @@ input_follows_output_hook = SimpleEventHook {
       return
     end
 
+    -- Never follow onto Bluetooth. The card offers a source there, and it
+    -- reads happily - 192000 bytes of pure silence, RMS 0, peak 0. It is a
+    -- loopback node that exists so that opening it triggers the switch to the
+    -- headset profile; on this device that path carries no audio either.
+    -- Handing the microphone to it would leave the phone recording nothing,
+    -- which is worse than a microphone that stayed where it was. See
+    -- 51-bluez-ofono.conf.
+    local src_device = cutils.get_object_manager ("device"):lookup {
+      Constraint { "bound-id", "=", tonumber (dev), type = "gobject" },
+    }
+    if source.properties ["bluez5.loopback"] ~= nil or
+       (src_device and src_device.properties ["device.api"] == "bluez5") then
+      log:info ("input follows output: " .. name ..
+                " is Bluetooth - microphone stays where it is")
+      return
+    end
+
     local src_name = source.properties ["node.name"]
     local m = defaultMetadata ()
     if not m then

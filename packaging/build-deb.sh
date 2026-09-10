@@ -42,6 +42,8 @@ rm -f "$STAGE/tmp-hal.conf"
 install -Dm644 wireplumber/droid.lua          "$STAGE/usr/share/wireplumber/scripts/monitors/droid.lua"
 install -Dm644 wireplumber/droid-input-follows-output.lua \
     "$STAGE/usr/share/wireplumber/scripts/monitors/droid-input-follows-output.lua"
+install -Dm644 wireplumber/droid-bluetooth-takes-over.lua \
+    "$STAGE/usr/share/wireplumber/scripts/monitors/droid-bluetooth-takes-over.lua"
 install -Dm644 wireplumber/50-droid.conf      "$STAGE/usr/share/wireplumber/wireplumber.conf.d/50-droid.conf"
 install -Dm644 wireplumber/51-bluez-ofono.conf "$STAGE/usr/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf"
 
