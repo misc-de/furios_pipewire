@@ -210,7 +210,7 @@ static void add_synthetic_bt_routes(struct impl *this)
 		 * selectable, but nothing picks it on its own. */
 		r->available = SPA_PARAM_AVAILABILITY_unknown;
 		snprintf(r->description, sizeof(r->description), "Bluetooth (%s)",
-				defs[i].role == DM_CONFIG_ROLE_SINK ? "Freisprechen" : "Mikrofon");
+				defs[i].role == DM_CONFIG_ROLE_SINK ? "Handsfree" : "Microphone");
 	}
 }
 
