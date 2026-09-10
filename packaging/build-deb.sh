@@ -25,10 +25,21 @@ fi
 ARCH=$(dpkg --print-architecture)
 TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
 PWVER=$(pkg-config --modversion libpipewire-0.3 2>/dev/null || echo 1.6.6)
-VERSION="0.1.0+git$(git log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d).$(git rev-parse --short HEAD 2>/dev/null || echo 0)"
+# The commit COUNT leads the version, not the commit date and not the hash.
+# dpkg compares digit runs numerically and everything else as text, so a hash
+# decides the order between two builds - and hashes are not monotonic. A dirty
+# build of an older commit therefore outranked a clean newer one, and dpkg
+# announced the update as a downgrade. The count only ever grows; the date and
+# the hash stay on for reading, behind it, where they cannot affect the order.
+COUNT=$(git rev-list --count HEAD 2>/dev/null || echo 0)
+DATE=$(git log -1 --format=%cd --date=format:%Y%m%d 2>/dev/null || date +%Y%m%d)
+HASH=$(git rev-parse --short HEAD 2>/dev/null || echo 0)
+VERSION="0.1.0+git$COUNT.$DATE.$HASH"
 # Uncommitted changes get their own number - otherwise the package would carry
-# the version of the last commit and dpkg would consider it the same.
-[ -n "$(git status --porcelain 2>/dev/null)" ] && VERSION="$VERSION+dirty$(date +%H%M%S)"
+# the version of the last commit and dpkg would consider it the same. The full
+# timestamp, so that two dirty builds on the same commit keep their order
+# across midnight as well.
+[ -n "$(git status --porcelain 2>/dev/null)" ] && VERSION="$VERSION+dirty$(date +%Y%m%d%H%M%S)"
 PKG="furios-audio-pipewire"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
