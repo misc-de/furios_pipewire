@@ -190,10 +190,22 @@ switch_to() {
 # Schreibt zusaetzlich ins Journal - beim Anruftest sitzt niemand vor dem
 # Terminal, und hinterher will man wissen, was wirklich passiert ist:
 #   journalctl --user -t audioctl --since -10min
+# Aktive Ports des jeweiligen Stacks. Die Knoten heissen unterschiedlich:
+# unter pw-hal droid-sink/droid-source, im Auslieferungszustand
+# sink.primary_output und die droid-Quelle von PulseAudio.
+port_of() {
+    local kind=$1 name
+    for name in $2; do
+        pactl list "$kind" 2>/dev/null | sed -n "/Name: $name\$/,/^\$/p" \
+            | sed -n 's/.*Active Port: //p' | head -1 | grep . && return 0
+    done
+    printf '?'
+}
+
 active_ports() {
     printf '%s / %s' \
-        "$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')" \
-        "$(pactl list sources 2>/dev/null | sed -n '/Name: droid-source/,/^$/p' | sed -n 's/.*Active Port: //p')"
+        "$(port_of sinks 'droid-sink sink.primary_output')" \
+        "$(port_of sources 'droid-source source.primary_input')"
 }
 
 droid_profile() {
@@ -254,9 +266,34 @@ bt_hold() {
     return 0
 }
 
+# Ton wieder hoerbar machen - der Notnagel.
+#
+# Entstanden aus einem misslungenen Bluetooth-Test: danach stand der Ausgang
+# auf der Ohrmuschel und die Lautstaerke bei 18 %. Technisch lief alles, zu
+# hoeren war nichts. Genau diese Kombination raeumt rescue weg.
+rescue() {
+    local to_standard=${1:-yes}
+    [ "$to_standard" = yes ] && switch_to standard sticky
+    pactl set-sink-mute   @DEFAULT_SINK@   0    2>/dev/null || true
+    pactl set-source-mute @DEFAULT_SOURCE@ 0    2>/dev/null || true
+    pactl set-sink-volume @DEFAULT_SINK@   65%  2>/dev/null || true
+    # Lautsprecher, nicht Ohrmuschel: auf der hoert man nichts, wenn man das
+    # Geraet nicht ans Ohr haelt.
+    pactl set-sink-port sink.primary_output output-speaker 2>/dev/null || \
+    pactl set-sink-port droid-sink          output-speaker 2>/dev/null || true
+    pactl set-source-port droid-source input-builtin_mic   2>/dev/null || true
+    info "Ton wiederhergestellt: Lautsprecher, 65 %, nicht stumm"
+    info "Aktiv: $(active_ports)"
+    return 0
+}
+
 bt_call() {
     local mode=$1 card waited
     card=$(pactl list short cards 2>/dev/null | awk '/bluez_card/ {print $2; exit}')
+
+    # Ein abgebrochener Test darf das Telefon nicht stumm zuruecklassen:
+    # Strg-C oder ein Fehler stellen den hoerbaren Zustand wieder her.
+    trap 'printf "\nAbgebrochen - stelle den Ton wieder her.\n" >&2; rescue no; trap - INT TERM EXIT; exit 130' INT TERM
 
     case "$mode" in
     on)
@@ -294,8 +331,9 @@ bt_call() {
         bt_headset_profile "$card" a2dp
         bt_set_ports output-earpiece input-builtin_mic
         ;;
-    *) die "bt-call braucht 'on', 'off' oder 'watch'." ;;
+    *) trap - INT TERM; die "bt-call braucht 'on', 'off' oder 'watch'." ;;
     esac
+    trap - INT TERM
     return 0
 }
 
@@ -308,6 +346,8 @@ audioctl - Audiostack umschalten
   audioctl list                Profile auflisten
   audioctl try <profil>        umschalten, faellt beim Neustart zurueck
   audioctl set <profil>        umschalten und persistent merken
+  audioctl rescue              Ton wieder hoerbar machen: Auslieferungszustand,
+                               Lautsprecher, 65 %, nicht stumm
   audioctl bt-call watch       vor dem Anruf starten: legt das Gespraech dann
                                selbst aufs Bluetooth-Headset und haelt es dort
   audioctl bt-call on|off      laufenden Anruf von Hand umlegen
@@ -357,6 +397,7 @@ case "${1:-status}" in
     list)   printf '%s\n' $PROFILES ;;
     try)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" try ;;
     set)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" sticky ;;
+    rescue) rescue ;;
     bt-call) [ $# -ge 2 ] || die "bt-call braucht 'on', 'off' oder 'watch'."; bt_call "$2" ;;
     revert) switch_to standard sticky ;;
     verify) verify && echo "OK - Sink vorhanden." || { echo "kein Sink." >&2; exit 1; } ;;
