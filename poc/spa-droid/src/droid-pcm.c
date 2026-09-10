@@ -119,6 +119,8 @@ struct impl {
 	audio_devices_t input_device;
 	char input_port_name[64];   /* leer = ueber den Geraetetyp suchen */
 	char audio_source[32];      /* Android-Audioquelle, z. B. "mic" */
+	char hw_options[192];       /* Optionen fuer das HAL-Modul, s. impl_init */
+	char config_file[192];
 	char wanted_port[64];       /* vom Device gewuenschte Route */
 	bool mode_holds_hal;        /* HAL nur wegen Anrufmodus offen */
 	bool in_call;               /* Modus ist AUDIO_MODE_IN_CALL */
@@ -255,10 +257,33 @@ static int hal_open(struct impl *this)
 	if (this->stream)
 		return 0;
 
-	if (!(this->hw = pa_droid_hw_module_get(pa_compat_core(), this->config, "primary"))) {
+	{
+		/* Ueber Modargs, damit die Herstelleroptionen des Moduls greifen.
+		 * Diese Option ist auf diesem Geraet aus und betrifft den Sprachweg:
+		 *
+		 *   speaker_before_voice=true routet vor dem Moduswechsel kurz auf den
+		 *                             Lautsprecher; manche Geraete beginnen den
+		 *                             Anruf sonst falsch.
+		 *
+		 * FuriOS laedt module-droid-card ohne das. Wer es nicht will, setzt
+		 * droid.hw-options in der Knotenkonfiguration auf etwas anderes.
+		 *
+		 * Die Optionen wirken nur beim ERSTEN Oeffnen des Moduls - danach
+		 * liegt es in der prozessweiten Registry. */
+		char args[512];
+		pa_modargs *ma;
+
+		snprintf(args, sizeof(args), "config=%s %s",
+				this->config_file, this->hw_options);
+		ma = pa_modargs_new(args, NULL);
+		this->hw = pa_droid_hw_module_get2(pa_compat_core(), ma, "primary");
+		pa_modargs_free(ma);
+	}
+	if (!this->hw) {
 		spa_log_error(this->log, NAME " HAL-Modul liess sich nicht oeffnen");
 		return -EIO;
 	}
+	DIAG(this, "HAL-Optionen: %s", this->hw_options[0] ? this->hw_options : "(keine)");
 
 	if (this->capture) {
 		int res;
@@ -1353,6 +1378,11 @@ static int impl_init(const struct spa_handle_factory *factory,
 	if (str)
 		snprintf(this->input_port_name, sizeof(this->input_port_name), "%s", str);
 
+	/* Herstelleroptionen des HAL-Moduls. Voreinstellung siehe hal_open(). */
+	str = info ? spa_dict_lookup(info, "droid.hw-options") : NULL;
+	snprintf(this->hw_options, sizeof(this->hw_options), "%s",
+			str ? str : "speaker_before_voice=true");
+
 	/* Android-Audioquelle. "mic" ist das, was der HAL fuer das eingebaute
 	 * Mikrofon erwartet; fuer Telefonie waere es "voice_call" bzw.
 	 * "voice_communication". Leer laesst AUDIO_SOURCE_DEFAULT stehen. */
@@ -1360,8 +1390,9 @@ static int impl_init(const struct spa_handle_factory *factory,
 	snprintf(this->audio_source, sizeof(this->audio_source), "%s", str ? str : "mic");
 
 	str = info ? spa_dict_lookup(info, "droid.config") : NULL;
-	this->config = pa_parse_droid_audio_config(
+	snprintf(this->config_file, sizeof(this->config_file), "%s",
 			str ? str : "/android/vendor/etc/audio_policy_configuration.xml");
+	this->config = pa_parse_droid_audio_config(this->config_file);
 	if (!this->config) {
 		spa_log_error(this->log, NAME " HAL-Konfiguration nicht lesbar");
 		return -EIO;
@@ -1549,6 +1580,20 @@ static int apply_mode(struct impl *this, const char *mode)
 		return -EIO;
 	}
 	this->in_call = m == AUDIO_MODE_IN_CALL;
+
+	/* "realcall" schaltet bei MediaTek den echten Sprachpfad im DSP frei -
+	 * und damit auch dessen Echounterdrueckung. PulseAudios Kartenmodul
+	 * schickt das beim Wechsel ins Anrufprofil; dieses Modul haben wir nie
+	 * portiert, also machen wir es hier. Nur wenn die Option gesetzt ist -
+	 * dieser MediaTek-HAL lehnt den Parameter uebrigens ab (-22), er ist
+	 * offenbar Qualcomm-Erbe. Der Code bleibt fuer andere Geraete. */
+	if (pa_droid_option(this->hw, DM_OPTION_REALCALL)) {
+		const char *param = this->in_call ? "realcall=on" : "realcall=off";
+		if (pa_droid_set_parameters(this->hw, param) < 0)
+			spa_log_warn(this->log, NAME " HAL lehnt \"%s\" ab", param);
+		else
+			DIAG(this, "%s an den HAL geschickt", param);
+	}
 	DIAG(this, "Audiomodus: %s", mode);
 
 	/* Der HAL routet beim Eintritt in den Anruf selbst auf die Ohrmuschel.

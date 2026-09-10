@@ -198,6 +198,37 @@ Programm noch laeuft. Bewusst ohne Prozentzahl: wie lange es dauert, weiss
 vorher niemand, denn audioctl wartet bis zu 15 Sekunden auf einen Sink. Eine
 erfundene Zahl, die bei 90 % haengen bleibt, waere schlechter als gar keine.
 
+## Echo im Gespraech
+
+Die Gegenseite hoert sich selbst? Software hilft dagegen nicht: bei einem
+Mobilfunkgespraech laeuft der Sprachweg **Modem <-> DSP**, nicht ueber den
+Rechner - eine Echounterdrueckung in PipeWire oder PulseAudio saehe die Daten
+nie. Die Unterdrueckung sitzt im DSP und heisst bei MediaTek **DMNR**
+(Zweimikrofonverfahren gegen Stoergeraeusche und Echo).
+
+Die Abstimmungsdatei des Herstellers sagt auf diesem Geraet:
+
+    MTK_DUAL_MIC_SUPPORT         yes   zwei Mikrofone sind vorhanden
+    MTK_HANDSFREE_DMNR_SUPPORT   yes   der Chip kann Freisprech-DMNR
+    MTK_INCALL_HANDSFREE_DMNR    no    im Anruf ist sie abgeschaltet
+    MTK_VOIP_HANDSFREE_DMNR      no
+    MTK_VOIP_NORMAL_DMNR         no
+
+`experiments/dmnr-handsfree.sh an` legt per Bind-Mount eine geaenderte Kopie
+ueber die Datei (die Partition ist schreibgeschuetzt und per dm-verity
+abgesichert - daran wird nicht geschraubt) und startet den Audiostack neu,
+damit der HAL sie liest. `aus` nimmt sie weg, ein Neustart ebenfalls.
+**Ungetestet** - das kann nur ein echtes Gespraech zeigen.
+
+Zwei Spuren, die sich als Sackgasse erwiesen haben:
+
+- `realcall=on`, das PulseAudios Kartenmodul beim Anrufprofil schickt, **lehnt
+  dieser HAL ab** (`failed: -22`). Offenbar Qualcomm-Erbe. Der Code dafuer ist
+  da, die Option aber aus.
+- `speaker_before_voice=true` ist dagegen aktiv: der HAL routet jetzt vor dem
+  Moduswechsel kurz auf den Lautsprecher, wie es upstream fuer Geraete
+  empfiehlt, die den Anruf sonst falsch beginnen.
+
 ## Bluetooth
 
 Damit PipeWire Bluetooth-Audio kann, muss `libspa-0.2-bluetooth` installiert
