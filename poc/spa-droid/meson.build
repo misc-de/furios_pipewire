@@ -107,6 +107,7 @@ shared_module('spa-droid',
 # plugin. It opens no HAL: what it exercises are the decisions, not the device.
 droid_device_test = executable('test-droid-device',
   'tests/test-droid-device.c',
+  c_args : ['-DTEST_FIXTURE="' + meson.current_source_dir() / 'tests/audio-policy-fixture.xml' + '"'],
   include_directories : [compat_inc, droid_inc, android_inc],
   dependencies : [spa_dep, hybris_dep, hw_dep,
                   cc.find_library('m', required : false),

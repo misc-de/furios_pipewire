@@ -11,6 +11,10 @@
  * been wrong in ways that were invisible until someone listened.
  */
 #include <math.h>
+
+#ifndef TEST_FIXTURE
+#define TEST_FIXTURE "tests/audio-policy-fixture.xml"
+#endif
 #include "../src/droid-device.c"
 
 /* droid-device.c names the node factories that live in droid-pcm.c. The test
@@ -198,6 +202,37 @@ static void test_route_props(void)
 	apply_route_props(this, DEV_SINK,
 			build_props(buffer, sizeof(buffer), two, 2, true));
 	check_uint("mute comes across", 1, this->mute[DEV_SINK] ? 1 : 0);
+
+	/* A channel map of the right length is taken; a short one is not, because
+	 * it would rename the channels - that is how front-left once became the
+	 * nameless aux0. */
+	this = fresh_impl();
+	{
+		uint8_t buf[512];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+		struct spa_pod_frame f;
+		uint32_t map[2] = { SPA_AUDIO_CHANNEL_FR, SPA_AUDIO_CHANNEL_FL };
+		spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
+		spa_pod_builder_prop(&b, SPA_PROP_channelMap, 0);
+		spa_pod_builder_array(&b, sizeof(uint32_t), SPA_TYPE_Id, 2, map);
+		apply_route_props(this, DEV_SINK, spa_pod_builder_pop(&b, &f));
+	}
+	check_uint("a channel map of the right length is taken",
+			SPA_AUDIO_CHANNEL_FR, this->channel_map[DEV_SINK][0]);
+
+	this = fresh_impl();
+	{
+		uint8_t buf[512];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof(buf));
+		struct spa_pod_frame f;
+		uint32_t map[1] = { SPA_AUDIO_CHANNEL_MONO };
+		spa_pod_builder_push_object(&b, &f, SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
+		spa_pod_builder_prop(&b, SPA_PROP_channelMap, 0);
+		spa_pod_builder_array(&b, sizeof(uint32_t), SPA_TYPE_Id, 1, map);
+		apply_route_props(this, DEV_SINK, spa_pod_builder_pop(&b, &f));
+	}
+	check_uint("a shorter one is refused, so the channels keep their names",
+			SPA_AUDIO_CHANNEL_FL, this->channel_map[DEV_SINK][0]);
 
 	/* A device index out of range must be ignored, not written past. */
 	this = fresh_impl();
@@ -443,6 +478,19 @@ static void test_device_description(void)
 
 	printf("\nwhat the card calls itself\n");
 
+	{
+		const struct spa_interface_info *iinfo = NULL;
+		uint32_t index = 0;
+		int res = droid_device_factory.enum_interface_info(
+				&droid_device_factory, &iinfo, &index);
+		check_uint("the plugin announces one interface: a device", 1,
+				(res == 1 && iinfo != NULL &&
+				 spa_streq(iinfo->type, SPA_TYPE_INTERFACE_Device)) ? 1 : 0);
+		res = droid_device_factory.enum_interface_info(
+				&droid_device_factory, &iinfo, &index);
+		check_uint("and no more than that", 0, res);
+	}
+
 	desc = device_description();
 	check_uint("the card has a description at all", 1,
 			(desc != NULL && desc[0] != '\0') ? 1 : 0);
@@ -456,11 +504,283 @@ static void test_device_description(void)
 	}
 }
 
+/* --- the card as PipeWire sees it -----------------------------------------
+ *
+ * Everything above works on a hand-built struct impl. This part starts the
+ * device the way the daemon does - init, listen, enumerate, set - against a
+ * fixture configuration instead of the phone's own. No HAL is opened: the
+ * device parses the XML and hands out parameters, and it is the node that
+ * would touch hardware.
+ */
+struct listener_counts {
+	uint32_t info;
+	uint32_t objects;
+	uint32_t removed;
+	uint32_t results;
+	uint32_t answers;
+};
+
+/* enum_params answers through this, not through its return value - the device
+ * builds each pod and emits it, one result per parameter. */
+static void on_result(void *data, int seq, int res, uint32_t type,
+		const void *result)
+{
+	struct listener_counts *c = data;
+	(void) seq; (void) res; (void) type;
+	c->answers++;
+	/* sync answers with an empty result - it is a marker, not a parameter. */
+	if (result != NULL)
+		c->results++;
+}
+
+static void on_device_info(void *data, const struct spa_device_info *info)
+{
+	struct listener_counts *c = data;
+	(void) info;
+	c->info++;
+}
+
+static void on_object_info(void *data, uint32_t id,
+		const struct spa_device_object_info *info)
+{
+	struct listener_counts *c = data;
+	if (info == NULL)
+		c->removed++;
+	else
+		c->objects++;
+	(void) id;
+}
+
+static const struct spa_device_events device_events = {
+	SPA_VERSION_DEVICE_EVENTS,
+	.info = on_device_info,
+	.result = on_result,
+	.object_info = on_object_info,
+};
+
+static struct spa_handle *start_device(const char *config)
+{
+	struct spa_dict_item items[2];
+	struct spa_dict info;
+	struct spa_handle *handle;
+	size_t size = droid_device_factory.get_size ?
+		droid_device_factory.get_size(&droid_device_factory, NULL) :
+		sizeof(struct impl);
+
+	handle = calloc(1, size);
+	items[0] = SPA_DICT_ITEM_INIT("droid.config", config);
+	info = SPA_DICT_INIT(items, 1);
+
+	if (droid_device_factory.init(&droid_device_factory, handle, &info,
+				NULL, 0) < 0) {
+		free(handle);
+		return NULL;
+	}
+	return handle;
+}
+
+static uint32_t count_params(struct spa_device *dev,
+		struct listener_counts *counts, uint32_t id)
+{
+	counts->results = 0;
+	counts->answers = 0;
+	spa_device_enum_params(dev, 0, id, 0, UINT32_MAX, NULL);
+	return counts->results;
+}
+
+/* Build the Profile param the card would publish and read its save flag back.
+ * build_profile() is where the decision lives; asking the card's own field
+ * would test the wrong thing, since the field is set and the flag is not. */
+static bool profile_save_flag(struct impl *this, uint32_t index)
+{
+	uint8_t buffer[2048];
+	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+	struct spa_pod *param = NULL;
+	uint32_t saved = this->profile;
+	bool save = false;
+
+	this->profile = index;
+	if (build_profile(this, &b, SPA_PARAM_Profile, index, true, &param) == 1 &&
+			param != NULL)
+		spa_pod_parse_object(param, SPA_TYPE_OBJECT_ParamProfile, NULL,
+				SPA_PARAM_PROFILE_save, SPA_POD_OPT_Bool(&save));
+	this->profile = saved;
+	return save;
+}
+
+static void test_device_lifecycle(const char *fixture)
+{
+	struct spa_handle *handle;
+	struct spa_device *dev = NULL;
+	struct listener_counts counts = { 0, 0, 0 };
+	struct spa_hook listener = { 0 };
+	struct impl *this;
+
+	printf("\nthe card, started the way the daemon starts it\n");
+
+	handle = start_device(fixture);
+	checks++;
+	if (handle == NULL) {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the device would not initialise from the fixture\n");
+		return;
+	}
+	printf("  \033[32mok\033[0m   it initialises from a configuration file\n");
+
+	spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Device, (void **) &dev);
+	check_uint("and hands out a device interface", 1, dev != NULL ? 1 : 0);
+	if (dev == NULL)
+		goto out;
+
+	this = (struct impl *) handle;
+
+	/* The fixture has speaker, earpiece and a wired output, two microphones
+	 * and the call tap - plus the two Bluetooth routes the card adds itself,
+	 * because the vendor's file leaves them out. */
+	check_uint("it finds the ports in the file and adds Bluetooth itself",
+			8, this->n_routes);
+	check_str("and picks the speaker for output", "output-speaker",
+			picked(this, DEV_SINK));
+	check_str("and the main microphone for input", "input-builtin_mic",
+			picked(this, DEV_SOURCE));
+
+	spa_device_add_listener(dev, &listener, &device_events, &counts);
+	check_uint("a listener is told about the card", 1, counts.info > 0 ? 1 : 0);
+	check_uint("and about the nodes it should create", 4, counts.objects);
+
+	/* off, default, voicecall, communication - callaudiod looks for the
+	 * middle two by name, so the count is not incidental. */
+	check_uint("it offers four profiles", 4,
+			count_params(dev, &counts, SPA_PARAM_EnumProfile));
+	check_uint("and one route per port it found", 8,
+			count_params(dev, &counts, SPA_PARAM_EnumRoute));
+	check_uint("and reports the two routes that are active", 2,
+			count_params(dev, &counts, SPA_PARAM_Route));
+	check_uint("and the profile it is in", 1,
+			count_params(dev, &counts, SPA_PARAM_Profile));
+
+	/* --- setting things, the way pactl and WirePlumber do -------------- */
+
+	{
+		uint8_t buffer[1024];
+		struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		struct spa_pod *param;
+		uint32_t i, call = SPA_ID_INVALID, earpiece = SPA_ID_INVALID;
+
+		/* The call profile by name, because that is how callaudiod finds
+		 * it - and the name is not ours to choose. */
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(PROFILE_VOICECALL),
+				SPA_PARAM_PROFILE_save, SPA_POD_Bool(true));
+		check_uint("the call profile can be set", 0,
+				spa_device_set_param(dev, SPA_PARAM_Profile, 0, param) == 0 ? 0 : 1);
+		check_uint("and the card is in it", PROFILE_VOICECALL, this->profile);
+
+		/* What matters is not what the card remembers internally but what
+		 * it tells WirePlumber, because that is what ends up in the stored
+		 * profile state. The call profile must report save=false however
+		 * insistently it was set - a phone that boots into call mode with
+		 * nobody on the line is the failure this prevents. */
+		check_uint("but it never reports the call profile as a choice to keep",
+				0, profile_save_flag(this, PROFILE_VOICECALL) ? 1 : 0);
+		check_uint("nor the communication profile", 0,
+				profile_save_flag(this, PROFILE_COMMUNICATION) ? 1 : 0);
+
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamProfile, SPA_PARAM_Profile,
+				SPA_PARAM_PROFILE_index, SPA_POD_Int(PROFILE_DEFAULT),
+				SPA_PARAM_PROFILE_save, SPA_POD_Bool(true));
+		spa_device_set_param(dev, SPA_PARAM_Profile, 0, param);
+		check_uint("an ordinary profile is reported as one to keep", 1,
+				profile_save_flag(this, PROFILE_DEFAULT) ? 1 : 0);
+
+		for (i = 0; i < this->n_routes; i++) {
+			if (spa_streq(this->routes[i].pa_name, "output-earpiece"))
+				earpiece = i;
+			if (spa_streq(this->routes[i].pa_name, "input-voice_call"))
+				call = i;
+		}
+
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route,
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(earpiece),
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(DEV_SINK));
+		spa_device_set_param(dev, SPA_PARAM_Route, 0, param);
+		check_str("a route can be chosen", "output-earpiece",
+				this->routes[this->active[DEV_SINK]].pa_name);
+
+		/* A route belongs to one direction. Setting an output as the
+		 * microphone must be refused, not obeyed. */
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route,
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(earpiece),
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(DEV_SOURCE));
+		check_uint("but not for the wrong direction", 1,
+				spa_device_set_param(dev, SPA_PARAM_Route, 0, param) < 0 ? 1 : 0);
+		check_str("and the microphone is untouched", "input-builtin_mic",
+				this->routes[this->active[DEV_SOURCE]].pa_name);
+		(void) call;
+
+		/* An index past the end must not be followed anywhere. */
+		b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+		param = spa_pod_builder_add_object(&b,
+				SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route,
+				SPA_PARAM_ROUTE_index, SPA_POD_Int(this->n_routes + 5),
+				SPA_PARAM_ROUTE_device, SPA_POD_Int(DEV_SINK));
+		check_uint("an index past the end is refused", 1,
+				spa_device_set_param(dev, SPA_PARAM_Route, 0, param) < 0 ? 1 : 0);
+
+		/* Volume arrives on the route, which is where PulseAudio clients
+		 * read and write it. */
+		{
+			float vols[2] = { 0.3f, 0.3f };
+			/* One frame per object. Reusing a single one nests the pops
+			 * wrongly and the builder then writes past its buffer - which
+			 * showed up as the whole test hanging somewhere else entirely. */
+			struct spa_pod_frame f_route, f_props;
+
+			b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+			spa_pod_builder_push_object(&b, &f_route,
+					SPA_TYPE_OBJECT_ParamRoute, SPA_PARAM_Route);
+			spa_pod_builder_add(&b,
+					SPA_PARAM_ROUTE_index, SPA_POD_Int(earpiece),
+					SPA_PARAM_ROUTE_device, SPA_POD_Int(DEV_SINK), 0);
+			spa_pod_builder_prop(&b, SPA_PARAM_ROUTE_props, 0);
+			spa_pod_builder_push_object(&b, &f_props,
+					SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
+			spa_pod_builder_prop(&b, SPA_PROP_channelVolumes, 0);
+			spa_pod_builder_array(&b, sizeof(float), SPA_TYPE_Float, 2, vols);
+			spa_pod_builder_pop(&b, &f_props);
+			param = spa_pod_builder_pop(&b, &f_route);
+			spa_device_set_param(dev, SPA_PARAM_Route, 0, param);
+		}
+		check_float("a volume set on the route arrives", 0.3f,
+				this->channel_volumes[DEV_SINK][0]);
+	}
+
+	/* sync answers with a result the caller can wait on - WirePlumber uses it
+	 * to know the card has finished announcing itself. */
+	counts.answers = counts.results = 0;
+	spa_device_sync(dev, 42);
+	check_uint("sync answers, with an empty result", 1,
+			(counts.answers == 1 && counts.results == 0) ? 1 : 0);
+
+	spa_hook_remove(&listener);
+out:
+	spa_handle_clear(handle);
+	free(handle);
+}
+
 int main(void)
 {
 	test_route_description();
 	test_device_description();
 	test_route_body();
+	test_device_lifecycle(TEST_FIXTURE);
 	test_default_route();
 	test_route_priority();
 	test_route_props();

@@ -145,13 +145,15 @@ ear.
 
     ./tests/coverage.sh
 
-reports line coverage of `droid-device.c` per function. It stands at **17 % of
-479 lines**, and that number is meant to be read together with the shape of the
-file: the functions that decide something are covered - `route_priority`,
-`default_route`, `build_route_body` at 100 %, `apply_route_props` at 62 % -
-while everything that talks to PipeWire or the HAL is not, because exercising
-that needs a running graph rather than a test binary. `droid-pcm.c` has no test
-at all: it opens the HAL to do anything.
+reports line coverage of `droid-device.c` per function. It stands at **89 % of
+481 lines**. The card is started the way the daemon starts it - init, listen,
+enumerate, set - against `tests/audio-policy-fixture.xml` rather than the
+phone's own configuration, so the tests say something about the code and not
+about one vendor's file. No HAL is opened: the device parses XML and hands out
+parameters, and it is the node that would touch hardware.
+
+`droid-pcm.c` has no test at all, and will not have one of this kind: it opens
+the HAL to do anything.
 
 Each test says which mistake it is there to prevent, because every one of them
 was a real one: `auto_null` passing the safety net; a single stored channel

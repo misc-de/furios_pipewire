@@ -25,6 +25,7 @@ cc -I"$ROOT/poc/spa-droid" -I"$ROOT/poc/spa-droid/compat" \
    -std=gnu11 -O0 -g --coverage \
    -DANDROID_VERSION_MAJOR=11 -DANDROID_VERSION_MINOR=0 -DANDROID_VERSION_PATCH=0 \
    -DHAVE_CONFIG_H -Wno-attributes -Wno-int-conversion -Wno-unused-parameter \
+   -DTEST_FIXTURE="\"$ROOT/poc/spa-droid/tests/audio-policy-fixture.xml\"" \
    "$ROOT/poc/spa-droid/tests/test-droid-device.c" \
    -L"$ROOT/poc/spa-droid/build" -l:libdroid-common.a \
    -lexpat -lhybris-common -lhardware -lpthread -lm \
