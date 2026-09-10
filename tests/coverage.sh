@@ -8,9 +8,11 @@
 # plugin is never a coverage build - runs it, and prints line coverage per
 # function.
 #
-# The number will stay modest, and that is the honest state of things: most of
-# droid-device.c talks to PipeWire or the HAL, and exercising that needs a
-# running graph, not a test binary. What can be covered are the decisions.
+# What the numbers do and do not mean: the card and the node are measured
+# against a configuration file and a HAL stand-in (tests/hal-stub.c), never
+# against the phone. Every line is reached, and that says the decisions around
+# the hardware behave - the ring buffer, the give-up rule, the latency
+# arithmetic, the routing. It says nothing about the HAL itself.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SRC="$ROOT/src/pulseaudio-modules-droid-modern/src/common"
@@ -19,6 +21,8 @@ OUT=${OUT:-$(mktemp -d)}
 command -v gcov >/dev/null || { echo "gcov not installed" >&2; exit 1; }
 [ -f "$ROOT/poc/spa-droid/build/libdroid-common.a" ] || {
     echo "build the plugin first: ninja -C poc/spa-droid/build" >&2; exit 1; }
+[ -f "$ROOT/poc/spa-droid/build/libdroid-config-only.a" ] || {
+    ninja -C "$ROOT/poc/spa-droid/build" test-droid-pcm >/dev/null; }
 
 cc -I"$ROOT/poc/spa-droid" -I"$ROOT/poc/spa-droid/compat" \
    -I"$SRC" -I"$SRC/include" -I/usr/include/android -I/usr/include/spa-0.2 \
@@ -50,6 +54,23 @@ cc -I"$ROOT/poc/spa-droid" -I"$ROOT/poc/spa-droid/compat" \
 
 ( cd "$OUT" && ./test-compat-cov >/dev/null )
 
+# The node's test replaces the HAL half with tests/hal-stub.c, so it links the
+# configuration half only - see the note in poc/spa-droid/meson.build.
+cc -I"$ROOT/poc/spa-droid" -I"$ROOT/poc/spa-droid/compat" \
+   -I"$SRC" -I"$SRC/include" -I/usr/include/android -I/usr/include/spa-0.2 \
+   -std=gnu11 -O0 -g --coverage \
+   -DANDROID_VERSION_MAJOR=11 -DANDROID_VERSION_MINOR=0 -DANDROID_VERSION_PATCH=0 \
+   -DHAVE_CONFIG_H -Wno-attributes -Wno-int-conversion -Wno-unused-parameter \
+   -DTEST_FIXTURE="\"$ROOT/poc/spa-droid/tests/audio-policy-fixture.xml\"" \
+   -DTEST_FIXTURE_NO_PRIMARY="\"$ROOT/poc/spa-droid/tests/audio-policy-no-primary.xml\"" \
+   "$ROOT/poc/spa-droid/tests/test-droid-pcm.c" \
+   "$ROOT/poc/spa-droid/tests/hal-stub.c" \
+   -L"$ROOT/poc/spa-droid/build" -l:libdroid-config-only.a \
+   -lexpat -lpulse -lhybris-common -lhardware -lpthread -lm \
+   -o "$OUT/test-pcm-cov"
+
+( cd "$OUT" && ./test-pcm-cov >/dev/null )
+
 echo
 echo "== droid-device.c, line coverage per function =="
 ( cd "$OUT" && gcov -f -n ./test-cov-*.gcno 2>/dev/null ) \
@@ -61,6 +82,18 @@ echo "== droid-device.c, line coverage per function =="
 
 echo
 ( cd "$OUT" && gcov -n ./test-cov-*.gcno 2>/dev/null ) | grep -A1 "src/droid-device.c" | tail -1 | sed 's/^/  droid-device.c: /'
+
+echo
+echo "== droid-pcm.c, line coverage per function =="
+( cd "$OUT" && gcov -f -n ./test-pcm-cov-*.gcno 2>/dev/null ) \
+  | awk '/^Function/{fn=$2} /^Lines executed/{print $0, fn}' \
+  | grep -E "'(hal_open|hal_open_input|hal_close|latency_[a-z_]+|set_timeout|timer_[a-z_]+|on_timeout|writer_[a-z_]+|reader_thread|process_capture|port_[a-z_]+|apply_[a-z_]+|reapply_audio_source|registry_[a-z_]+|droid_node_set_route|emit_[a-z_]+|impl_[a-z_]+)'" \
+  | sed "s/Lines executed://; s/of //" \
+  | sort -t: -k1 -rn \
+  | awk -F"[ %]" '{printf "  %7s  %s\n", $1"%", $NF}'
+
+echo
+( cd "$OUT" && gcov -n ./test-pcm-cov-*.gcno 2>/dev/null ) | grep -A1 "src/droid-pcm.c" | tail -1 | sed 's/^/  droid-pcm.c: /'
 
 echo
 echo "== the compat layer =="
@@ -87,6 +120,3 @@ echo "== the Python parts =="
 echo
 echo "== audioctl =="
 "$ROOT/tests/coverage-shell.sh" 2>/dev/null || echo "  could not be measured"
-
-echo
-echo "  droid-pcm.c: no test binary - it opens the HAL to do anything at all"

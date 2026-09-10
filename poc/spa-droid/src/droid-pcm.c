@@ -487,7 +487,7 @@ static void latency_changed(struct impl *this)
 
 /* --------------------------------------------------------- clock */
 
-static void set_timeout(struct impl *this, uint64_t time)
+static int set_timeout(struct impl *this, uint64_t time)
 {
 	struct itimerspec ts;
 
@@ -495,7 +495,7 @@ static void set_timeout(struct impl *this, uint64_t time)
 	ts.it_value.tv_nsec = time % SPA_NSEC_PER_SEC;
 	ts.it_interval.tv_sec = 0;
 	ts.it_interval.tv_nsec = 0;
-	spa_system_timerfd_settime(this->data_system, this->timer_source.fd,
+	return spa_system_timerfd_settime(this->data_system, this->timer_source.fd,
 			SPA_FD_TIMER_ABSTIME, &ts, NULL);
 }
 
@@ -555,6 +555,7 @@ static int timer_start(struct impl *this)
 	uint32_t channels = this->port.have_format
 		? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS;
 	size_t bufsz = pa_droid_stream_buffer_size(this->stream);
+	int res;
 
 	/* Period from the HAL buffer size: buffer_size / (2 bytes * channels) frames */
 	this->rate = rate;
@@ -567,7 +568,10 @@ static int timer_start(struct impl *this)
 
 	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &now);
 	this->next_time = SPA_TIMESPEC_TO_NSEC(&now) + this->period_ns;
-	set_timeout(this, this->next_time);
+	/* A timer that cannot be armed means no graph cycles at all - the node
+	 * would sit there looking healthy and play nothing. */
+	if ((res = set_timeout(this, this->next_time)) < 0)
+		return res;
 
 	DIAG(this, "clock running: %u frames every %llu us",
 			this->quantum, (unsigned long long) (this->period_ns / 1000));
@@ -731,10 +735,15 @@ static int writer_start(struct impl *this)
 	spa_ringbuffer_init(&this->ring);
 	this->running = true;
 	this->drain = true;
-	if (pthread_create(&this->writer, NULL,
-				this->capture ? reader_thread : writer_thread, this) != 0) {
-		this->running = false;
-		return -errno;
+	/* pthread_create RETURNS the error number and does not touch errno -
+	 * reading errno here gave 0 on failure, which reads as success. */
+	{
+		int err = pthread_create(&this->writer, NULL,
+				this->capture ? reader_thread : writer_thread, this);
+		if (err != 0) {
+			this->running = false;
+			return -err;
+		}
 	}
 	this->started = true;
 	return 0;
@@ -1385,6 +1394,11 @@ static int impl_init(const struct spa_handle_factory *factory,
 	this->timer_source.data = this;
 	this->timer_source.fd = spa_system_timerfd_create(this->data_system,
 			CLOCK_MONOTONIC, SPA_FD_CLOEXEC | SPA_FD_NONBLOCK);
+	if (this->timer_source.fd < 0) {
+		spa_log_error(this->log, NAME " no timer - the node would never "
+				"run a cycle");
+		return this->timer_source.fd;
+	}
 	this->timer_source.mask = SPA_IO_IN;
 	this->timer_source.rmask = 0;
 	spa_loop_add_source(this->data_loop, &this->timer_source);

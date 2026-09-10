@@ -118,6 +118,34 @@ droid_device_test = executable('test-droid-device',
   build_by_default : false)
 test('droid-device', droid_device_test)
 
+# The node's test links the configuration parser and our own compat code, but
+# NOT droid-util - the HAL half is replaced by tests/hal-stub.c. Linking both
+# would be two definitions of every pa_droid_* function.
+droid_config_only = static_library('droid-config-only',
+  [ 'compat/pa-compat.c',
+    'compat/pa-containers.c',
+    'compat/pa-audio.c',
+    droid_src / 'common/sllist.c',
+    droid_src / 'common/utils.c',
+    droid_src / 'common/conversion.c',
+    droid_src / 'common/config-parser-xml.c',
+    droid_src / 'common/droid-config.c' ],
+  include_directories : [compat_inc, droid_inc, android_inc],
+  dependencies : [expat_dep, libpulse_dep])
+
+droid_pcm_test = executable('test-droid-pcm',
+  ['tests/test-droid-pcm.c', 'tests/hal-stub.c'],
+  c_args : ['-DTEST_FIXTURE="' + meson.current_source_dir() / 'tests/audio-policy-fixture.xml' + '"',
+            '-DTEST_FIXTURE_NO_PRIMARY="' + meson.current_source_dir() / 'tests/audio-policy-no-primary.xml' + '"'],
+  include_directories : [compat_inc, droid_inc, android_inc],
+  dependencies : [spa_dep, hybris_dep, hw_dep,
+                  cc.find_library('m', required : false),
+                  cc.find_library('dl', required : false),
+                  cc.find_library('pthread', required : false)],
+  link_with : droid_config_only,
+  build_by_default : false)
+test('droid-pcm', droid_pcm_test)
+
 compat_test = executable('test-compat',
   'tests/test-compat.c',
   include_directories : [compat_inc, droid_inc, android_inc],

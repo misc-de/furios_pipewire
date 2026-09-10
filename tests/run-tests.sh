@@ -36,21 +36,26 @@ run "python: config generator, app/audioctl seam, bluetooth watcher" \
 # binary against changed sources is worse than not running it at all. That
 # happened once: two new checks appeared to pass without ever being compiled.
 BUILD="$ROOT/poc/spa-droid/build"
-if [ -d "$BUILD" ]; then
-    printf '\n\033[1m== spa-droid: card decisions\033[0m\n'
-    if ninja -C "$BUILD" test-droid-device >/dev/null 2>&1; then
-        if "$BUILD/test-droid-device"; then
+run_c_test() {
+    printf '\n\033[1m== spa-droid: %s\033[0m\n' "$2"
+    if [ ! -d "$BUILD" ]; then
+        printf '  \033[33mskipped\033[0m - no build tree, see "Building" in README.md\n'
+        return
+    fi
+    if ninja -C "$BUILD" "$1" >/dev/null 2>&1; then
+        if "$BUILD/$1"; then
             :
         else
             FAILED=$((FAILED + 1))
         fi
     else
-        printf '  \033[33mskipped\033[0m - test-droid-device did not build\n'
+        printf '  \033[33mskipped\033[0m - %s did not build\n' "$1"
     fi
-else
-    printf '\n\033[1m== spa-droid: card decisions\033[0m\n'
-    printf '  \033[33mskipped\033[0m - no build tree, see "Building" in README.md\n'
-fi
+}
+
+run_c_test test-droid-device "card decisions"
+run_c_test test-droid-pcm "the node, with the HAL replaced by a stand-in"
+run_c_test test-compat "the compatibility layer"
 
 # --- the WirePlumber scripts ------------------------------------------------
 #

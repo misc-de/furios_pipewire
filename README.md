@@ -151,6 +151,7 @@ reports line coverage. Everything that can be reached without hardware is at
 | | |
 |---|---|
 | `droid-device.c` | 100 % of 481 lines |
+| `droid-pcm.c` | 100 % of 887 |
 | `compat/pa-audio.c` | 100 % of 87 |
 | `compat/pa-compat.c` | 100 % of 77 |
 | `compat/pa-containers.c` | 100 % of 172 |
@@ -203,8 +204,27 @@ for the case that it is; counting a negative as nothing written keeps the same
 protection without a line no test could reach. Removing a check to please a
 coverage number would have been the other way to get there, and the wrong one.
 
-`droid-pcm.c` has no test at all, and will not have one of this kind: it opens
-the HAL to do anything.
+`droid-pcm.c` is the half that touches hardware, and it is tested against a
+stand-in: `tests/hal-stub.c` answers where the Android HAL would, counting the
+bytes it is given, handing back what a test told it to hand back, and failing
+on demand. The test links only the configuration half of the vendor code and
+replaces the rest, which is why `meson.build` has a second static library for
+it. What that proves is that the code *around* the HAL behaves - the ring
+buffer, the give-up-after-three-refusals rule, the drain that would otherwise
+swallow the last 21 ms of a song, the latency it reports, the audio source a
+call takes away and never gives back. It proves nothing about the HAL itself,
+and no stub ever will.
+
+Two allocations and a thread that will not start cannot be provoked on a desk,
+so the test redirects `malloc` and `pthread_create` for the one file it
+includes - by macro, ending at an `#undef`, not by interposing on the process.
+An allocation fails only at an exact size that nothing else asks for, so the
+test's own output keeps working while the node's buffer comes back empty.
+
+Three things in the node changed because the test asked what happens when they
+fail. `pthread_create` returns its error rather than setting `errno`, so a
+failed start read as a successful one; a timer that cannot be created or armed
+left the node looking healthy and playing nothing. All three now say so.
 
 Each test says which mistake it is there to prevent, because every one of them
 was a real one: `auto_null` passing the safety net; a single stored channel
