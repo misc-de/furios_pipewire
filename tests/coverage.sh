@@ -81,4 +81,8 @@ else
 fi
 
 echo
+echo "== audioctl =="
+"$ROOT/tests/coverage-shell.sh" 2>/dev/null || echo "  could not be measured"
+
+echo
 echo "  droid-pcm.c: no test binary - it opens the HAL to do anything at all"

@@ -158,6 +158,14 @@ reports line coverage. Everything that can be reached without hardware is at
 | `wireplumber/droid-bluetooth-call.lua` | 100 % of 97 |
 | `wireplumber/droid-default-sink-policy.lua` | 100 % of 61 |
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
+| `audioctl` | 100 % of 260 |
+
+`audioctl` is measured with bash's own tracing: `PS4` carries `LINENO`, `set -x`
+prints it, and what is left is arithmetic. It runs against a `PATH` where
+`pactl`, `systemctl` and `sudo` are scripts that answer whatever the case under
+test needs, and `--dry-run` wherever it would change something - `run()` then
+prints the command instead of running it, which is exactly the seam a test
+wants.
 
 The WirePlumber scripts run inside a session manager, so `tests/lua/` gives
 them one: a stub shallow enough to read in a sitting, where object managers

@@ -8,10 +8,12 @@
 
 set -u
 
-STATE_DIR=/var/lib/furios-audio
+# Overridable so the tests can run the real dispatcher without writing into
+# the state of the phone they are running on.
+STATE_DIR=${AUDIOCTL_STATE_DIR:-/var/lib/furios-audio}
 STICKY=$STATE_DIR/profile
 TRY=$STATE_DIR/profile.try
-ETCU=/etc/systemd/user
+ETCU=${AUDIOCTL_ETCU:-/etc/systemd/user}
 DROPIN=$ETCU/pipewire.service.d/50-furios-audio.conf
 # Files can come from two sources: installed from the source tree
 # (/usr/local) or from the package (/usr). Both have to be found.
@@ -217,8 +219,10 @@ apply() {
 
 # --- verification: is there a usable sink? ----------------------------------
 verify() {
-    local i=0
-    while [ $i -lt 15 ]; do
+    # Fifteen seconds is what a real switch needs; the tests set it to one, so
+    # a suite that exercises this path does not spend minutes asleep.
+    local i=0 tries=${VERIFY_TRIES:-15}
+    while [ $i -lt "$tries" ]; do
         # auto_null is PipeWire's fallback sink: it exists precisely when no
         # real device came up. Accepting it would let the safety net pass on a
         # plugin that failed to load - the switch would look successful and
@@ -374,9 +378,12 @@ bt_set_ports() {
 
 # Defend the route against callaudiod for as long as the call runs.
 bt_hold() {
+    # Two seconds between checks; the tests set it to zero, because a suite
+    # that sleeps through half an hour of holding is a suite nobody runs.
     local sink_port=$1 src_port=$2 limit=$3 i=0 now
+    local interval=${BT_HOLD_INTERVAL:-2}
     while [ $i -lt "$limit" ]; do
-        sleep 2
+        [ "$interval" = 0 ] || sleep "$interval"
         now=$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')
         if [ "$now" != "$sink_port" ]; then
             btlog "bt-call: output was on \"$now\" - setting it again"

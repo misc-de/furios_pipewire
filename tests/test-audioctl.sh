@@ -10,6 +10,27 @@ STUBDIR=$(mktemp -d)
 trap 'rm -rf "$STUBDIR"' EXIT
 export PATH="$STUBDIR:$PATH"
 
+# When the coverage script asks for it, record which lines of audioctl run.
+if [ -n "${AUDIOCTL_TRACE:-}" ]; then
+    exec {trace_fd}>>"$AUDIOCTL_TRACE"
+    export BASH_XTRACEFD=$trace_fd
+    export PS4='+ ${BASH_SOURCE}:${LINENO}: '
+    set -x
+fi
+
+# Source audioctl once, with tracing on if it was asked for. Every test that
+# calls into it does so through this shell.
+load_audioctl() {
+    AUDIOCTL_LIB=1 . "$HERE/../audioctl"
+}
+
+# sudo runs the command without being root. Every path the tests hand it lies
+# inside the temporary directory, so the commands are harmless - and some of
+# them have to actually happen: droid_monitor is a "sudo mv", and a sudo that
+# swallowed it would test nothing.
+printf '#!/bin/sh\nexec "$@"\n' > "$STUBDIR/sudo"
+chmod +x "$STUBDIR/sudo"
+
 # --- verify(): the safety net -----------------------------------------------
 #
 # This is the check that decides whether a profile switch stands or is rolled
@@ -69,9 +90,483 @@ check "PulseAudio running means standard" "standard" "$(run_effective pulseaudio
 check "pipewire-pulse running means pw-hal" "pw-hal" "$(run_effective pipewire-pulse.service)"
 check "neither running is reported as unclear" "unclear" "$(run_effective none)"
 
+# PulseAudio plus the tunnel service is the third profile, and the only case
+# where two services have to be looked at rather than one.
+cat > "$STUBDIR/systemctl" <<'STUB'
+#!/bin/sh
+case "$3" in
+pulseaudio.service|furios-pw-tunnel.service) exit 0 ;;
+esac
+exit 3
+STUB
+chmod +x "$STUBDIR/systemctl"
+check "PulseAudio with the tunnel running is pw-tunnel" "pw-tunnel" \
+    "$( AUDIOCTL_LIB=1 . "$HERE/../audioctl"; effective_profile )"
+
 # --- the profile list -------------------------------------------------------
 check "the known profiles are exactly the three documented ones" \
     "standard pw-tunnel pw-hal" \
     "$( AUDIOCTL_LIB=1 . "$HERE/../audioctl"; printf '%s' "$PROFILES" )"
+
+
+# --- everything below runs against stubs -----------------------------------
+#
+# audioctl only ever touches the system through a handful of commands, so the
+# tests give it a PATH where those are scripts that answer whatever the case
+# under test needs. Where it changes something, --dry-run is used: run() then
+# prints the command instead of running it, which is exactly the seam a test
+# wants.
+
+stub_systemctl() {
+    # stub_systemctl <unit that is active> [unit that is enabled]
+    cat > "$STUBDIR/systemctl" <<STUB
+#!/bin/sh
+case "\$2" in
+is-active)   [ "\$3" = "$1" ] && exit 0; exit 3 ;;
+is-enabled)  [ "\$3" = "${2:-none}" ] && exit 0; exit 1 ;;
+cat)         exit 0 ;;
+esac
+exit 0
+STUB
+    chmod +x "$STUBDIR/systemctl"
+}
+
+stub() {
+    # stub <name> <exit> [output...]
+    make_stub "$@"
+}
+
+# Run a snippet and keep all of its output, then look at it.
+#
+# Piping straight into "grep -q" would be shorter and wrong: grep leaves as
+# soon as it matches, the writer gets SIGPIPE, and the rest of the function
+# under test never runs. That has bitten this project once already, when
+# piping audioctl through head killed it before it wrote its state.
+says() {
+    # says <snippet> <text it should contain>
+    local out
+    out=$(with_audioctl "$1" 2>&1)
+    case "$out" in *"$2"*) echo yes ;; *) echo no ;; esac
+}
+
+with_audioctl() {
+    # Run a snippet with audioctl's functions in scope and a temporary state
+    # directory, so nothing writes to /var/lib.
+    local snippet=$1
+    ( set +u
+      BT_HOLD_INTERVAL=0
+      VERIFY_TRIES=1
+      AUDIOCTL_LIB=1 . "$HERE/../audioctl"
+      STATE_DIR="$STUBDIR/state"; STICKY="$STATE_DIR/profile"; TRY="$STATE_DIR/profile.try"
+      ETCU="$STUBDIR/etc"; DROPIN="$ETCU/pipewire.service.d/50-furios-audio.conf"
+      mkdir -p "$STATE_DIR" "$ETCU"
+      eval "$snippet" )
+}
+
+# --- finding the files, wherever they were installed -----------------------
+stub systemctl 0 ""
+touch "$STUBDIR/exists"
+check "it takes the first path that is there" "$STUBDIR/exists" \
+    "$(with_audioctl 'first_existing /nowhere/a '"$STUBDIR"'/exists')"
+check "and falls back to the first name when none is" "/nowhere/a" \
+    "$(with_audioctl 'first_existing /nowhere/a /nowhere/b')"
+
+# --- which profile is recorded ---------------------------------------------
+check "with nothing recorded it is standard" "standard" \
+    "$(with_audioctl 'current_profile')"
+check "a persistent profile is read back" "pw-hal" \
+    "$(with_audioctl 'echo pw-hal > "$STICKY"; current_profile')"
+check "and a test profile wins over it" "pw-tunnel" \
+    "$(with_audioctl 'echo pw-hal > "$STICKY"; echo pw-tunnel > "$TRY"; current_profile')"
+
+# --- who holds the Pulse socket --------------------------------------------
+stub pactl 0 "Server Name: PulseAudio (on PipeWire 1.6.6)"
+check "the server names itself" "PulseAudio (on PipeWire 1.6.6)" \
+    "$(with_audioctl 'pulse_owner')"
+stub pactl 1 ""
+check "and when nothing answers it says so" "not reachable" \
+    "$(with_audioctl 'pulse_owner')"
+
+# --- the version guards ----------------------------------------------------
+#
+# The plugin is built against one SPA interface. If an update moves past it,
+# pw-hal goes silent with no message at all - so audioctl says so first.
+stub pkg-config 0 "1.6.6"
+check "a matching plugin version says nothing" "" \
+    "$(with_audioctl 'plugin_version_check 2>&1')"
+check "and a missing marker file is not an error" "" \
+    "$(with_audioctl 'aac_version_check 2>&1')"
+
+# --- the droid monitor is moved aside, not deleted -------------------------
+check "switching the monitor off renames its file" "yes" \
+    "$(with_audioctl 'WPCONF="$STUBDIR/50-droid.conf"; touch "$WPCONF"
+        droid_monitor off; [ -e "$WPCONF.off" ] && echo yes || echo no')"
+check "and switching it on renames it back" "yes" \
+    "$(with_audioctl 'WPCONF="$STUBDIR/50-droid2.conf"; touch "$WPCONF.off"
+        droid_monitor on; [ -e "$WPCONF" ] && echo yes || echo no')"
+
+# --- preconditions ---------------------------------------------------------
+check "standard needs nothing in place" "0" \
+    "$(with_audioctl 'preflight standard >/dev/null 2>&1; echo $?')"
+check "an unknown profile is refused by name" "yes" \
+    "$(with_audioctl 'preflight nonsense 2>&1 | grep -q "unknown profile" && echo yes || echo no')"
+
+# --- clients that must be restarted ----------------------------------------
+#
+# callaudiod and feedbackd hold a connection to the audio server; after a
+# switch they find no card and the ringtone stays silent.
+stub pkill 0 ""
+check "restarting the clients reports what it killed" "yes" \
+    "$(with_audioctl 'restart_audio_clients | grep -q callaudiod && echo yes || echo no')"
+stub pkill 1 ""
+check "and says nothing when there was nothing to kill" "" \
+    "$(with_audioctl 'restart_audio_clients')"
+
+# --- the safety net --------------------------------------------------------
+stub_systemctl none none
+check "the safety net is enabled on the first switch" "yes" \
+    "$(with_audioctl 'ensure_safety_net | grep -q "safety net" && echo yes || echo no')"
+stub_systemctl none furios-audio-apply.service
+check "and left alone once it is" "" "$(with_audioctl 'ensure_safety_net')"
+stub_systemctl none none
+check "pausing on disconnect is enabled the same way" "yes" \
+    "$(with_audioctl 'ensure_pause_on_disconnect | grep -q pauses && echo yes || echo no')"
+
+# --- applying a profile ----------------------------------------------------
+#
+# With --dry-run nothing is executed, so what the switch *would* do can be read
+# off instead of done.
+apply_dry() {
+    with_audioctl "DRY=1; apply $1 2>&1"
+}
+check "standard unmasks PulseAudio" "yes" \
+    "$(apply_dry standard | grep -q 'pulseaudio.socket' && echo yes || echo no)"
+check "standard masks pipewire-pulse" "yes" \
+    "$(apply_dry standard | grep -q 'pipewire-pulse.service' && echo yes || echo no)"
+check "pw-hal stops PulseAudio" "yes" \
+    "$(apply_dry pw-hal | grep -q 'stop pulseaudio' && echo yes || echo no)"
+check "pw-hal writes the systemd drop-in" "yes" \
+    "$(apply_dry pw-hal | grep -q 'pipewire-hal.conf' && echo yes || echo no)"
+check "pw-tunnel keeps PulseAudio and starts the tunnel" "yes" \
+    "$(apply_dry pw-tunnel | grep -q 'furios-pw-tunnel' && echo yes || echo no)"
+
+# --- the ports of whichever stack is running -------------------------------
+stub pactl 0 "Sink #1
+	Name: droid-sink
+	Active Port: output-speaker
+
+Source #2
+	Name: droid-source
+	Active Port: input-builtin_mic
+"
+check "the active output port is read" "output-speaker" \
+    "$(with_audioctl 'port_of sinks "droid-sink sink.primary_output"')"
+check "an unknown node reports a question mark" "?" \
+    "$(with_audioctl 'port_of sinks "nothing-here"')"
+check "and both directions are reported together" "output-speaker / input-builtin_mic" \
+    "$(with_audioctl 'active_ports')"
+
+stub pactl 0 "Card #1
+	Name: droid
+	Active Profile: voicecall
+"
+check "the card profile is read" "voicecall" "$(with_audioctl 'droid_profile')"
+
+# --- the emergency handle --------------------------------------------------
+#
+# Born from a failed Bluetooth test that left the phone on the earpiece at
+# 18 %: everything running, nothing audible.
+stub pactl 0 ""
+check "rescue reports what it restored" "yes" \
+    "$(with_audioctl 'rescue no | grep -q "speaker, 65" && echo yes || echo no')"
+
+# --- putting a call on a headset -------------------------------------------
+stub logger 0 ""
+stub pactl 0 ""
+check "bt-call refuses a word it does not know" "yes" \
+    "$(with_audioctl 'bt_call nonsense 2>&1 | grep -q "needs" && echo yes || echo no')"
+check "with no headset connected it says so" "yes" \
+    "$(with_audioctl 'bt_call on 2>&1 | grep -q "no Bluetooth device" && echo yes || echo no')"
+
+stub pactl 0 "1	bluez_card.AA_BB	module-bluez5-device.c"
+check "the headset profile is set when one is there" "yes" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB headset 2>&1 | grep -q "headset profile" && echo yes || echo no')"
+check "and a card that is not there is refused" "1" \
+    "$(with_audioctl 'bt_headset_profile "" headset >/dev/null 2>&1; echo $?')"
+
+# --- switching, end to end -------------------------------------------------
+#
+# switch_to is where the safety net actually fires: it applies a profile, waits
+# for a sink, and rolls back to standard if none appears. Both endings matter.
+
+stub_systemctl none none
+stub pactl 0 "60	droid-sink	PipeWire	s16le 2ch 48000Hz	SUSPENDED"
+stub pkill 1 ""
+check "a switch that finds a sink records the profile" "pw-hal" \
+    "$(with_audioctl 'switch_to pw-hal sticky >/dev/null 2>&1; cat "$STICKY"')"
+check "a test switch records it as temporary instead" "yes" \
+    "$(with_audioctl 'switch_to pw-hal try >/dev/null 2>&1; [ -f "$TRY" ] && echo yes || echo no')"
+check "and it says what to check afterwards" "yes" \
+    "$(with_audioctl 'switch_to pw-hal try 2>&1 | grep -q "check telephony" && echo yes || echo no')"
+check "a dry run changes nothing" "yes" \
+    "$(with_audioctl 'DRY=1; switch_to pw-hal sticky 2>&1 | grep -q "nothing changed" && echo yes || echo no')"
+
+# No sink at all: the switch has to undo itself rather than leave a silent
+# phone behind. This is the one path nobody wants to discover in the field.
+
+# rescue returning to its caller, rather than through the fallback path.
+check "rescue comes back when it is done" "0" \
+    "$(with_audioctl 'rescue no >/dev/null 2>&1; echo $?')"
+
+stub pactl 0 "35	auto_null	PipeWire	float32le 2ch 48000Hz	SUSPENDED"
+check "a switch that produces only auto_null falls back" "yes" \
+    "$(with_audioctl 'VERIFY_TRIES=1; switch_to pw-hal try 2>&1 | grep -q "Falling back" && echo yes || echo no')"
+check "and the test marker is cleared when it does" "no" \
+    "$(with_audioctl 'VERIFY_TRIES=1; switch_to pw-hal try >/dev/null 2>&1; [ -f "$TRY" ] && echo yes || echo no')"
+
+# --- the version guards, when they disagree --------------------------------
+stub pkg-config 0 "1.7.0"
+check "a plugin built against another PipeWire is called out" "yes" \
+    "$(with_audioctl 'PLUGIN_DIR="$STUBDIR"; echo 1.6.6 > "$STUBDIR/built-against"
+        plugin_version_check 2>&1 | grep -q "WARNING" && echo yes || echo no')"
+# The AAC module lives wherever pkg-config says PipeWire's libdir is, so the
+# stub points that at the temporary directory.
+cat > "$STUBDIR/pkg-config" <<STUB
+#!/bin/sh
+case "\$1" in
+--variable=libdir) echo "$STUBDIR" ;;
+*) echo 1.7.0 ;;
+esac
+STUB
+chmod +x "$STUBDIR/pkg-config"
+mkdir -p "$STUBDIR/spa-0.2/bluez5"
+echo 1.6.6 > "$STUBDIR/spa-0.2/bluez5/aac-built-against"
+check "and so is the AAC module" "yes" \
+    "$(with_audioctl 'aac_version_check 2>&1 | grep -q "NOTE" && echo yes || echo no')"
+
+# --- holding a route against callaudiod ------------------------------------
+stub logger 0 ""
+stub pactl 0 "Sink #1
+	Name: droid-sink
+	Active Port: output-bluetooth_sco
+"
+# The waiting half of watch: the call has not started yet, so it sleeps and
+# looks again. The stub reports an ordinary profile twice, then the call.
+cat > "$STUBDIR/pactl" <<STUB
+#!/bin/sh
+COUNT=\$(cat "$STUBDIR/waitcount" 2>/dev/null || echo 0)
+echo \$((COUNT + 1)) > "$STUBDIR/waitcount"
+case "\$*" in
+*"list short cards"*) printf '1\tbluez_card.AA_BB\tmodule-bluez5-device.c\n' ;;
+*"list cards"*)
+    if [ "\$COUNT" -lt 2 ]; then
+        printf 'Card #1\n\tName: droid\n\tActive Profile: default\n'
+    elif [ "\$COUNT" -lt 4 ]; then
+        printf 'Card #1\n\tName: droid\n\tActive Profile: voicecall\n'
+    else
+        printf 'Card #1\n\tName: droid\n\tActive Profile: default\n'
+    fi ;;
+*"list sinks"*)   printf 'Sink #1\n\tName: droid-sink\n\tActive Port: output-bluetooth_sco\n' ;;
+*"list sources"*) printf 'Source #2\n\tName: droid-source\n\tActive Port: input-bluetooth_sco_headset\n' ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+rm -f "$STUBDIR/waitcount"
+check "watch waits for the call rather than acting at once" "yes" \
+    "$(says 'bt_call watch' 'waiting for a call')"
+
+check "a route that is still where it belongs is left alone" "0" \
+    "$(with_audioctl 'bt_hold output-bluetooth_sco input-bluetooth_sco_headset 1 >/dev/null 2>&1; echo $?')"
+check "setting both ports reports what took" "yes" \
+    "$(with_audioctl 'bt_set_ports output-bluetooth_sco input-bluetooth_sco_headset 2>&1 | grep -q "actually active" && echo yes || echo no')"
+
+# --- bt-call, all three words ----------------------------------------------
+#
+# The card and the profile come from pactl, so the stub decides what the call
+# sees. "watch" waits for the phone card to enter the voicecall profile - here
+# it already has, so it goes straight through.
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"list short cards"*) printf '1	bluez_card.AA_BB	module-bluez5-device.c
+' ;;
+*"list cards"*)       printf 'Card #1
+	Name: droid
+	Active Profile: voicecall
+' ;;
+*"list sinks"*)       printf 'Sink #1
+	Name: droid-sink
+	Active Port: output-bluetooth_sco
+' ;;
+*"list sources"*)     printf 'Source #2
+	Name: droid-source
+	Active Port: input-bluetooth_sco_headset
+' ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+
+check "bt-call on puts the call on the headset" "yes" \
+    "$(says 'bt_call on' 'Back with')"
+check "bt-call off brings it back to the phone" "yes" \
+    "$(says 'bt_call off' 'output-earpiece set')"
+check "bt-call watch acts as soon as the call is there" "yes" \
+    "$(says 'bt_call watch' 'call detected')"
+
+# A route that has moved away is set again - callaudiod does that mid-call.
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"list short cards"*) printf '1	bluez_card.AA_BB	module-bluez5-device.c
+' ;;
+*"list cards"*)       printf 'Card #1
+	Name: droid
+	Active Profile: voicecall
+' ;;
+*"list sinks"*)       printf 'Sink #1
+	Name: droid-sink
+	Active Port: output-earpiece
+' ;;
+*"list sources"*)     printf 'Source #2
+	Name: droid-source
+	Active Port: input-builtin_mic
+' ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+check "a route pulled back to the earpiece is set again" "yes" \
+    "$(with_audioctl 'bt_hold output-bluetooth_sco input-bluetooth_sco_headset 1 2>&1 | grep -q "setting it again" && echo yes || echo no')"
+
+# The headset offers no wideband profile: the narrowband one is taken instead.
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"set-card-profile"*headset-head-unit-cvsd*) exit 0 ;;
+*"set-card-profile"*headset-head-unit*)      exit 1 ;;
+*"list cards"*) printf 'Card #1
+	Name: bluez_card.AA_BB
+	Active Profile: a2dp-sink
+' ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+check "the narrowband profile is used when the other is refused" "yes" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB headset 2>&1 | grep -q narrowband && echo yes || echo no')"
+
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"set-card-profile"*) exit 1 ;;
+*"list cards"*) printf 'Card #1
+	Name: bluez_card.AA_BB
+	Active Profile: off
+' ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+check "and a headset that refuses both is reported" "yes" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB headset 2>&1 | grep -q "WARNING" && echo yes || echo no')"
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*set-sink-port*|*set-source-port*) exit 1 ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+check "setting a port that will not take is reported too" "yes" \
+    "$(with_audioctl 'bt_set_ports output-bluetooth_sco input-x 2>&1 | grep -q "ERROR" && echo yes || echo no')"
+
+# --- preflight, when something is missing ----------------------------------
+check "pw-tunnel without its module is refused" "yes" \
+    "$(with_audioctl 'LOCAL=/nowhere; preflight pw-tunnel 2>&1 | grep -q "missing" && echo yes || echo no')"
+
+# --- what it tells the user ------------------------------------------------
+stub pactl 0 "Server Name: pulseaudio"
+stub_systemctl pulseaudio.service none
+check "status names the running profile" "yes" \
+    "$(with_audioctl 'status | grep -q "Profile (active):   standard" && echo yes || echo no')"
+check "and warns when the record disagrees" "yes" \
+    "$(with_audioctl 'echo pw-hal > "$STICKY"; status | grep -q "WARNING" && echo yes || echo no')"
+check "the help lists every profile" "yes" \
+    "$(with_audioctl 'usage | grep -c "pw-hal" | grep -q "[1-9]" && echo yes || echo no')"
+
+# --- the dispatcher, run as the program ------------------------------------
+#
+# Everything above calls into audioctl's functions. This runs it the way a
+# person does, with the state directory pointed somewhere harmless and
+# --dry-run wherever it would change something.
+
+run_audioctl() {
+    # -x only when a trace is being collected: a new bash does not inherit it,
+    # and without it the dispatcher would run untraced and read as uncovered.
+    AUDIOCTL_STATE_DIR="$STUBDIR/state" AUDIOCTL_ETCU="$STUBDIR/etc" \
+        VERIFY_TRIES=1 BT_HOLD_INTERVAL=0 bash ${AUDIOCTL_TRACE:+-x} "$HERE/../audioctl" "$@" 2>&1
+}
+# Earlier tests wrote profiles into this directory; the dispatcher reads them,
+# so it starts clean.
+rm -rf "$STUBDIR/state"
+mkdir -p "$STUBDIR/state" "$STUBDIR/etc"
+
+stub_systemctl pulseaudio.service furios-audio-apply.service
+stub pactl 0 "60	droid-sink	PipeWire	s16le 2ch 48000Hz	SUSPENDED"
+
+check "with no arguments it reports the state" "yes" \
+    "$(run_audioctl | grep -q "Profile (active)" && echo yes || echo no)"
+check "list names the three profiles" "3" \
+    "$(run_audioctl list | wc -l)"
+check "help explains itself" "yes" \
+    "$(run_audioctl --help | grep -q "switch the audio stack" && echo yes || echo no)"
+check "a word it does not know gets the help and a failure" "1" \
+    "$(run_audioctl nonsense >/dev/null 2>&1; echo $?)"
+check "verify answers when a sink is there" "yes" \
+    "$(run_audioctl verify | grep -q "sink present" && echo yes || echo no)"
+check "try without a profile is refused" "yes" \
+    "$(run_audioctl try | grep -q "profile missing" && echo yes || echo no)"
+check "set without a profile too" "yes" \
+    "$(run_audioctl set | grep -q "profile missing" && echo yes || echo no)"
+check "bt-call without a word is refused" "yes" \
+    "$(run_audioctl bt-call | grep -q "needs" && echo yes || echo no)"
+check "a dry run says what it would do and stops" "yes" \
+    "$(run_audioctl --dry-run set pw-hal | grep -q "nothing changed" && echo yes || echo no)"
+# The line names the recorded profile on the left and the target on the right;
+# the decision is made from the running one, so the target is what to check.
+check "toggle from standard goes to pw-hal, in test mode" "yes" \
+    "$(run_audioctl --dry-run toggle | grep -q -- '-> pw-hal (try)' && echo yes || echo no)"
+check "restart keeps the profile it is in" "yes" \
+    "$(run_audioctl --dry-run restart | grep -q "profile standard" && echo yes || echo no)"
+
+stub pactl 0 "35	auto_null	PipeWire	float32le 2ch 48000Hz	SUSPENDED"
+check "verify says no when only the fallback sink is there" "1" \
+    "$(run_audioctl verify >/dev/null 2>&1; echo $?)"
+
+# restart, with nothing to show for it: the fallback sink is not a sink, so it
+# says so rather than reporting success.
+check "restart says so when no sink appears" "yes" \
+    "$(run_audioctl --dry-run restart | grep -q "no sink after the restart" && echo yes || echo no)"
+
+# status with a test profile in place, so the line about it is printed too.
+check "status says when a profile is only temporary" "yes" \
+    "$(echo pw-hal > "$STUBDIR/state/profile.try"
+       run_audioctl status | grep -c "Test mode" >/dev/null && \
+       run_audioctl status | grep -q "falls back" && echo yes || echo no)"
+rm -f "$STUBDIR/state/profile.try"
+
+check "rescue is reachable from the command line" "yes" \
+    "$(run_audioctl --dry-run rescue | grep -q "sound restored" && echo yes || echo no)"
+check "revert goes straight back to standard" "yes" \
+    "$(run_audioctl --dry-run revert | grep -q -- '-> standard (sticky)' && echo yes || echo no)"
+check "and bt-call reaches the handler from the command line" "yes" \
+    "$(run_audioctl bt-call off | grep -q "bt-call" && echo yes || echo no)"
+
+
+stub_systemctl pipewire-pulse.service furios-audio-apply.service
+check "toggle from pw-hal goes back to standard, and stays" "yes" \
+    "$(run_audioctl --dry-run toggle | grep -q -- '-> standard (sticky)' && echo yes || echo no)"
 
 summary
