@@ -1,7 +1,7 @@
 #pragma once
-/* Typen des PulseAudio-Graphen. Im SPA-Port kommen sie nur noch als
- * Zeiger in Signaturen vor; die Funktionen, die sie dereferenzieren,
- * schliesst tools/port-droid-util.py aus. */
+/* Types of the PulseAudio graph. In the SPA port they only appear as
+ * pointers in signatures; the functions that dereference them are excluded
+ * by tools/port-droid-util.py. */
 typedef struct pa_core pa_core;
 typedef struct pa_sink pa_sink;
 typedef struct pa_source pa_source;

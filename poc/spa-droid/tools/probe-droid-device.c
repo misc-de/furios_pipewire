@@ -1,5 +1,5 @@
-/* Laedt das SPA-Plugin wie PipeWire es tut, haengt sich als Listener an und
- * zeigt, was das Device in den Graphen meldet. */
+/* Loads the SPA plugin the way PipeWire does, attaches as a listener and
+ * shows what the device announces to the graph. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,7 +34,7 @@ static void on_object_info(void *data, uint32_t id,
 	(*count)++;
 	printf("\nObjekt %u  type=%s  factory=%s\n", id,
 			info->type ? info->type : "(keiner)",
-			info->factory_name ? info->factory_name : "(keine)");
+			info->factory_name ? info->factory_name : "(none)");
 	if (info->props)
 		for (i = 0; i < info->props->n_items; i++)
 			printf("   %-24s = %s\n", info->props->items[i].key,
@@ -65,10 +65,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	if (!(enum_func = dlsym(dl, SPA_HANDLE_FACTORY_ENUM_FUNC_NAME))) {
-		fprintf(stderr, "kein spa_handle_factory_enum\n");
+		fprintf(stderr, "no spa_handle_factory_enum\n");
 		return 1;
 	}
-	printf("Factories im Plugin:\n");
+	printf("factories in the plugin:\n");
 	{
 		uint32_t k = 0;
 		const struct spa_handle_factory *f;
@@ -79,8 +79,8 @@ int main(int argc, char **argv)
 
 	support[0] = SPA_SUPPORT_INIT(SPA_TYPE_INTERFACE_Log, &default_log.log);
 
-	/* api.droid.pcm nur initialisieren - ohne Start-Kommando wird der
-	 * HAL nicht angefasst. */
+	/* Only initialise api.droid.pcm - without a start command the HAL is
+	 * not touched. */
 	index = 0;
 	while (enum_func(&factory, &index) > 0) {
 		if (strcmp(factory->name, "api.droid.pcm") != 0)
@@ -101,7 +101,7 @@ int main(int argc, char **argv)
 
 	index = 0;
 	if (enum_func(&factory, &index) <= 0) {
-		fprintf(stderr, "keine Factory\n");
+		fprintf(stderr, "no factory\n");
 		return 1;
 	}
 	printf("=== %s ===\n\n", factory->name);
@@ -113,7 +113,7 @@ int main(int argc, char **argv)
 	}
 	if ((res = spa_handle_get_interface(handle, SPA_TYPE_INTERFACE_Device,
 					(void **) &device)) < 0) {
-		fprintf(stderr, "kein Device-Interface: %d\n", res);
+		fprintf(stderr, "no device interface: %d\n", res);
 		return 1;
 	}
 

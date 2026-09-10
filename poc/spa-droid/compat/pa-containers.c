@@ -1,6 +1,7 @@
-/* Ersatz fuer die pulsecore-Container, die der portierte droid-Code nutzt.
- * Die Mengen sind hier klein (Profile, Mappings, Ports), daher bewusst
- * schlichte Implementierungen statt Nachbau der PA-Originale. */
+/* Replacement for the pulsecore containers the ported droid code uses.
+ * The collections here are small (profiles, mappings, ports), so these are
+ * deliberately plain implementations rather than reproductions of the PA
+ * originals. */
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -14,7 +15,7 @@
 #include "pulsecore/strlist.h"
 #include "pulsecore/strbuf.h"
 
-/* ---------------- Hash- und Vergleichsfunktionen ---------------- */
+/* ---------------- hash and comparison functions ---------------- */
 
 unsigned pa_idxset_string_hash_func(const void *p) {
     unsigned h = 5381;
@@ -222,7 +223,7 @@ void *pa_idxset_remove_by_data(pa_idxset *s, const void *p, uint32_t *idx) {
 unsigned pa_idxset_size(pa_idxset *s) { return s ? s->n : 0; }
 bool pa_idxset_isempty(pa_idxset *s) { return !s || s->n == 0; }
 
-/* Eintraege stehen nach aufsteigendem idx; Entfernen erhaelt die Reihenfolge. */
+/* Entries are kept in ascending idx order; removal preserves that order. */
 void *pa_idxset_first(pa_idxset *s, uint32_t *idx) {
     if (!s || s->n == 0) { if (idx) *idx = PA_IDXSET_INVALID; return NULL; }
     if (idx) *idx = s->entries[0].idx;

@@ -1,13 +1,13 @@
 #pragma once
-/* pa_core wird vom portierten Code nur als undurchsichtiger Zeiger
- * durchgereicht (Registry-Schluessel). Im SPA-Plugin ist er NULL. */
+/* pa_core is only passed around by the ported code as an opaque pointer
+ * (registry key). In the SPA plugin it is NULL. */
 #include <pulse/proplist.h>
 #include <pulse/sample.h>
 #include <pulse/channelmap.h>
 #include "pulsecore/hashmap.h"
 #include "pulsecore/idxset.h"
 
-/* Der portierte Code nutzt pa_core ausschliesslich als Registry-Schluessel
- * und Assert-Ziel - nachgewiesen null Dereferenzierungen. Ein prozessweites
- * Singleton genuegt daher und haelt die pa_assert(core) zufrieden. */
+/* The ported code uses pa_core purely as a registry key and assert target -
+ * demonstrably zero dereferences. A process-wide singleton is therefore
+ * enough and keeps the pa_assert(core) happy. */
 pa_core *pa_compat_core(void);

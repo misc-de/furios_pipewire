@@ -1,10 +1,10 @@
-/* Ersatz fuer die letzten 14 Funktionen, fuer die das Plugin bisher gegen
- * libpulse gelinkt war.
+/* Replacement for the last 14 functions the plugin still linked against
+ * libpulse for.
  *
- * Ausgerechnet der Stack, der PulseAudio ueberfluessig machen soll, lud dessen
- * Client-Bibliothek - fuer Kleinigkeiten wie "sind zwei Kanalkarten gleich?".
- * Die Kopfdateien von libpulse bleiben in Gebrauch (die Typen muessen ja
- * zusammenpassen), nur der Programmcode kommt jetzt von hier.
+ * Of all things, the stack meant to make PulseAudio unnecessary was loading
+ * PulseAudio's client library - for trivia like "are these two channel maps
+ * equal?". The libpulse headers stay in use (the types have to match, after
+ * all), only the code now comes from here.
  */
 #include <stdio.h>
 #include <string.h>
@@ -143,7 +143,7 @@ int pa_channel_map_equal(const pa_channel_map *a, const pa_channel_map *b) {
     return 1;
 }
 
-/* Nur fuer Protokollausgaben gebraucht - kurz und lesbar genuegt. */
+/* Only needed for log output - short and readable is enough. */
 char *pa_channel_map_snprint(char *s, size_t l, const pa_channel_map *m) {
     size_t used = 0;
     unsigned c;
@@ -167,8 +167,8 @@ char *pa_channel_map_snprint(char *s, size_t l, const pa_channel_map *m) {
 
 /* ---------------- Eigenschaftsliste ---------------- */
 
-/* Der portierte Code benutzt davon nur vier Funktionen und legt ausschliesslich
- * Zeichenketten ab (die Android-Audioquelle). Mehr braucht es hier nicht. */
+/* The ported code uses only four of its functions and stores nothing but
+ * strings (the Android audio source). Nothing more is needed here. */
 struct pa_proplist {
     pa_hashmap *map;
 };

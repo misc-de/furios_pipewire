@@ -1,5 +1,5 @@
-/* Stellt nach, was der PipeWire-Adapter mit dem Node macht: Parameter
- * abfragen, Format setzen, erneut abfragen. Ohne PipeWire, ohne HAL. */
+/* Reproduces what the PipeWire adapter does with the node: enumerate params,
+ * set a format, enumerate again. Without PipeWire, without the HAL. */
 #include <dlfcn.h>
 #include <stdio.h>
 #include <stdlib.h>

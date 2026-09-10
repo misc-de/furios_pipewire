@@ -1,15 +1,15 @@
--- Das Mikrofon soll der Ausgabewahl folgen.
+-- The microphone should follow the output choice.
 --
--- Waehlt man einen Kopfhoerer als Ausgang, bleibt das Mikrofon sonst beim
--- Telefon: Ein- und Ausgang sind in PipeWire unabhaengig, und callaudiod nagelt
--- beide auf die Telefonkarte fest, sobald es sie erkennt
--- (SET_DEFAULT_SINK und SET_DEFAULT_SOURCE). Eine festgelegte Wahl wiegt
--- intern 30000 und schlaegt jede Prioritaet - das Kopfhoerermikrofon kaeme
--- also nie zum Zug, obwohl es mit 2010 hoeher steht als die 1000 des Telefons.
+-- Pick a headset as the output and the microphone would otherwise stay on the
+-- phone: input and output are independent in PipeWire, and callaudiod pins
+-- both to the phone card as soon as it detects it (SET_DEFAULT_SINK and
+-- SET_DEFAULT_SOURCE). A configured choice weighs 30000 internally and beats
+-- any priority - so the headset microphone would never get its turn, even
+-- though at 2010 it ranks above the phone's 1000.
 --
--- Diese Regel greift nur, wenn beide Enden zum selben Geraet gehoeren: waehlt
--- man den Kopfhoerer, wird auch dessen Mikrofon genommen. Fuer Geraete ohne
--- Mikrofon passiert nichts.
+-- This rule only applies when both ends belong to the same device: pick the
+-- headset and its microphone is taken as well. For devices without a
+-- microphone nothing happens.
 
 cutils = require ("common-utils")
 log = Log.open_topic ("s-node")
@@ -51,7 +51,7 @@ input_follows_output_hook = SimpleEventHook {
     local sink = nodeByName (name)
     local dev = sink and sink.properties ["device.id"]
     if not dev then
-      log:debug ("Eingang folgt Ausgang: " .. name .. " gehoert zu keinem Geraet")
+      log:debug ("input follows output: " .. name .. " belongs to no device")
       return
     end
 
@@ -60,7 +60,7 @@ input_follows_output_hook = SimpleEventHook {
       Constraint { "device.id", "=", dev, type = "pw" },
     }
     if not source then
-      log:debug ("Eingang folgt Ausgang: " .. name .. " hat kein Mikrofon")
+      log:debug ("input follows output: " .. name .. " has no microphone")
       return
     end
 
@@ -70,14 +70,14 @@ input_follows_output_hook = SimpleEventHook {
       return
     end
 
-    -- Nichts tun, wenn es ohnehin schon stimmt - sonst schaukelt sich das
-    -- mit callaudiod gegenseitig hoch.
+    -- Do nothing if it is already correct - otherwise this and callaudiod
+    -- keep triggering each other.
     local cur = m:find (0, "default.configured.audio.source")
     if cur and string.find (cur, src_name, 1, true) then
       return
     end
 
-    log:info ("Eingang folgt Ausgang: " .. src_name .. " (wegen " .. name .. ")")
+    log:info ("input follows output: " .. src_name .. " (because of " .. name .. ")")
     m:set (0, "default.configured.audio.source", "Spa:String:JSON",
            Json.Object { name = src_name }:to_string ())
   end

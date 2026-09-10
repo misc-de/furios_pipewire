@@ -1,6 +1,6 @@
 #!/bin/bash
-# Installiert die Umschalt-Infrastruktur. Aendert nichts am laufenden Audiostack -
-# nach der Installation ist weiterhin Profil 'standard' aktiv.
+# Installs the switching infrastructure. Changes nothing about the running
+# audio stack - after installation the 'standard' profile is still active.
 set -e
 cd "$(dirname "$0")"
 sudo mkdir -p /usr/local/share/furios-audio /usr/local/bin
@@ -13,5 +13,5 @@ echo standard > /var/lib/furios-audio/profile
 systemctl --user daemon-reload
 systemctl --user enable furios-audio-apply.service
 echo
-echo "Fertig. Aktives Profil unveraendert: standard"
-echo "Pruefen mit:  audioctl status"
+echo "Done. Active profile unchanged: standard"
+echo "Check with:  audioctl status"

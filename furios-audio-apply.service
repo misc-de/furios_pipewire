@@ -1,13 +1,13 @@
 [Unit]
 Description=FuriOS Audio: gespeichertes Profil anwenden (Sicherheitsnetz)
-# Laeuft vor dem Soundstack, damit ein Testprofil einen Neustart NIE ueberlebt.
+# Runs before the sound stack so a test profile NEVER survives a reboot.
 Before=pulseaudio.service pipewire.service
 DefaultDependencies=no
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Testmodus-Marker verwerfen: nach einem Neustart gilt immer das persistente Profil.
+# Drop the test-mode marker: after a reboot the persistent profile always wins.
 ExecStart=/bin/sh -c 'rm -f /var/lib/furios-audio/profile.try'
 ExecStart=/bin/sh -c 'p=$$(cat /var/lib/furios-audio/profile 2>/dev/null || echo standard); \
     test "$$p" = standard || /usr/local/bin/audioctl set "$$p" || /usr/local/bin/audioctl revert'

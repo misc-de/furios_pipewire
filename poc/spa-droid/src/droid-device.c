@@ -1,10 +1,10 @@
-/* SPA-Device fuer den Android-Audio-HAL.
+/* SPA device for the Android audio HAL.
  *
- * Das Device ist die Karte: es meldet Profile und Routen und erzeugt die
- * beiden Knoten (Wiedergabe/Aufnahme). Die Routennamen sind bewusst genau
- * die, die PulseAudios droid-card verwendet - "output-earpiece",
- * "output-speaker", "input-builtin_mic" - denn callaudiod sucht nach genau
- * diesen Namen, um im Anruf zwischen Ohrmuschel und Lautsprecher zu schalten.
+ * The device is the card: it reports profiles and routes and creates the two
+ * nodes (playback/capture). The route names are deliberately exactly the ones
+ * PulseAudio's droid-card uses - "output-earpiece", "output-speaker",
+ * "input-builtin_mic" - because callaudiod looks for precisely those names to
+ * switch between earpiece and speaker during a call.
  */
 
 #include <errno.h>
@@ -35,10 +35,10 @@
 
 #define NAME "droid-device"
 
-/* Genau die Kennung, die PulseAudios droid-Modul setzt (PROP_DROID_API_STRING).
- * callaudiod erkennt eine Android-HAL-Karte allein daran und schaltet nur dann
- * zwischen "default" und "voicecall" um - mit "droid" faellt es auf den
- * UCM-Weg zurueck und tut nichts. */
+/* Exactly the identifier PulseAudio's droid module sets
+ * (PROP_DROID_API_STRING). callaudiod recognises an Android HAL card by
+ * nothing else and only then switches between "default" and "voicecall" -
+ * with "droid" it falls back to the UCM path and does nothing. */
 #define DROID_API_NAME  "droid-hal"
 
 #define MAX_ROUTES  16
@@ -46,10 +46,10 @@
 #define DEV_SOURCE  1
 #define N_DEVICES   2
 
-/* Zusaetzliche Knoten fuer den VoIP-Pfad des HAL. Sie haengen an eigenen
- * mixPorts (voip_rx/voip_tx) und bekommen bewusst KEIN card.profile.device:
- * geroutet wird ueber den primaeren Strom, und die Routenpolitik soll sie in
- * Ruhe lassen. */
+/* Extra nodes for the HAL's VoIP path. They sit on their own mix ports
+ * (voip_rx/voip_tx) and deliberately get NO card.profile.device: routing goes
+ * through the primary stream, and the route policy should leave them
+ * alone. */
 #define OBJ_VOIP_SINK   2
 #define OBJ_VOIP_SOURCE 3
 
@@ -58,19 +58,19 @@
 #define PROFILE_VOICECALL     2
 #define PROFILE_COMMUNICATION 3
 
-/* Der Name ist nicht frei waehlbar: callaudiod sucht im Kartenprofil nach
- * genau diesem Namen ("card has voice profile, using it"). */
+/* The name is not ours to choose: callaudiod looks for exactly this name in
+ * the card profiles ("card has voice profile, using it"). */
 #define VOICECALL_NAME  "voicecall"
 
-/* aus droid-pcm.c */
+/* from droid-pcm.c */
 int droid_node_set_route(const char *mix_port, const char *device_port);
 
 struct route {
-	dm_config_port *port;      /* devicePort aus der HAL-Konfiguration */
+	dm_config_port *port;      /* device port from the HAL configuration */
 	const char *pa_name;       /* "output-speaker" usw. */
 	char description[64];
 	enum spa_direction dir;
-	uint32_t device;           /* DEV_SINK oder DEV_SOURCE */
+	uint32_t device;           /* DEV_SINK or DEV_SOURCE */
 	uint32_t priority;
 	uint32_t available;        /* SPA_PARAM_AVAILABILITY_* */
 };
@@ -79,7 +79,7 @@ struct impl {
 	struct spa_handle handle;
 	struct spa_device device;
 
-	bool diag;                 /* ausfuehrliche Diagnose (SPA_DROID_DIAG=1) */
+	bool diag;                 /* verbose diagnostics (SPA_DROID_DIAG=1) */
 
 	struct spa_log *log;
 	struct spa_hook_list hooks;
@@ -92,15 +92,15 @@ struct impl {
 
 	struct route routes[MAX_ROUTES];
 	uint32_t n_routes;
-	uint32_t active[N_DEVICES];   /* Index in routes[], SPA_ID_INVALID = keiner */
+	uint32_t active[N_DEVICES];   /* index into routes[], SPA_ID_INVALID = none */
 
 	uint32_t profile;
-	bool profile_save;         /* war es eine bewusste Auswahl? */
+	bool profile_save;         /* was this a deliberate choice? */
 	bool nodes_emitted;
 };
 
-/* Wie im Knoten: standardmaessig auf info (unter dem Standard-Loglevel
- * unsichtbar), mit SPA_DROID_DIAG=1 auf warn. */
+/* As in the node: info by default (invisible below the standard log level),
+ * raised to warn with SPA_DROID_DIAG=1. */
 #define DIAG(this, fmt, ...)						\
 	do {								\
 		if ((this)->diag)					\
@@ -119,13 +119,13 @@ static const char *mix_port_of(uint32_t device)
 	return device == DEV_SINK ? "primary output" : "primary input";
 }
 
-/* ------------------------------------------------------------- Routen */
+/* ------------------------------------------------------------- routes */
 
-/* Wie wichtig ist ein Port? Lautsprecher und Ohrmuschel sind die Faelle, um
- * die es im Anruf geht; Kabelzubehoer schlaegt sie, wenn es steckt. */
+/* How important is a port? Speaker and earpiece are what a call is about;
+ * wired accessories beat them when plugged in. */
 static uint32_t route_priority(audio_devices_t type)
 {
-	/* Dieselben Werte, die PulseAudios droid-card vergibt. */
+	/* The same values PulseAudio's droid-card assigns. */
 	switch (type) {
 	case AUDIO_DEVICE_OUT_SPEAKER:
 		return 300;
@@ -143,18 +143,17 @@ static uint32_t route_priority(audio_devices_t type)
 	}
 }
 
-/* Bluetooth steht in der audio_policy-XML dieses Geraets vollstaendig im
- * Kommentar - ein Block von rund 3900 Zeichen nimmt zehn Geraeteports mit,
- * darunter alle BT-SCO- und A2DP-Eintraege. Der HAL braucht die XML aber
- * nicht: beim Routen bekommt er nur den Geraetetyp, und
- * pa_droid_stream_set_route schickt fuer BT-SCO-Typen zusaetzlich BT_SCO=on
- * an den HAL - genau der Android-Mechanismus, der den Sprachpfad auf die
- * Bluetooth-PCM-Leitung legt. Also bauen wir die Ports selbst.
+/* On this device Bluetooth is entirely commented out of the audio_policy XML
+ * - a block of roughly 3900 characters takes ten device ports with it,
+ * including every BT SCO and A2DP entry. The HAL does not need that file
+ * though: when routing it only gets the device type, and for BT SCO types
+ * pa_droid_stream_set_route additionally sends BT_SCO=on to the HAL - exactly
+ * the Android mechanism that puts the voice path onto the Bluetooth PCM line.
+ * So we build the ports ourselves.
  *
- * Der Controller dieses Geraets fuehrt SCO nicht ueber HCI (hciconfig zeigt
- * sco:0 in beide Richtungen), sondern in Hardware zwischen BT-Chip und
- * Audio-DSP. Damit ist dieser Weg der einzig moegliche fuer Telefonate ueber
- * ein Headset. */
+ * This device's controller does not carry SCO over HCI (hciconfig shows sco:0
+ * in both directions) but in hardware between the BT chip and the audio DSP.
+ * That makes this the only possible path for calls over a headset. */
 static dm_config_port synthetic_ports[2];
 
 static void add_synthetic_bt_routes(struct impl *this)
@@ -190,9 +189,9 @@ static void add_synthetic_bt_routes(struct impl *this)
 			? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 		r->device = defs[i].device;
 		r->priority = 50;
-		/* Ob wirklich ein Headset verbunden ist, weiss die Karte nicht - das
-		 * entscheidet der Bluetooth-Stack. Also "unbekannt": waehlbar, aber
-		 * nichts waehlt sie von selbst. */
+		/* The card does not know whether a headset is actually connected -
+		 * that is the Bluetooth stack's business. Hence "unknown":
+		 * selectable, but nothing picks it on its own. */
 		r->available = SPA_PARAM_AVAILABILITY_unknown;
 		snprintf(r->description, sizeof(r->description), "Bluetooth (%s)",
 				defs[i].role == DM_CONFIG_ROLE_SINK ? "Freisprechen" : "Mikrofon");
@@ -213,8 +212,8 @@ static void collect_routes(struct impl *this)
 		if (this->n_routes >= MAX_ROUTES)
 			break;
 
-		/* Ohne PulseAudio-Namen waere die Route fuer callaudiod & Co.
-		 * wertlos - solche Ports lassen wir weg. */
+		/* Without a PulseAudio name the route would be worthless to
+		 * callaudiod and friends - we leave such ports out. */
 		if (output) {
 			if (!pa_droid_output_port_name(port->type, &pa_name))
 				continue;
@@ -229,13 +228,12 @@ static void collect_routes(struct impl *this)
 		r->dir = output ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 		r->device = output ? DEV_SINK : DEV_SOURCE;
 		r->priority = route_priority(port->type);
-		/* Kabelzubehoer gilt als nicht angeschlossen. Das ist keine Willkuer,
-		 * sondern was PulseAudio auf diesem Geraet ebenfalls meldet - eine
-		 * Klinkenerkennung gibt es hier nicht (in /sys/class/extcon steht nur
-		 * USB). Und es ist wichtig: callaudiod nimmt bei Droid-Karten sofort
-		 * das Headset, sobald es nicht als "nicht verfuegbar" markiert ist -
-		 * im Anruf landete der Ton dann statt auf der Ohrmuschel im
-		 * Nirgendwo. */
+		/* Wired accessories count as not connected. That is not arbitrary
+		 * but what PulseAudio reports on this device as well - there is no
+		 * jack detection here (/sys/class/extcon only lists USB). And it
+		 * matters: with droid cards callaudiod grabs the headset as soon as
+		 * it is not marked unavailable - during a call the audio would then
+		 * end up nowhere instead of on the earpiece. */
 		switch (port->type) {
 		case AUDIO_DEVICE_OUT_WIRED_HEADSET:
 		case AUDIO_DEVICE_OUT_WIRED_HEADPHONE:
@@ -257,8 +255,8 @@ static uint32_t default_route(struct impl *this, uint32_t device)
 	uint32_t i, best = SPA_ID_INVALID, best_prio = 0;
 
 	for (i = 0; i < this->n_routes; i++) {
-		/* Kabelzubehoer nicht blind vorwaehlen - ob es steckt, wissen wir
-		 * (noch) nicht. */
+		/* Do not preselect wired accessories blindly - we do not (yet)
+		 * know whether anything is plugged in. */
 		if (this->routes[i].device != device ||
 		    this->routes[i].available != SPA_PARAM_AVAILABILITY_yes)
 			continue;
@@ -279,22 +277,22 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 
 	switch (index) {
 	case PROFILE_OFF:
-		name = "off"; desc = "Aus"; prio = 0;
+		name = "off"; desc = "Off"; prio = 0;
 		break;
 	case PROFILE_DEFAULT:
-		name = "default"; desc = "Wiedergabe und Aufnahme"; prio = 100;
+		name = "default"; desc = "Playback and Capture"; prio = 100;
 		break;
 	case PROFILE_VOICECALL:
-		/* Niedrigere Prioritaet als default - dieses Profil waehlt
-		 * callaudiod im Anruf, nicht die Routenpolitik von selbst. */
-		name = VOICECALL_NAME; desc = "Anruf"; prio = 50;
+		/* Lower priority than default - callaudiod selects this profile
+		 * during a call, the route policy never picks it by itself. */
+		name = VOICECALL_NAME; desc = "Voice Call"; prio = 50;
 		break;
 	case PROFILE_COMMUNICATION:
-		/* AUDIO_MODE_IN_COMMUNICATION: dafuer schaltet der HAL seine
-		 * Echounterdrueckung und Rauschminderung ein. Gedacht fuer VoIP -
-		 * heisst wie bei PulseAudios droid-card, damit vorhandene Werkzeuge
-		 * es finden. Waehlt niemand von selbst. */
-		name = "communication"; desc = "VoIP-Gespraech"; prio = 40;
+		/* AUDIO_MODE_IN_COMMUNICATION: this is what makes the HAL turn on
+		 * its echo cancellation and noise reduction. Meant for VoIP - named
+		 * as in PulseAudio's droid-card so existing tools find it. Nothing
+		 * selects it on its own. */
+		name = "communication"; desc = "VoIP Call"; prio = 40;
 		break;
 	default:
 		return 0;
@@ -335,13 +333,13 @@ static int build_profile(struct impl *this, struct spa_pod_builder *b,
 		spa_pod_builder_pop(b, &f[1]);
 	}
 
-	/* Ohne save-Kennzeichnung haelt WirePlumber die Auswahl fuer eine
-	 * beilaeufige Aenderung und legt sie nicht in den Profilzustand.
+	/* Without the save flag WirePlumber treats the selection as an
+	 * incidental change and does not put it into the profile state.
 	 *
-	 * Der Anrufmodus ist die Ausnahme: er wird NIE gespeichert. Sonst merkt
-	 * sich WirePlumber ein Profil, das beim naechsten Start wieder gesetzt
-	 * wuerde - das Telefon startete im Anrufmodus, ohne dass jemand
-	 * telefoniert. */
+	 * The call profile is the exception: it is NEVER saved. Otherwise
+	 * WirePlumber would remember a profile that gets restored on the next
+	 * start - the phone would boot in call mode with nobody on the
+	 * line. */
 	if (current)
 		spa_pod_builder_add(b, SPA_PARAM_PROFILE_save,
 				SPA_POD_Bool(index != PROFILE_VOICECALL &&
@@ -371,10 +369,10 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 
 		spa_pod_builder_add(b, SPA_PARAM_ROUTE_device, SPA_POD_Int(r->device), 0);
 
-		/* Die Route traegt ihren Namen als Prop mit. PipeWire reicht die
-		 * Props einer aktiven Route an den Knoten des Geraets weiter - und
-		 * nur der Knoten haelt den HAL-Stream, den es umzurouten gilt.
-		 * Device und Knoten laufen in verschiedenen Prozessen. */
+		/* The route carries its name along as a prop. PipeWire forwards the
+		 * props of an active route to the device's node - and only the node
+		 * holds the HAL stream that has to be rerouted. Device and node run
+		 * in different processes. */
 		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_props, 0);
 		spa_pod_builder_push_object(b, &pf, SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
 		spa_pod_builder_prop(b, SPA_PROP_params, 0);
@@ -385,8 +383,8 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 		spa_pod_builder_pop(b, &pf);
 	}
 
-	/* Routen gelten in beiden Betriebsprofilen - im Anruf ist die Wahl
-	 * zwischen Ohrmuschel und Lautsprecher gerade der Kern der Sache. */
+	/* Routes apply in both operating profiles - during a call the choice
+	 * between earpiece and speaker is the whole point. */
 	spa_pod_builder_prop(b, SPA_PARAM_ROUTE_profiles, 0);
 	spa_pod_builder_push_array(b, &f);
 	spa_pod_builder_int(b, PROFILE_DEFAULT);
@@ -400,7 +398,7 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 	spa_pod_builder_pop(b, &f);
 }
 
-/* ------------------------------------------------------------- Knoten */
+/* -------------------------------------------------------------- nodes */
 
 static void emit_node(struct impl *this, uint32_t device)
 {
@@ -419,7 +417,7 @@ static void emit_node(struct impl *this, uint32_t device)
 
 	items[n++] = SPA_DICT_ITEM_INIT("node.name", sink ? "droid-sink" : "droid-source");
 	items[n++] = SPA_DICT_ITEM_INIT("node.description",
-			sink ? "Android HAL (Wiedergabe)" : "Android HAL (Aufnahme)");
+			sink ? "Android HAL (Playback)" : "Android HAL (Capture)");
 	items[n++] = SPA_DICT_ITEM_INIT("media.class", sink ? "Audio/Sink" : "Audio/Source");
 	items[n++] = SPA_DICT_ITEM_INIT("device.api", DROID_API_NAME);
 	items[n++] = SPA_DICT_ITEM_INIT("device.class", "sound");
@@ -430,16 +428,16 @@ static void emit_node(struct impl *this, uint32_t device)
 	items[n++] = SPA_DICT_ITEM_INIT("audio.rate", "48000");
 	items[n++] = SPA_DICT_ITEM_INIT("audio.channels", "2");
 	items[n++] = SPA_DICT_ITEM_INIT("audio.position", "FL,FR");
-	/* Beide Richtungen takten ihren Graphen selbst; die Wiedergabe soll
-	 * fuehren, wenn beide verbunden sind. */
+	/* Both directions clock their graph themselves; playback should drive
+	 * when both are connected. */
 	items[n++] = SPA_DICT_ITEM_INIT("node.driver", "true");
 	items[n++] = SPA_DICT_ITEM_INIT("priority.driver", sink ? "50000" : "20000");
-	/* priority.session MUSS gesetzt sein: fehlt sie, faellt WirePlumbers
-	 * Geraetewahl auf priority.driver zurueck - und mit 50000 schluege dieser
-	 * Knoten sogar eine ausdrueckliche Benutzerwahl (die mit 30000 gewichtet
-	 * wird). Es liesse sich dann kein anderes Ausgabegeraet mehr auswaehlen,
-	 * kein Bluetooth-Kopfhoerer, nichts. 1000 ist der uebliche Wert fuer
-	 * eingebaute Hardware; ein verbundener Kopfhoerer liegt darueber. */
+	/* priority.session MUST be set: without it WirePlumber's device
+	 * selection falls back to priority.driver - and at 50000 this node would
+	 * beat even an explicit user choice (which is weighted 30000). No other
+	 * output device could be selected any more, no Bluetooth headphones,
+	 * nothing. 1000 is the usual value for built-in hardware; a connected
+	 * headset ranks above it. */
 	items[n++] = SPA_DICT_ITEM_INIT("priority.session", "1000");
 
 	info = SPA_DEVICE_OBJECT_INFO_INIT();
@@ -451,12 +449,12 @@ static void emit_node(struct impl *this, uint32_t device)
 	spa_device_emit_object_info(&this->hooks, device, &info);
 }
 
-/* Der VoIP-Pfad des HAL: eigene mixPorts, eigene Aufbereitung. Android nutzt
- * ihn fuer Sprachanrufe ueber das Netz - der HAL schaltet dafuer seine
- * Echounterdrueckung und Rauschminderung anders als bei Musik.
+/* The HAL's VoIP path: its own mix ports, its own processing. Android uses it
+ * for voice calls over the network - the HAL applies echo cancellation and
+ * noise reduction differently there than for music.
  *
- * Niedrige Prioritaet: nichts soll versehentlich hier landen. Wer den Pfad
- * will, waehlt ihn ausdruecklich (oder eine Regel schickt Gespraeche dorthin). */
+ * Low priority: nothing should end up here by accident. Whoever wants the path
+ * picks it explicitly (or a rule sends calls there). */
 static void emit_voip_node(struct impl *this, bool sink)
 {
 	struct spa_device_object_info info;
@@ -466,20 +464,20 @@ static void emit_voip_node(struct impl *this, bool sink)
 	items[n++] = SPA_DICT_ITEM_INIT("node.name",
 			sink ? "droid-voip-sink" : "droid-voip-source");
 	items[n++] = SPA_DICT_ITEM_INIT("node.description",
-			sink ? "Android HAL (VoIP-Wiedergabe)" : "Android HAL (VoIP-Aufnahme)");
+			sink ? "Android HAL (VoIP Playback)" : "Android HAL (VoIP Capture)");
 	items[n++] = SPA_DICT_ITEM_INIT("media.class",
 			sink ? "Audio/Sink" : "Audio/Source");
 	items[n++] = SPA_DICT_ITEM_INIT("device.api", DROID_API_NAME);
 	items[n++] = SPA_DICT_ITEM_INIT("droid.mix-port", sink ? "voip_rx" : "voip_tx");
 	if (!sink)
-		/* Genau diese Quelle laesst den HAL seine Sprachaufbereitung
-		 * einschalten - die Schreibweise mit Leerzeichen ist die des
-		 * Umsetzungstabelle, nicht meine Wahl. */
+		/* Exactly this source makes the HAL turn on its voice processing -
+		 * the spelling with a space comes from the conversion table, not
+		 * from us. */
 		items[n++] = SPA_DICT_ITEM_INIT("droid.audio-source", "voice communication");
 	items[n++] = SPA_DICT_ITEM_INIT("audio.format", "S16LE");
-	/* 16 kHz, nicht 48: der HAL erzwingt fuer voip_rx genau das ("Override
-	 * voip_rx channel map (mono) and sample rate (16000)"). Boeten wir 48 kHz
-	 * an, schriebe der Knoten mit dreifacher Geschwindigkeit hinein. */
+	/* 16 kHz, not 48: the HAL enforces exactly that for voip_rx ("Override
+	 * voip_rx channel map (mono) and sample rate (16000)"). If we offered
+	 * 48 kHz the node would write into it at three times the speed. */
 	items[n++] = SPA_DICT_ITEM_INIT("audio.rate", "16000");
 	items[n++] = SPA_DICT_ITEM_INIT("audio.channels", sink ? "2" : "1");
 	items[n++] = SPA_DICT_ITEM_INIT("audio.position", sink ? "FL,FR" : "MONO");
@@ -617,10 +615,10 @@ next:
 static void params_changed(struct impl *this, uint32_t id)
 {
 	uint32_t i;
-	/* Eine Param-Aenderung meldet man, indem das SERIAL-Bit in den Flags
-	 * kippt - genau dafuer ist es da ("signal update even when the
-	 * read/write flags don't change"). Das Feld `user` daneben ist privater
-	 * Zustand des Plugins und wird von PipeWire nie angesehen. */
+	/* A param change is announced by flipping the SERIAL bit in the flags -
+	 * that is exactly what it is for ("signal update even when the
+	 * read/write flags don't change"). The neighbouring `user` field is
+	 * private plugin state and is never looked at by PipeWire. */
 	for (i = 0; i < SPA_N_ELEMENTS(this->params); i++)
 		if (this->params[i].id == id)
 			this->params[i].flags ^= SPA_PARAM_INFO_SERIAL;
@@ -637,10 +635,10 @@ static int set_profile(struct impl *this, uint32_t index, bool save)
 		return 0;
 
 	this->profile = index;
-	/* Die Knoten bleiben ueber den Profilwechsel hinweg bestehen - im Anruf
-	 * wird derselbe HAL-Stream benutzt, nur im Modus AUDIO_MODE_IN_CALL. */
+	/* The nodes survive the profile switch - during a call the same HAL
+	 * stream is used, only in mode AUDIO_MODE_IN_CALL. */
 	emit_nodes(this, index != PROFILE_OFF);
-	DIAG(this, "Profil: %s",
+	DIAG(this, "profile: %s",
 			index == PROFILE_VOICECALL ? VOICECALL_NAME :
 			index == PROFILE_COMMUNICATION ? "communication" :
 			index == PROFILE_DEFAULT ? "default" : "off");
@@ -662,10 +660,10 @@ static int set_route(struct impl *this, uint32_t index, uint32_t device)
 	this->active[device] = index;
 	res = droid_node_set_route(mix_port_of(device), r->port->name);
 	if (res < 0 && res != -ENOENT)
-		spa_log_warn(this->log, NAME " Route \"%s\" nicht angewandt: %s",
+		spa_log_warn(this->log, NAME " route \"%s\" not applied: %s",
 				r->pa_name, spa_strerror(res));
 	else
-		DIAG(this, "Route: %s -> %s", r->pa_name, r->port->name);
+		DIAG(this, "route: %s -> %s", r->pa_name, r->port->name);
 
 	params_changed(this, SPA_PARAM_Route);
 	return 0;
@@ -820,13 +818,13 @@ static int impl_init(const struct spa_handle_factory *factory,
 
 	this->config = pa_parse_droid_audio_config(file);
 	if (!this->config) {
-		spa_log_error(this->log, NAME " konnte %s nicht lesen", file);
+		spa_log_error(this->log, NAME " could not read %s", file);
 		return -EIO;
 	}
 
 	this->module = dm_config_find_module(this->config, "primary");
 	if (!this->module) {
-		spa_log_error(this->log, NAME " kein Modul \"primary\" in %s", file);
+		spa_log_error(this->log, NAME " no \"primary\" module in %s", file);
 		dm_config_free(this->config);
 		this->config = NULL;
 		return -ENOENT;
@@ -837,10 +835,10 @@ static int impl_init(const struct spa_handle_factory *factory,
 		this->active[i] = default_route(this, i);
 	this->profile = PROFILE_DEFAULT;
 
-	spa_log_info(this->log, NAME " HAL-Konfiguration geladen: %s (%u Routen)",
+	spa_log_info(this->log, NAME " HAL configuration loaded: %s (%u routes)",
 			file, this->n_routes);
 	for (i = 0; i < this->n_routes; i++)
-		spa_log_info(this->log, NAME "   Route %u: %-24s (%s, Geraet %u, Prio %u)",
+		spa_log_info(this->log, NAME "   route %u: %-24s (%s, device %u, prio %u)",
 				i, this->routes[i].pa_name, this->routes[i].port->name,
 				this->routes[i].device, this->routes[i].priority);
 	return 0;
@@ -873,7 +871,7 @@ static const struct spa_handle_factory droid_device_factory = {
 	.enum_interface_info = impl_enum_interface_info,
 };
 
-/* aus droid-pcm.c */
+/* from droid-pcm.c */
 extern const struct spa_handle_factory droid_pcm_factory;
 extern const struct spa_handle_factory droid_pcm_source_factory;
 

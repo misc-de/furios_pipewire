@@ -1,6 +1,6 @@
 #pragma once
 #include <stdbool.h>
-/* Im SPA-Plugin durch spa_dict ersetzen; hier nur Schnittstelle. */
+/* Replaced by spa_dict in the SPA plugin; interface only here. */
 typedef struct pa_modargs pa_modargs;
 pa_modargs *pa_modargs_new(const char *args, const char* const keys[]);
 void pa_modargs_free(pa_modargs *ma);

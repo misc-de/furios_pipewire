@@ -1,18 +1,18 @@
-/* SPA-Node: Wiedergabe und Aufnahme ueber den Android-Audio-HAL.
+/* SPA node: playback and capture through the Android audio HAL.
  *
- * Der HAL-Write blockiert, bis die Daten abgenommen sind. Er darf deshalb
- * nicht im Datenthread des Graphen laufen. Aufbau daher:
+ * The HAL write blocks until the data has been taken. It must therefore not
+ * run on the graph's data thread, hence this layout:
  *
- *   process()        -> schreibt in einen Ringpuffer  (Graph-Thread)
- *   writer_thread()  -> liest daraus, ruft pa_droid_stream_write (eigener Thread)
+ *   process()        -> writes into a ring buffer      (graph thread)
+ *   writer_thread()  -> reads from it, calls pa_droid_stream_write (own thread)
  *
- * Aufnahme ist dasselbe rueckwaerts:
+ * Capture is the same thing backwards:
  *
- *   reader_thread()  -> pa_droid_stream_read, legt in den Ringpuffer
- *   process()        -> holt daraus, reicht den Puffer an den Graphen
+ *   reader_thread()  -> pa_droid_stream_read, puts data into the ring buffer
+ *   process()        -> takes it out, hands the buffer to the graph
  *
- * Beide Richtungen teilen sich diesen Code; welche es ist, entscheidet die
- * benutzte Factory (api.droid.pcm bzw. api.droid.pcm.source).
+ * Both directions share this code; which one it is depends on the factory
+ * used (api.droid.pcm or api.droid.pcm.source).
  */
 
 #include <errno.h>
@@ -57,10 +57,10 @@
 
 #define NAME "droid-pcm"
 
-/* Das Device (droid-device.c) und der Node sind getrennte SPA-Objekte, leben
- * aber im selben Prozess. Damit eine Routenaenderung am Device den laufenden
- * HAL-Stream erreicht, tragen sich Nodes hier ein. Bewusst winzig: mehr als
- * eine Handvoll Nodes gibt es nicht. */
+/* The device (droid-device.c) and the node are separate SPA objects that live
+ * in the same process. So that a route change on the device reaches the
+ * running HAL stream, nodes register themselves here. Deliberately tiny:
+ * there is never more than a handful of nodes. */
 #define MAX_REG 8
 static struct {
 	pthread_mutex_t lock;
@@ -72,7 +72,7 @@ static void registry_add(struct impl *this);
 static void registry_remove(struct impl *this);
 
 #define MAX_PORTS       1
-#define RING_SIZE       (1u << 18)   /* 256 kB, Zweierpotenz fuer spa_ringbuffer */
+#define RING_SIZE       (1u << 18)   /* 256 kB, power of two as spa_ringbuffer needs */
 #define DEFAULT_RATE    48000
 #define DEFAULT_CHANNELS 2
 
@@ -104,7 +104,7 @@ struct impl {
 	struct spa_node_info info;
 	struct spa_param_info params[2];
 
-	/* Richtung: Wiedergabe hat einen Eingangsport, Aufnahme einen Ausgang. */
+	/* Direction: playback has an input port, capture an output port. */
 	bool capture;
 	enum spa_direction dir;
 
@@ -117,19 +117,19 @@ struct impl {
 	pa_droid_stream *stream;
 	char mix_port_name[64];
 	audio_devices_t input_device;
-	char input_port_name[64];   /* leer = ueber den Geraetetyp suchen */
-	char audio_source[32];      /* Android-Audioquelle, z. B. "mic" */
-	char hw_options[192];       /* Optionen fuer das HAL-Modul, s. impl_init */
+	char input_port_name[64];   /* empty = look the port up by device type */
+	char audio_source[32];      /* Android audio source, e.g. "mic" */
+	char hw_options[192];       /* options for the HAL module, see impl_init */
 	char config_file[192];
-	uint32_t pref_rate;         /* Wunschwerte aus den Knoteneigenschaften */
+	uint32_t pref_rate;         /* preferred values from the node properties */
 	uint32_t pref_channels;
-	char wanted_port[64];       /* vom Device gewuenschte Route */
-	bool mode_holds_hal;        /* HAL nur wegen Anrufmodus offen */
-	bool in_call;               /* Modus ist AUDIO_MODE_IN_CALL */
-	uint64_t hal_latency_ns;    /* beim Oeffnen gemerkt, s. latency_ns() */
-	bool hal_failed;            /* HAL nimmt dauerhaft nichts mehr an */
+	char wanted_port[64];       /* route requested by the device */
+	bool mode_holds_hal;        /* HAL only kept open for call mode */
+	bool in_call;               /* mode is AUDIO_MODE_IN_CALL */
+	uint64_t hal_latency_ns;    /* remembered at open time, see latency_ns() */
+	bool hal_failed;            /* HAL persistently refuses to take data */
 
-	/* Uebergabe an den Schreib-Thread */
+	/* handover to the writer thread */
 	struct spa_ringbuffer ring;
 	uint8_t *ring_data;
 	pthread_t writer;
@@ -139,7 +139,7 @@ struct impl {
 	bool started;
 	bool drain;
 
-	/* Taktgeber: ein Hardware-Sink treibt den Graphen selbst */
+	/* clock: a hardware sink drives the graph itself */
 	struct spa_loop *data_loop;
 	struct spa_system *data_system;
 	struct spa_source timer_source;
@@ -151,19 +151,19 @@ struct impl {
 	uint32_t quantum;
 	uint32_t rate;
 
-	/* Instrumentierung des Datenpfads */
-	bool diag;               /* ausfuehrliche Diagnose (SPA_DROID_DIAG=1) */
-	uint64_t bytes_queued;   /* von process() in den Ring gelegt */
-	uint64_t bytes_written;  /* vom writer_thread an den HAL gegeben */
+	/* instrumentation of the data path */
+	bool diag;               /* verbose diagnostics (SPA_DROID_DIAG=1) */
+	uint64_t bytes_queued;   /* put into the ring by process() */
+	uint64_t bytes_written;  /* handed to the HAL by the writer thread */
 	uint32_t n_process;
 	uint32_t n_write;
-	uint32_t n_write_err;    /* abgewiesene HAL-Writes bzw. -Reads */
-	uint32_t n_overrun;      /* verworfene Bloecke, weil der Ring voll war */
-	uint32_t n_underrun;     /* Aufnahme: mit Stille aufgefuellte Bloecke */
+	uint32_t n_write_err;    /* rejected HAL writes or reads */
+	uint32_t n_overrun;      /* blocks dropped because the ring was full */
+	uint32_t n_underrun;     /* capture: blocks padded with silence */
 };
 
-/* Diagnose: standardmaessig auf info (unter PipeWires Loglevel unsichtbar),
- * mit SPA_DROID_DIAG=1 auf warn, damit man sie ohne PIPEWIRE_DEBUG sieht. */
+/* Diagnostics: info by default (invisible below PipeWire's log level), raised
+ * to warn with SPA_DROID_DIAG=1 so they show without PIPEWIRE_DEBUG. */
 #define DIAG(this, fmt, ...)						\
 	do {								\
 		if ((this)->diag)					\
@@ -187,39 +187,39 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	const pa_sample_spec *got;
 	dm_config_port *mix, *dev;
 
-	/* Anders als beim Ausgang nimmt der Eingang den mixPort als NAME - die
-	 * Zeigeridentitaets-Falle gibt es hier also nicht. */
+	/* Unlike the output side, the input takes the mix port by NAME - so the
+	 * pointer-identity trap does not apply here. */
 	this->stream = pa_droid_open_input_stream(this->hw, spec, map, this->mix_port_name);
 	if (!this->stream) {
-		spa_log_error(this->log, NAME " Eingabestream \"%s\" fehlgeschlagen",
+		spa_log_error(this->log, NAME " input stream \"%s\" failed",
 				this->mix_port_name);
 		return -EIO;
 	}
 
-	/* Der HAL bekommt beim blossen Oeffnen AUDIO_SOURCE_DEFAULT. Android-HALs
-	 * haengen ihre Mikrofonaufbereitung (Verstaerkung, Rauschunterdrueckung,
-	 * Echokompensation) aber an der Audioquelle. reconfigure_input setzt sie
-	 * und oeffnet den Stream dabei selbst neu. */
+	/* Merely opening gives the HAL AUDIO_SOURCE_DEFAULT. Android HALs tie
+	 * their microphone processing (gain, noise suppression, echo
+	 * cancellation) to the audio source, though. reconfigure_input sets it
+	 * and reopens the stream on its own. */
 	if (this->audio_source[0]) {
 		pa_proplist *pl = pa_proplist_new();
 		pa_proplist_sets(pl, EXT_PROP_AUDIO_SOURCE, this->audio_source);
 		if (!pa_droid_stream_reconfigure_input(this->stream, spec, map, pl))
-			spa_log_warn(this->log, NAME " Audioquelle \"%s\" liess sich nicht setzen",
+			spa_log_warn(this->log, NAME " audio source \"%s\" could not be set",
 					this->audio_source);
 		else
-			DIAG(this, "Audioquelle: %s", this->audio_source);
+			DIAG(this, "audio source: %s", this->audio_source);
 		pa_proplist_free(pl);
 	}
 
-	/* Der HAL darf Rate und Kanalzahl beim Oeffnen aendern. Unser Port hat
-	 * aber schon ein ausgehandeltes Format - eine Abweichung wuerde
-	 * unbemerkt Tonhoehe und Kanalzuordnung verbiegen. Also lieber ehrlich
-	 * scheitern und die tatsaechlichen Werte melden. */
+	/* The HAL may change rate and channel count while opening. Our port has
+	 * already negotiated a format, though - a deviation would silently bend
+	 * pitch and channel mapping. Better to fail honestly and report the
+	 * actual values. */
 	got = pa_droid_stream_sample_spec(this->stream);
 	if (got->rate != spec->rate || got->channels != spec->channels ||
 	    got->format != spec->format) {
-		spa_log_error(this->log, NAME " HAL lieferte anderes Format als ausgehandelt: "
-				"%u Hz/%u Kanaele/Format %d statt %u Hz/%u Kanaele/Format %d",
+		spa_log_error(this->log, NAME " HAL delivered a different format than negotiated: "
+				"%u Hz/%u channels/format %d instead of %u Hz/%u channels/format %d",
 				got->rate, got->channels, got->format,
 				spec->rate, spec->channels, spec->format);
 		pa_droid_stream_unref(this->stream);
@@ -235,15 +235,15 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	else
 		dev = mix ? dm_config_find_device_port(mix, this->input_device) : NULL;
 	if (!dev)
-		spa_log_warn(this->log, NAME " Eingabegeraet %#x nicht gefunden - "
-				"HAL behaelt sein aktuelles Routing", this->input_device);
+		spa_log_warn(this->log, NAME " input device %#x not found - "
+				"HAL keeps its current routing", this->input_device);
 	else if (!pa_droid_hw_set_input_device(this->stream, dev))
-		spa_log_warn(this->log, NAME " Routing auf \"%s\" fehlgeschlagen", dev->name);
+		spa_log_warn(this->log, NAME " Routing auf \"%s\" failed", dev->name);
 	else
-		DIAG(this, "Eingabegeraet gesetzt: %s", dev->name);
+		DIAG(this, "input device set: %s", dev->name);
 
-	/* Fuer Eingabestroeme liefert pa_droid_stream_get_latency() 0 - upstream
-	 * berechnet sie gar nicht. Also selbst schaetzen: eine HAL-Periode. */
+	/* For input streams pa_droid_stream_get_latency() returns 0 - upstream
+	 * never computes it. So estimate it ourselves: one HAL period. */
 	{
 		size_t bufsz = pa_droid_stream_buffer_size(this->stream);
 		uint64_t bytes_per_sec = (uint64_t) spec->rate * 2 * spec->channels;
@@ -251,7 +251,7 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 			? (uint64_t) bufsz * SPA_NSEC_PER_SEC / bytes_per_sec : 0;
 	}
 	latency_changed(this);
-	spa_log_info(this->log, NAME " Aufnahmestream offen: %s, %u Hz, %u Kanaele, Puffer %zu B",
+	spa_log_info(this->log, NAME " capture stream open: %s, %u Hz, %u channels, buffer %zu B",
 			this->mix_port_name, spec->rate, spec->channels,
 			pa_droid_stream_buffer_size(this->stream));
 	return 0;
@@ -267,18 +267,18 @@ static int hal_open(struct impl *this)
 		return 0;
 
 	{
-		/* Ueber Modargs, damit die Herstelleroptionen des Moduls greifen.
-		 * Diese Option ist auf diesem Geraet aus und betrifft den Sprachweg:
+		/* Through modargs, so the module's vendor options take effect. This
+		 * one is off on this device and concerns the voice path:
 		 *
-		 *   speaker_before_voice=true routet vor dem Moduswechsel kurz auf den
-		 *                             Lautsprecher; manche Geraete beginnen den
-		 *                             Anruf sonst falsch.
+		 *   speaker_before_voice=true routes briefly to the speaker before
+		 *                             the mode change; some devices start the
+		 *                             call wrong otherwise.
 		 *
-		 * FuriOS laedt module-droid-card ohne das. Wer es nicht will, setzt
-		 * droid.hw-options in der Knotenkonfiguration auf etwas anderes.
+		 * FuriOS loads module-droid-card without it. Set droid.hw-options in
+		 * the node configuration to something else if you disagree.
 		 *
-		 * Die Optionen wirken nur beim ERSTEN Oeffnen des Moduls - danach
-		 * liegt es in der prozessweiten Registry. */
+		 * Options only take effect on the FIRST open of the module - after
+		 * that it lives in the process-wide registry. */
 		char args[512];
 		pa_modargs *ma;
 
@@ -289,10 +289,10 @@ static int hal_open(struct impl *this)
 		pa_modargs_free(ma);
 	}
 	if (!this->hw) {
-		spa_log_error(this->log, NAME " HAL-Modul liess sich nicht oeffnen");
+		spa_log_error(this->log, NAME " could not open the HAL module");
 		return -EIO;
 	}
-	DIAG(this, "HAL-Optionen: %s", this->hw_options[0] ? this->hw_options : "(keine)");
+	DIAG(this, "HAL options: %s", this->hw_options[0] ? this->hw_options : "(none)");
 
 	if (this->capture) {
 		int res;
@@ -318,11 +318,10 @@ static int hal_open(struct impl *this)
 		return 0;
 	}
 
-	/* WICHTIG: pa_droid_hw_module_get dupliziert die Konfiguration
-	 * (dm_config_dup). pa_droid_open_output_stream vergleicht die Ports per
-	 * ZEIGERIDENTITAET gegen hw->enabled_module. Ports aus unserer eigenen
-	 * Kopie werden deshalb immer abgelehnt - sie muessen aus dem HAL-Modul
-	 * stammen. */
+	/* IMPORTANT: pa_droid_hw_module_get duplicates the configuration
+	 * (dm_config_dup). pa_droid_open_output_stream compares ports by POINTER
+	 * IDENTITY against hw->enabled_module. Ports from our own copy are
+	 * therefore always rejected - they must come from the HAL module. */
 	mix = dm_config_find_mix_port(this->hw->enabled_module, this->mix_port_name);
 	dev = this->wanted_port[0]
 		? dm_config_find_port(this->hw->enabled_module, this->wanted_port)
@@ -330,7 +329,7 @@ static int hal_open(struct impl *this)
 	if (!dev)
 		dev = dm_config_default_output_device(this->hw->enabled_module);
 	if (!mix || !dev) {
-		spa_log_error(this->log, NAME " mixPort \"%s\" oder Standardausgabe fehlt",
+		spa_log_error(this->log, NAME " mix port \"%s\" or default output missing",
 				this->mix_port_name);
 		pa_droid_hw_module_unref(this->hw);
 		this->hw = NULL;
@@ -349,7 +348,7 @@ static int hal_open(struct impl *this)
 
 	this->stream = pa_droid_open_output_stream(this->hw, &spec, &map, mix, dev);
 	if (!this->stream) {
-		spa_log_error(this->log, NAME " Ausgabestream \"%s\" -> \"%s\" fehlgeschlagen",
+		spa_log_error(this->log, NAME " output stream \"%s\" -> \"%s\" failed",
 				mix->name, dev->name);
 		pa_droid_hw_module_unref(this->hw);
 		this->hw = NULL;
@@ -358,40 +357,41 @@ static int hal_open(struct impl *this)
 
 	this->hal_latency_ns = (uint64_t) pa_droid_stream_get_latency(this->stream) * 1000;
 	latency_changed(this);
-	/* Der HAL darf die Wunschwerte ueberschreiben - fuer voip_rx tut er das
-	 * sogar immer. Merkt man es nicht, spielt der Ton in falscher
-	 * Geschwindigkeit. Also nachsehen und sagen. */
+	/* The HAL may override the requested values - for voip_rx it always
+	 * does. Miss that and audio plays at the wrong speed. So check and say
+	 * so. */
 	{
 		const pa_sample_spec *got = pa_droid_stream_sample_spec(this->stream);
 		if (got && (got->rate != spec.rate || got->channels != spec.channels))
-			spa_log_warn(this->log, NAME " HAL nahm %u Hz/%u Kanaele statt "
-					"%u Hz/%u - der Ton wird verstimmt klingen",
+			spa_log_warn(this->log, NAME " HAL took %u Hz/%u channels instead of "
+					"%u Hz/%u - audio will sound out of tune",
 					got->rate, got->channels, spec.rate, spec.channels);
 	}
-	spa_log_info(this->log, NAME " Stream offen: %s -> %s, %u Hz, %u Kanaele, Puffer %zu B",
+	spa_log_info(this->log, NAME " stream open: %s -> %s, %u Hz, %u channels, buffer %zu B",
 			mix->name, dev->name, spec.rate, spec.channels,
 			pa_droid_stream_buffer_size(this->stream));
 
-	/* Ohne diese beiden Schritte oeffnet der Stream zwar, bleibt aber stumm.
-	 * PulseAudios droid-sink macht genau dasselbe (do_routing/update_volumes). */
-	/* NUR auf dem primaeren Strom: pa_droid_stream_set_route() prueft das mit
-	 * einer Zusicherung und bricht den ganzen Prozess ab, wenn man es auf
-	 * einem anderen mixPort versucht (voip_rx zum Beispiel). Das Routing gilt
-	 * ohnehin fuer alle offenen Stroeme - der primaere gibt es vor. */
+	/* Without these two steps the stream opens but stays silent.
+	 * PulseAudio's droid-sink does exactly the same
+	 * (do_routing/update_volumes). */
+	/* ONLY on the primary stream: pa_droid_stream_set_route() checks this
+	 * with an assertion and aborts the whole process if you try it on another
+	 * mix port (voip_rx, for instance). Routing applies to all open streams
+	 * anyway - the primary one sets it. */
 	if (!pa_droid_stream_is_primary(this->stream))
-		DIAG(this, "kein primaerer Strom - Routing macht der primaere");
+		DIAG(this, "not the primary stream - the primary one does the routing");
 	else if (pa_droid_stream_set_route(this->stream, dev) < 0)
-		spa_log_warn(this->log, NAME " Routing auf \"%s\" fehlgeschlagen", dev->name);
+		spa_log_warn(this->log, NAME " Routing auf \"%s\" failed", dev->name);
 	else
-		DIAG(this, "Routing gesetzt: %s", dev->name);
+		DIAG(this, "routing set: %s", dev->name);
 
 	pa_droid_hw_module_lock(this->hw);
 	if (this->stream->output->stream->set_volume) {
 		int r = this->stream->output->stream->set_volume(
 				this->stream->output->stream, 1.0f, 1.0f);
-		DIAG(this, "HAL-Lautstaerke auf 1.0 (ret %d)", r);
+		DIAG(this, "HAL volume set to 1.0 (ret %d)", r);
 	} else {
-		spa_log_warn(this->log, NAME " HAL bietet kein set_volume - Pegel bleibt HAL-Standard");
+		spa_log_warn(this->log, NAME " HAL offers no set_volume - level stays at the HAL default");
 	}
 	pa_droid_hw_module_unlock(this->hw);
 
@@ -414,29 +414,29 @@ static void hal_close(struct impl *this)
 		pa_droid_hw_module_unref(this->hw);
 		this->hw = NULL;
 	}
-	/* Ohne Stream gibt es keine Verzoegerung mehr - sonst bliebe der alte
-	 * Wert stehen und der Graph rechnete mit einer Latenz, die es nicht
-	 * mehr gibt. */
+	/* No stream means no delay any more - otherwise the old value would
+	 * stand and the graph would account for a latency that no longer
+	 * exists. */
 	this->hal_latency_ns = 0;
 	if (had_stream)
 		latency_changed(this);
 }
 
-/* Wie weit hinkt der Ton der Anzeige hinterher?
+/* How far does audio lag behind the picture?
  *
- * PipeWire kann das nicht erraten: es kennt weder die Puffer des HAL noch
- * unseren Ringpuffer dazwischen. Ohne Meldung nimmt es null an - dann laeuft
- * bei Video der Ton dem Bild voraus. Gemeldet wird die Summe aus beidem. */
+ * PipeWire cannot guess: it knows neither the HAL's buffers nor our ring
+ * buffer in between. Without a report it assumes zero - and then audio runs
+ * ahead of video. What we report is the sum of both. */
 static uint64_t latency_ns(struct impl *this)
 {
 	uint32_t stride, idx;
 	uint64_t ns;
 	int32_t avail;
 
-	/* Der HAL-Anteil wird beim Oeffnen einmal erfragt und gemerkt:
-	 * pa_droid_stream_get_latency() ruft in den HAL, und diese Funktion laeuft
-	 * im Datenpfad des Graphen. Ein blockierender Aufruf waere dort ein
-	 * Aussetzer. */
+	/* The HAL's share is queried once at open time and remembered:
+	 * pa_droid_stream_get_latency() calls into the HAL, and this function
+	 * runs on the graph's data path. A blocking call there would be a
+	 * dropout. */
 	ns = this->hal_latency_ns;
 
 	stride = 2 * (this->port.have_format
@@ -448,8 +448,8 @@ static uint64_t latency_ns(struct impl *this)
 	return ns;
 }
 
-/* Die Latenz aendert sich, wenn der HAL-Stream aufgeht - dann muss sie neu
- * gemeldet werden. Das SERIAL-Bit kippt, sonst merkt es niemand. */
+/* The latency changes when the HAL stream opens - then it must be reported
+ * again. Flip the SERIAL bit, or nobody notices. */
 static void latency_changed(struct impl *this)
 {
 	uint32_t i;
@@ -460,7 +460,7 @@ static void latency_changed(struct impl *this)
 	emit_port_info(this, &this->port, false);
 }
 
-/* ------------------------------------------------------- Taktgeber */
+/* --------------------------------------------------------- clock */
 
 static void set_timeout(struct impl *this, uint64_t time)
 {
@@ -481,7 +481,7 @@ static void timer_stop(struct impl *this)
 		spa_system_timerfd_settime(this->data_system, this->timer_source.fd, 0, &ts, NULL);
 }
 
-/* Pro Tick laeuft der Graph einmal - erst dadurch wird process() aufgerufen. */
+/* One graph cycle per tick - that is what makes process() run at all. */
 static void on_timeout(struct spa_source *source)
 {
 	struct impl *this = source->data;
@@ -492,15 +492,15 @@ static void on_timeout(struct spa_source *source)
 
 	nsec = this->next_time;
 
-	/* Die Quantum-Groesse gehoert dem Graphen, nicht uns. Sie muss nicht zur
-	 * HAL-Puffergroesse passen - der Ringpuffer entkoppelt beides. Ohne diese
-	 * Anpassung liefe der Takt weiter mit dem Startwert, waehrend der Graph
-	 * schon eine andere Groesse verarbeitet. */
+	/* The quantum size belongs to the graph, not to us. It need not match
+	 * the HAL buffer size - the ring buffer decouples the two. Without this
+	 * adjustment the clock would keep running at its start value while the
+	 * graph already processes a different size. */
 	if (this->position && this->position->clock.target_duration &&
 	    this->position->clock.target_duration != this->quantum && this->rate) {
 		this->quantum = this->position->clock.target_duration;
 		this->period_ns = (uint64_t) this->quantum * SPA_NSEC_PER_SEC / this->rate;
-		DIAG(this, "Quantum vom Graphen geaendert: %u Frames alle %llu us",
+		DIAG(this, "quantum changed by the graph: %u frames every %llu us",
 				this->quantum, (unsigned long long) (this->period_ns / 1000));
 	}
 
@@ -509,7 +509,7 @@ static void on_timeout(struct spa_source *source)
 		this->clock->rate = this->clock->target_rate;
 		this->clock->position += this->clock->duration;
 		this->clock->duration = this->quantum;
-		/* In Abtastwerten, wie PipeWire es erwartet. */
+		/* In samples, as PipeWire expects it. */
 		this->clock->delay = this->rate
 			? (int64_t) (latency_ns(this) * this->rate / SPA_NSEC_PER_SEC) : 0;
 		this->clock->rate_diff = 1.0;
@@ -531,7 +531,7 @@ static int timer_start(struct impl *this)
 		? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS;
 	size_t bufsz = pa_droid_stream_buffer_size(this->stream);
 
-	/* Periode aus der HAL-Puffergroesse: buffer_size / (2 Byte * Kanaele) Frames */
+	/* Period from the HAL buffer size: buffer_size / (2 bytes * channels) frames */
 	this->rate = rate;
 	this->quantum = bufsz ? (uint32_t) (bufsz / (2 * channels)) : 1024;
 	if (this->quantum == 0)
@@ -544,12 +544,12 @@ static int timer_start(struct impl *this)
 	this->next_time = SPA_TIMESPEC_TO_NSEC(&now) + this->period_ns;
 	set_timeout(this, this->next_time);
 
-	DIAG(this, "Taktgeber laeuft: %u Frames alle %llu us",
+	DIAG(this, "clock running: %u frames every %llu us",
 			this->quantum, (unsigned long long) (this->period_ns / 1000));
 	return 0;
 }
 
-/* ------------------------------------------------- Schreib-Thread */
+/* --------------------------------------------------- writer thread */
 
 static void *writer_thread(void *arg)
 {
@@ -574,9 +574,9 @@ static void *writer_thread(void *arg)
 		       (avail = spa_ringbuffer_get_read_index(&this->ring, &idx)) < (int32_t) chunk)
 			pthread_cond_wait(&this->cond, &this->lock);
 		if (!this->running) {
-			/* Beim Anhalten den Rest nicht liegen lassen: was noch im Ring
-			 * steht, wird mit Stille auf einen vollen HAL-Puffer aufgefuellt
-			 * und ausgeschrieben. Sonst fehlen die letzten ~21 ms. */
+			/* Do not leave the remainder behind when stopping: whatever is
+			 * still in the ring gets padded with silence to a full HAL
+			 * buffer and written out. Otherwise the last ~21 ms are lost. */
 			avail = spa_ringbuffer_get_read_index(&this->ring, &idx);
 			if (!this->drain || avail <= 0) {
 				pthread_mutex_unlock(&this->lock);
@@ -591,33 +591,34 @@ static void *writer_thread(void *arg)
 		spa_ringbuffer_read_update(&this->ring, idx + take);
 		if (take < chunk) {
 			memset(buf + take, 0, chunk - take);
-			DIAG(this, "Rest ausgeschrieben: %zu B Daten + %zu B Stille",
+			DIAG(this, "remainder written out: %zu B data + %zu B silence",
 					take, chunk - take);
 		}
 
 		{
 			ssize_t w = pa_droid_stream_write(this->stream, buf, chunk);
 			if (w < 0) {
-				/* Nicht pro Quantum protokollieren - im Dauerfehlerfall
-				 * waere das ein Log-Sturm. Erster Fehler + Bilanz reichen. */
+				/* Do not log per quantum - with a persistent failure that
+				 * would be a log storm. First error plus the summary is
+				 * enough. */
 				if (this->n_write_err++ == 0)
-					spa_log_warn(this->log, NAME " HAL-Write fehlgeschlagen: %zd "
-							"(weitere werden nur gezaehlt)", w);
-				/* Drei Fehlschlaege hintereinander heissen: der Stream ist
-				 * hin. Weiterschreiben bringt nichts und verbrennt nur Strom.
-				 * Aufgeben, aber sauber - beim naechsten Start macht
-				 * hal_open() alles neu auf. Genau dahin kommt der Knoten von
-				 * selbst, sobald WirePlumber ihn im Leerlauf schlafen legt. */
+					spa_log_warn(this->log, NAME " HAL write failed: %zd "
+							"(further ones are only counted)", w);
+				/* Three failures in a row mean the stream is gone. Writing
+				 * on achieves nothing and only burns power. Give up, but
+				 * cleanly - the next start reopens everything in hal_open().
+				 * The node gets there on its own as soon as WirePlumber
+				 * suspends it while idle. */
 				if (++consecutive_errors >= 3 && !this->hal_failed) {
 					this->hal_failed = true;
-					spa_log_error(this->log, NAME " HAL nimmt nichts mehr an - "
-							"Ausgabe angehalten. Beim naechsten Start wird "
-							"neu geoeffnet.");
+					spa_log_error(this->log, NAME " HAL takes nothing any more - "
+							"playback stopped. The next start will "
+							"reopen it.");
 				}
 			} else {
 				consecutive_errors = 0;
 				if (this->n_write == 0)
-					DIAG(this, "erster HAL-Write ok: %zd von %zu B", w, chunk);
+					DIAG(this, "first HAL write ok: %zd of %zu B", w, chunk);
 				this->bytes_written += (uint64_t) w;
 				this->n_write++;
 			}
@@ -628,8 +629,8 @@ static void *writer_thread(void *arg)
 	return NULL;
 }
 
-/* Aufnahme: pa_droid_stream_read blockiert bis zur naechsten HAL-Periode und
- * gibt damit den Takt vor. Deshalb ebenfalls ein eigener Thread. */
+/* Capture: pa_droid_stream_read blocks until the next HAL period and thereby
+ * sets the pace. Hence a thread of its own as well. */
 static void *reader_thread(void *arg)
 {
 	struct impl *this = arg;
@@ -658,32 +659,32 @@ static void *reader_thread(void *arg)
 		r = pa_droid_stream_read(this->stream, buf, chunk);
 		if (r <= 0) {
 			if (this->n_write_err++ == 0)
-				spa_log_warn(this->log, NAME " HAL-Read fehlgeschlagen: %zd "
-						"(weitere werden nur gezaehlt)", r);
+				spa_log_warn(this->log, NAME " HAL read failed: %zd "
+						"(further ones are only counted)", r);
 			if (++consecutive_errors >= 3 && !this->hal_failed) {
 				this->hal_failed = true;
-				spa_log_error(this->log, NAME " HAL liefert nichts mehr - "
-						"Aufnahme angehalten. Beim naechsten Start wird "
-						"neu geoeffnet.");
+				spa_log_error(this->log, NAME " HAL delivers nothing any more - "
+						"capture stopped. The next start will "
+						"reopen it.");
 			}
-			/* Nicht heisslaufen, wenn der HAL dauerhaft sofort scheitert. */
+			/* Do not spin if the HAL fails immediately and permanently. */
 			usleep((useconds_t) (this->period_ns / 1000));
 			continue;
 		}
 		consecutive_errors = 0;
 
 		if (this->n_write == 0)
-			DIAG(this, "erster HAL-Read ok: %zd von %zu B", r, chunk);
+			DIAG(this, "first HAL read ok: %zd of %zu B", r, chunk);
 		this->bytes_written += (uint64_t) r;
 		this->n_write++;
 
 		filled = spa_ringbuffer_get_write_index(&this->ring, &idx);
 		if (filled + r > (int32_t) RING_SIZE) {
-			/* Niemand holt die Daten ab - lieber die aeltesten wegwerfen als
-			 * die neuesten, sonst laeuft die Aufnahme immer weiter hinterher. */
+			/* Nobody is picking the data up - drop the oldest rather than the
+			 * newest, otherwise capture falls further and further behind. */
 			if (this->n_overrun++ == 0)
-				spa_log_warn(this->log, NAME " Ringpuffer voll, Aufnahme verwirft "
-						"aelteste Daten (weitere werden nur gezaehlt)");
+				spa_log_warn(this->log, NAME " ring buffer full, capture drops "
+						"oldest data (further ones are only counted)");
 			spa_ringbuffer_read_update(&this->ring,
 					idx + filled + (int32_t) r - (int32_t) RING_SIZE);
 		}
@@ -700,8 +701,8 @@ static int writer_start(struct impl *this)
 {
 	if (this->started)
 		return 0;
-	/* Ring leeren: ein abgebrochener Lauf darf den naechsten nicht mit
-	 * altem Material beginnen lassen. Der Graph laeuft hier noch nicht. */
+	/* Empty the ring: an aborted run must not let the next one start with
+	 * stale material. The graph is not running yet at this point. */
 	spa_ringbuffer_init(&this->ring);
 	this->running = true;
 	this->drain = true;
@@ -714,8 +715,8 @@ static int writer_start(struct impl *this)
 	return 0;
 }
 
-/* drain=false verwirft den Rest sofort (Notausstieg), drain=true schreibt ihn
- * mit Stille aufgefuellt noch aus. */
+/* drain=false discards the remainder immediately (emergency exit),
+ * drain=true still writes it out, padded with silence. */
 static void writer_stop(struct impl *this, bool drain)
 {
 	if (!this->started)
@@ -727,15 +728,15 @@ static void writer_stop(struct impl *this, bool drain)
 	pthread_mutex_unlock(&this->lock);
 	pthread_join(this->writer, NULL);
 	this->started = false;
-	DIAG(this, "Bilanz: process() %ux / %llu B, HAL-%s %ux / %llu B",
+	DIAG(this, "summary: process() %ux / %llu B, HAL %s %ux / %llu B",
 			this->n_process, (unsigned long long) this->bytes_queued,
 			this->capture ? "Read" : "Write",
 			this->n_write, (unsigned long long) this->bytes_written);
 	if (this->n_underrun)
-		DIAG(this, "%u Bloecke mit Stille aufgefuellt (Ring war leer)", this->n_underrun);
+		DIAG(this, "%u blocks padded with silence (ring was empty)", this->n_underrun);
 	if (this->n_write_err || this->n_overrun)
-		spa_log_warn(this->log, NAME " Stoerungen im Lauf: %u abgewiesene HAL-%s, "
-				"%u verworfene Bloecke (Ring voll)",
+		spa_log_warn(this->log, NAME " trouble during the run: %u rejected HAL %s, "
+				"%u dropped blocks (ring full)",
 				this->n_write_err, this->capture ? "Reads" : "Writes",
 				this->n_overrun);
 }
@@ -745,13 +746,13 @@ static void writer_stop(struct impl *this, bool drain)
 static void emit_node_info(struct impl *this, bool full)
 {
 	uint64_t old = full ? this->info.change_mask : 0;
-	/* props MUSS gesetzt sein: libpipewire-module-adapter reicht info->props
-	 * ungeprueft an pw_properties_update weiter - NULL segfaultet dort. */
+	/* props MUST be set: libpipewire-module-adapter passes info->props on to
+	 * pw_properties_update unchecked - NULL segfaults there. */
 	struct spa_dict_item items[3];
 	uint32_t n = 0;
 
-	/* "droid-hal" ist die Kennung von PulseAudios droid-Modul. callaudiod
-	 * erkennt eine Android-Karte allein daran. */
+	/* "droid-hal" is the identifier PulseAudio's droid module uses.
+	 * callaudiod recognises an Android card by nothing else. */
 	items[n++] = SPA_DICT_ITEM_INIT("device.api", "droid-hal");
 	items[n++] = SPA_DICT_ITEM_INIT("media.class",
 			this->capture ? "Audio/Source" : "Audio/Sink");
@@ -763,7 +764,7 @@ static void emit_node_info(struct impl *this, bool full)
 					 SPA_NODE_CHANGE_MASK_PROPS |
 					 SPA_NODE_CHANGE_MASK_PARAMS;
 	if (this->info.change_mask) {
-		/* Emit ist synchron - der Stack-Dict lebt lange genug. */
+		/* Emitting is synchronous - the stack dict lives long enough. */
 		spa_node_emit_info(&this->hooks, &this->info);
 		this->info.change_mask = old;
 	}
@@ -775,7 +776,7 @@ static void emit_port_info(struct impl *this, struct port *port, bool full)
 	uint64_t old = full ? port->info.change_mask : 0;
 	struct spa_dict_item items[1];
 
-	/* gleiche Falle wie beim Node: props darf nicht NULL sein */
+	/* same trap as on the node: props must not be NULL */
 	items[0] = SPA_DICT_ITEM_INIT("port.name", this->capture ? "capture" : "playback");
 	port->info.props = &SPA_DICT_INIT(items, 1);
 
@@ -826,46 +827,45 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	switch (SPA_NODE_COMMAND_ID(command)) {
 	case SPA_NODE_COMMAND_Start:
 		if (!this->port.have_format) {
-			spa_log_error(this->log, NAME " Start ohne ausgehandeltes Format");
+			spa_log_error(this->log, NAME " start without a negotiated format");
 			return -EIO;
 		}
 		if ((res = hal_open(this)) < 0)
 			return res;
-		/* Teilzustaende zurueckrollen: sonst bliebe ein offener HAL-Stream
-		 * oder ein laufender Thread zurueck, waehrend der Node als
-		 * gescheitert gilt. */
+		/* Roll partial state back: otherwise an open HAL stream or a running
+		 * thread would be left behind while the node counts as failed. */
 		if ((res = writer_start(this)) < 0) {
-			spa_log_error(this->log, NAME " Schreib-Thread liess sich nicht starten: %s",
+			spa_log_error(this->log, NAME " could not start the writer thread: %s",
 					spa_strerror(res));
 			hal_close(this);
 			return res;
 		}
 		if ((res = timer_start(this)) < 0) {
-			spa_log_error(this->log, NAME " Taktgeber liess sich nicht starten: %s",
+			spa_log_error(this->log, NAME " could not start the clock: %s",
 					spa_strerror(res));
 			writer_stop(this, false);
 			hal_close(this);
 			return res;
 		}
-		DIAG(this, "Start-Kommando erhalten, writer laeuft");
+		DIAG(this, "start command received, writer running");
 		break;
 	case SPA_NODE_COMMAND_Pause:
 		timer_stop(this);
 		writer_stop(this, true);
-		spa_log_info(this->log, NAME " angehalten");
+		spa_log_info(this->log, NAME " stopped");
 		break;
 	case SPA_NODE_COMMAND_Suspend:
-		/* Suspend gibt die Hardware frei - erst dadurch kann PulseAudio das
-		 * PCM-Geraet wieder bekommen, wenn der Sink nur untaetig herumsteht.
-		 * Im Anruf bleibt sie offen: dort laeuft der Sprachpfad ueber Modem
-		 * und DSP, ohne dass ein PipeWire-Strom spielt. */
+		/* Suspend releases the hardware - only then can PulseAudio get the
+		 * PCM device back while the sink merely sits idle. During a call it
+		 * stays open: there the voice path runs through modem and DSP without
+		 * any PipeWire stream playing. */
 		timer_stop(this);
 		writer_stop(this, true);
 		if (this->mode_holds_hal) {
-			spa_log_info(this->log, NAME " angehalten, HAL bleibt fuer den Anruf offen");
+			spa_log_info(this->log, NAME " stopped, HAL stays open for the call");
 		} else {
 			hal_close(this);
-			spa_log_info(this->log, NAME " angehalten, HAL freigegeben");
+			spa_log_info(this->log, NAME " stopped, HAL released");
 		}
 		break;
 	default:
@@ -874,19 +874,19 @@ static int impl_send_command(void *object, const struct spa_command *command)
 	return 0;
 }
 
-/* Kanalpositionen gehoeren NICHT hierher: eine Kanalspanne und feste
- * Positionen schliessen sich im selben Format-Objekt aus, und mit zwei festen
- * Varianten handelte der Adapter prompt Mono aus. Die Zuordnung liefert die
- * Knoteneigenschaft audio.position (FL,FR), die das Device mitgibt. */
+/* Channel positions do NOT belong here: a channel range and fixed positions
+ * are mutually exclusive within one format object, and with two fixed variants
+ * the adapter promptly negotiated mono. The mapping comes from the node
+ * property audio.position (FL,FR) that the device provides. */
 static int port_enum_formats(struct impl *this, struct spa_pod_builder *b,
 		uint32_t index, struct spa_pod **param)
 {
 	if (index > 0)
 		return 0;
 
-	/* Der bevorzugte Wert steht vorn in der Auswahl - sonst nimmt der Adapter
-	 * den Standard und ignoriert audio.rate aus den Knoteneigenschaften. Fuer
-	 * den VoIP-Kanal ist das entscheidend: der HAL erzwingt dort 16 kHz. */
+	/* The preferred value goes first in the choice - otherwise the adapter
+	 * takes the default and ignores audio.rate from the node properties. That
+	 * matters for the VoIP channel: there the HAL insists on 16 kHz. */
 	*param = spa_pod_builder_add_object(b,
 		SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 		SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
@@ -956,11 +956,11 @@ next:
 		break;
 	case SPA_PARAM_Buffers:
 	{
-		/* Der Puffer muss ein GRAPH-Quantum fassen, nicht eine HAL-Periode.
-		 * Beim Ausgang sind beide zufaellig gleich gross (4096 B), beim
-		 * Eingang nicht: der HAL liefert 3840 B, der Graph will 4096 B.
-		 * Ein zu kleiner Puffer laesst den Adapter mit einem Teilquantum
-		 * arbeiten. */
+		/* The buffer must hold one GRAPH quantum, not one HAL period. On the
+		 * output side both happen to be the same size (4096 B), on the input
+		 * side they are not: the HAL delivers 3840 B while the graph wants
+		 * 4096 B. Too small a buffer makes the adapter work with a partial
+		 * quantum. */
 		uint32_t stride = 2 * port->current_format.info.raw.channels;
 		uint32_t q = this->quantum;
 		size_t size;
@@ -998,8 +998,8 @@ next:
 		if (result.index > 0)
 			return 0;
 		ns = latency_ns(this);
-		/* Ein Sink meldet die Verzoegerung stromabwaerts, eine Quelle die
-		 * stromaufwaerts - deshalb die Richtung des eigenen Ports. */
+		/* A sink reports the delay downstream, a source the delay upstream -
+		 * hence the direction of our own port. */
 		info = SPA_LATENCY_INFO(this->dir,
 				.min_ns = (int64_t) ns,
 				.max_ns = (int64_t) ns);
@@ -1026,8 +1026,8 @@ static int port_set_format(struct impl *this, struct port *port,
 	int res;
 
 	if (format == NULL) {
-		/* Format weg heisst: der Port wird abgebaut. Taktgeber muss mit,
-		 * sonst tickt er ohne Datenpfad weiter. */
+		/* No format means the port is being torn down. The clock has to go
+		 * with it, or it keeps ticking without a data path. */
 		timer_stop(this);
 		writer_stop(this, true);
 		hal_close(this);
@@ -1102,9 +1102,9 @@ static int impl_port_set_io(void *object,
 	return 0;
 }
 
-/* Aufnahme: einen freien Puffer nehmen, aus dem Ring fuellen, dem Graphen
- * hinlegen. Ist der Ring leer (Anlauf, Aussetzer), wird mit Stille aufgefuellt -
- * ein zu kurzer Puffer waere fuer den Graphen ein Fehler. */
+/* Capture: take a free buffer, fill it from the ring, hand it to the graph.
+ * If the ring is empty (start-up, dropout) it is padded with silence - a short
+ * buffer would be an error as far as the graph is concerned. */
 static int process_capture(struct impl *this)
 {
 	struct port *port = &this->port;
@@ -1152,7 +1152,7 @@ static int process_capture(struct impl *this)
 	d->chunk->stride = stride;
 
 	if (this->n_process == 0)
-		DIAG(this, "erster process(): %u B ausgeliefert (%u B aus dem Ring)", want, take);
+		DIAG(this, "first process(): %u B delivered (%u B from the ring)", want, take);
 	this->bytes_queued += take;
 	this->n_process++;
 
@@ -1188,8 +1188,8 @@ static int impl_process(void *object)
 	offs = SPA_MIN(d->chunk->offset, d->maxsize);
 	size = SPA_MIN(d->chunk->size, d->maxsize - offs);
 
-	/* Wenn der HAL nichts mehr annimmt, den Ring nicht weiter fuellen -
-	 * sonst laeuft er ueber und wir zaehlen sinnlos Verluste. */
+	/* If the HAL takes nothing any more, stop filling the ring - otherwise it
+	 * overflows and we count losses for nothing. */
 	if (this->hal_failed) {
 		io->status = SPA_STATUS_NEED_DATA;
 		return SPA_STATUS_NEED_DATA;
@@ -1198,15 +1198,15 @@ static int impl_process(void *object)
 	filled = spa_ringbuffer_get_write_index(&this->ring, &idx);
 	if (filled + size > RING_SIZE) {
 		if (this->n_overrun++ == 0)
-			spa_log_warn(this->log, NAME " Ringpuffer voll, %u Bytes verworfen "
-					"(weitere werden nur gezaehlt)", size);
+			spa_log_warn(this->log, NAME " ring buffer full, %u bytes dropped "
+					"(further ones are only counted)", size);
 	} else {
 		spa_ringbuffer_write_data(&this->ring, this->ring_data, RING_SIZE,
 				idx & (RING_SIZE - 1),
 				SPA_PTROFF(d->data, offs, void), size);
 		spa_ringbuffer_write_update(&this->ring, idx + size);
 		if (this->n_process == 0)
-			DIAG(this, "erster process(): %u B eingereiht", size);
+			DIAG(this, "first process(): %u B queued", size);
 		this->bytes_queued += size;
 		this->n_process++;
 
@@ -1219,10 +1219,10 @@ static int impl_process(void *object)
 	return SPA_STATUS_NEED_DATA;
 }
 
-/* Der einzige Weg, auf dem eine Routenaenderung vom Device hierher findet:
- * Device und Node laufen in verschiedenen Prozessen (Device in WirePlumber,
- * Node im PipeWire-Daemon). WirePlumber schiebt den Routennamen als
- * SPA_PROP_params-Paar herueber. */
+/* The only way a route change from the device reaches this code: device and
+ * node run in different processes (device in WirePlumber, node in the PipeWire
+ * daemon). WirePlumber passes the route name across as an SPA_PROP_params
+ * pair. */
 static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 		const struct spa_pod *param)
 {
@@ -1342,14 +1342,14 @@ static int impl_init(const struct spa_handle_factory *factory,
 	handle->clear = impl_clear;
 
 	this = (struct impl *) handle;
-	/* Welche Richtung, entscheidet die benutzte Factory. */
+	/* The factory in use decides which direction this is. */
 	this->capture = spa_streq(factory->name, "api.droid.pcm.source");
 	this->dir = this->capture ? SPA_DIRECTION_OUTPUT : SPA_DIRECTION_INPUT;
 	this->log = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_Log);
 	this->data_loop = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataLoop);
 	this->data_system = spa_support_find(support, n_support, SPA_TYPE_INTERFACE_DataSystem);
 	if (!this->data_loop || !this->data_system) {
-		spa_log_error(this->log, NAME " DataLoop/DataSystem fehlen im support-Array");
+		spa_log_error(this->log, NAME " DataLoop/DataSystem missing from the support array");
 		return -EINVAL;
 	}
 
@@ -1395,21 +1395,20 @@ static int impl_init(const struct spa_handle_factory *factory,
 	port->info.params = port->params;
 	port->info.n_params = 5;
 
-	/* Welcher mixPort? Standard ist der primaere Aus- bzw. Eingang. */
+	/* Which mix port? The primary output or input by default. */
 	str = info ? spa_dict_lookup(info, "droid.mix-port") : NULL;
 	snprintf(this->mix_port_name, sizeof(this->mix_port_name), "%s",
 			str ? str : (this->capture ? "primary input" : "primary output"));
 
-	/* Aufnahmequelle: standardmaessig das eingebaute Mikrofon, per
-	 * droid.device-port aber auf einen benannten devicePort umlenkbar
-	 * (z. B. "Wired Headset Mic"). */
+	/* Capture source: the built-in microphone by default, redirectable to a
+	 * named device port via droid.device-port (e.g. "Wired Headset Mic"). */
 	this->input_device = AUDIO_DEVICE_IN_BUILTIN_MIC;
 	str = info ? spa_dict_lookup(info, "droid.device-port") : NULL;
 	if (str)
 		snprintf(this->input_port_name, sizeof(this->input_port_name), "%s", str);
 
-	/* Wunschformat aus den Knoteneigenschaften. Der VoIP-Kanal laeuft mit
-	 * 16 kHz, der primaere mit 48. */
+	/* Preferred format from the node properties. The VoIP channel runs at
+	 * 16 kHz, the primary one at 48. */
 	this->pref_rate = DEFAULT_RATE;
 	this->pref_channels = DEFAULT_CHANNELS;
 	if (info) {
@@ -1423,14 +1422,14 @@ static int impl_init(const struct spa_handle_factory *factory,
 	if (this->pref_channels < 1 || this->pref_channels > 2)
 		this->pref_channels = DEFAULT_CHANNELS;
 
-	/* Herstelleroptionen des HAL-Moduls. Voreinstellung siehe hal_open(). */
+	/* Vendor options for the HAL module. See hal_open() for the default. */
 	str = info ? spa_dict_lookup(info, "droid.hw-options") : NULL;
 	snprintf(this->hw_options, sizeof(this->hw_options), "%s",
 			str ? str : "speaker_before_voice=true");
 
-	/* Android-Audioquelle. "mic" ist das, was der HAL fuer das eingebaute
-	 * Mikrofon erwartet; fuer Telefonie waere es "voice_call" bzw.
-	 * "voice_communication". Leer laesst AUDIO_SOURCE_DEFAULT stehen. */
+	/* Android audio source. "mic" is what the HAL expects for the built-in
+	 * microphone; telephony would use "voice_call" or "voice communication".
+	 * Empty leaves AUDIO_SOURCE_DEFAULT in place. */
 	str = info ? spa_dict_lookup(info, "droid.audio-source") : NULL;
 	snprintf(this->audio_source, sizeof(this->audio_source), "%s", str ? str : "mic");
 
@@ -1439,7 +1438,7 @@ static int impl_init(const struct spa_handle_factory *factory,
 			str ? str : "/android/vendor/etc/audio_policy_configuration.xml");
 	this->config = pa_parse_droid_audio_config(this->config_file);
 	if (!this->config) {
-		spa_log_error(this->log, NAME " HAL-Konfiguration nicht lesbar");
+		spa_log_error(this->log, NAME " HAL configuration not readable");
 		return -EIO;
 	}
 	if (!(this->module = dm_config_find_module(this->config, "primary"))) {
@@ -1459,13 +1458,13 @@ static int impl_init(const struct spa_handle_factory *factory,
 	pthread_cond_init(&this->cond, NULL);
 
 	registry_add(this);
-	spa_log_info(this->log, NAME " bereit fuer mixPort \"%s\"", this->mix_port_name);
+	spa_log_info(this->log, NAME " ready for mix port \"%s\"", this->mix_port_name);
 	return 0;
 }
 
-/* Sucht den devicePort zu einem PulseAudio-Routennamen ("output-earpiece").
- * Das Device meldet Routen unter diesen Namen, der HAL kennt nur seine
- * eigenen ("Earpiece") - hier wird uebersetzt. */
+/* Finds the device port for a PulseAudio route name ("output-earpiece"). The
+ * device reports routes under those names while the HAL only knows its own
+ * ("Earpiece") - this is where they are translated. */
 static dm_config_port *port_by_route_name(struct impl *this, const char *route)
 {
 	dm_config_module *module = this->hw ? this->hw->enabled_module : this->module;
@@ -1485,10 +1484,10 @@ static dm_config_port *port_by_route_name(struct impl *this, const char *route)
 			return port;
 	}
 
-	/* Bluetooth fehlt in der audio_policy-XML dieses Geraets (alles
-	 * auskommentiert). Der HAL braucht sie nicht - er bekommt beim Routen nur
-	 * den Geraetetyp -, also bauen wir den Port selbst. Das Device meldet
-	 * dieselben Routen. */
+	/* Bluetooth is missing from this device's audio_policy XML (all commented
+	 * out). The HAL does not need that file - when routing it only gets the
+	 * device type - so we build the port ourselves. The device reports the
+	 * same routes. */
 	{
 		static dm_config_port bt_out, bt_in;
 		dm_config_port *p = NULL;
@@ -1515,43 +1514,43 @@ static dm_config_port *port_by_route_name(struct impl *this, const char *route)
 	return NULL;
 }
 
-/* Route anwenden. Ist der HAL noch zu, wird der Wunsch nur gemerkt und beim
- * naechsten hal_open() angewandt. */
+/* Apply a route. While the HAL is still closed the request is only
+ * remembered and applied at the next hal_open(). */
 static int apply_route(struct impl *this, const char *route)
 {
 	dm_config_port *dev;
 	int res;
 
 	if (!(dev = port_by_route_name(this, route))) {
-		spa_log_warn(this->log, NAME " Route \"%s\" kennt der HAL nicht", route);
+		spa_log_warn(this->log, NAME " route \"%s\" is unknown to the HAL", route);
 		return -ENOENT;
 	}
 
 	snprintf(this->wanted_port, sizeof(this->wanted_port), "%s", dev->name);
 
 	if (!this->stream) {
-		spa_log_info(this->log, NAME " Route \"%s\" gemerkt (HAL noch zu)", dev->name);
+		spa_log_info(this->log, NAME " route \"%s\" remembered (HAL still closed)", dev->name);
 		return 0;
 	}
 
 	if (this->capture)
 		res = pa_droid_hw_set_input_device(this->stream, dev) ? 0 : -EIO;
 	else if (!pa_droid_stream_is_primary(this->stream))
-		return 0;   /* siehe hal_open(): nur der primaere Strom routet */
+		return 0;   /* see hal_open(): only the primary stream routes */
 	else
 		res = pa_droid_stream_set_route(this->stream, dev);
 
 	if (res < 0)
-		spa_log_warn(this->log, NAME " Route \"%s\" fehlgeschlagen: %d", dev->name, res);
+		spa_log_warn(this->log, NAME " route \"%s\" failed: %d", dev->name, res);
 	else
-		DIAG(this, "Route gewechselt: %s -> %s", route, dev->name);
+		DIAG(this, "route changed: %s -> %s", route, dev->name);
 	return res;
 }
 
-/* Lautstaerke im Gespraech. Im Anruf fliesst kein PCM durch den Graphen - die
- * Software-Verstaerkung des Adapters greift also ins Leere. Der Pegel des
- * Sprachpfads sitzt im HAL und wird ueber set_voice_volume gesetzt; PulseAudios
- * droid-sink macht im Anrufprofil dasselbe. */
+/* Volume during a call. No PCM flows through the graph while a call is up, so
+ * the adapter's software gain has nothing to act on. The voice path's level
+ * lives in the HAL and is set through set_voice_volume; PulseAudio's
+ * droid-sink does the same in its call profile. */
 static int apply_voice_volume(struct impl *this, const char *value)
 {
 	float vol;
@@ -1559,13 +1558,13 @@ static int apply_voice_volume(struct impl *this, const char *value)
 	if (this->capture || !this->hw)
 		return 0;
 	if (!this->in_call)
-		return 0;   /* ausserhalb des Anrufs macht der HAL nichts damit */
+		return 0;   /* outside a call the HAL does nothing with it */
 
-	/* NICHT atof(): das liest den Punkt in einer Lokalisierung mit Komma als
-	 * Dezimaltrennzeichen nicht - aus "0.343" wurde 0,00 und der Sprachpegel
-	 * fiel auf null. spa_atof schaltet dafuer intern auf die C-Lokalisierung. */
+	/* NOT atof(): in a locale that uses a comma as the decimal separator it
+	 * does not read the dot - "0.343" became 0.00 and the voice level dropped
+	 * to zero. spa_atof switches to the C locale internally. */
 	if (!spa_atof(value, &vol)) {
-		spa_log_warn(this->log, NAME " Sprachlautstaerke \"%s\" nicht lesbar", value);
+		spa_log_warn(this->log, NAME " voice volume \"%s\" not readable", value);
 		return -EINVAL;
 	}
 	if (vol < 0.0f)
@@ -1577,28 +1576,28 @@ static int apply_voice_volume(struct impl *this, const char *value)
 	if (this->hw->device->set_voice_volume) {
 		int r = this->hw->device->set_voice_volume(this->hw->device, vol);
 		if (r < 0)
-			spa_log_warn(this->log, NAME " Sprachlautstaerke %.2f abgelehnt (%d)", vol, r);
+			spa_log_warn(this->log, NAME " voice volume %.2f rejected (%d)", vol, r);
 		else
-			DIAG(this, "Sprachlautstaerke: %.2f", vol);
+			DIAG(this, "voice volume: %.2f", vol);
 	} else {
-		spa_log_warn(this->log, NAME " HAL bietet kein set_voice_volume");
+		spa_log_warn(this->log, NAME " HAL offers no set_voice_volume");
 	}
 	pa_droid_hw_module_unlock(this->hw);
 	return 0;
 }
 
-/* Anrufmodus. Der Modus gehoert dem HAL-Modul, nicht dem Stream - aber
- * pa_droid_hw_set_mode braucht den primaeren Ausgangsstream, um beim Wechsel
- * nach AUDIO_MODE_IN_CALL erst auf Lautsprecher und dann auf Ohrmuschel zu
- * routen (manche Geraete starten den Anruf sonst falsch). Deshalb wird der
- * HAL hier notfalls eigens geoeffnet - PulseAudio macht dasselbe mit einem
- * virtuellen Stream (voice_virtual_stream). */
+/* Call mode. The mode belongs to the HAL module, not to the stream - but
+ * pa_droid_hw_set_mode needs the primary output stream in order to route to
+ * the speaker first and the earpiece afterwards when switching to
+ * AUDIO_MODE_IN_CALL (some devices start the call wrong otherwise). That is
+ * why the HAL is opened here if need be - PulseAudio does the same with a
+ * virtual stream (voice_virtual_stream). */
 static int apply_mode(struct impl *this, const char *mode)
 {
 	audio_mode_t m;
 	int res;
 
-	/* Nur der Wiedergabeknoten: er haelt den primaeren Ausgang. */
+	/* Playback node only: it holds the primary output. */
 	if (this->capture)
 		return 0;
 
@@ -1613,41 +1612,41 @@ static int apply_mode(struct impl *this, const char *mode)
 
 	if (m != AUDIO_MODE_NORMAL) {
 		if ((res = hal_open(this)) < 0) {
-			spa_log_warn(this->log, NAME " Anrufmodus: HAL liess sich nicht oeffnen");
+			spa_log_warn(this->log, NAME " call mode: could not open the HAL");
 			return res;
 		}
 		this->mode_holds_hal = true;
 	}
 
 	if (!this->hw)
-		return 0;   /* nichts offen, nichts zu tun */
+		return 0;   /* nothing open, nothing to do */
 
 	if (!pa_droid_hw_set_mode(this->hw, m)) {
-		spa_log_warn(this->log, NAME " Audiomodus \"%s\" abgelehnt", mode);
+		spa_log_warn(this->log, NAME " audio mode \"%s\" rejected", mode);
 		return -EIO;
 	}
 	this->in_call = m == AUDIO_MODE_IN_CALL;
 
-	/* "realcall" schaltet bei MediaTek den echten Sprachpfad im DSP frei -
-	 * und damit auch dessen Echounterdrueckung. PulseAudios Kartenmodul
-	 * schickt das beim Wechsel ins Anrufprofil; dieses Modul haben wir nie
-	 * portiert, also machen wir es hier. Nur wenn die Option gesetzt ist -
-	 * dieser MediaTek-HAL lehnt den Parameter uebrigens ab (-22), er ist
-	 * offenbar Qualcomm-Erbe. Der Code bleibt fuer andere Geraete. */
+	/* On MediaTek "realcall" unlocks the real voice path in the DSP - and
+	 * with it the DSP's echo cancellation. PulseAudio's card module sends it
+	 * when switching to the call profile; we never ported that module, so we
+	 * do it here. Only when the option is set - this particular MediaTek HAL
+	 * rejects the parameter anyway (-22), it is apparently a Qualcomm legacy.
+	 * The code stays for other devices. */
 	if (pa_droid_option(this->hw, DM_OPTION_REALCALL)) {
 		const char *param = this->in_call ? "realcall=on" : "realcall=off";
 		if (pa_droid_set_parameters(this->hw, param) < 0)
-			spa_log_warn(this->log, NAME " HAL lehnt \"%s\" ab", param);
+			spa_log_warn(this->log, NAME " HAL rejects \"%s\" ab", param);
 		else
-			DIAG(this, "%s an den HAL geschickt", param);
+			DIAG(this, "%s sent to the HAL", param);
 	}
-	DIAG(this, "Audiomodus: %s", mode);
+	DIAG(this, "audio mode: %s", mode);
 
-	/* Der HAL routet beim Eintritt in den Anruf selbst auf die Ohrmuschel.
-	 * Die Karte weiss davon nichts und glaubt weiter an ihre Route - ein
-	 * spaeteres Umschalten auf genau diese Route waere dann ein No-Op, und
-	 * HAL und Karte blieben dauerhaft uneins. Deshalb die zuletzt vom Device
-	 * gewuenschte Route neu setzen. */
+	/* On entering a call the HAL routes to the earpiece by itself. The card
+	 * knows nothing of that and still believes in its own route - switching
+	 * to exactly that route later would then be a no-op, leaving HAL and card
+	 * permanently out of step. Hence re-apply the route the device asked for
+	 * last. */
 	if (this->wanted_port[0] && this->stream &&
 	    pa_droid_stream_is_primary(this->stream)) {
 		dm_config_port *dev = dm_config_find_port(this->hw->enabled_module,
@@ -1656,7 +1655,7 @@ static int apply_mode(struct impl *this, const char *mode)
 			pa_droid_stream_set_route(this->stream, dev);
 	}
 
-	/* Anruf vorbei und nichts zu spielen: Hardware wieder freigeben. */
+	/* Call over and nothing to play: release the hardware again. */
 	if (m == AUDIO_MODE_NORMAL && this->mode_holds_hal) {
 		this->mode_holds_hal = false;
 		if (!this->started)
@@ -1665,9 +1664,9 @@ static int apply_mode(struct impl *this, const char *mode)
 	return 0;
 }
 
-/* Vom Device gerufen: Route auf einen benannten devicePort umstellen. Ist der
- * HAL noch nicht offen, wird der Wunsch nur gemerkt und beim naechsten
- * hal_open() angewandt. */
+/* Called by the device: switch the route to a named device port. While the
+ * HAL is not open yet the request is only remembered and applied at the next
+ * hal_open(). */
 int droid_node_set_route(const char *mix_port, const char *device_port);
 
 int droid_node_set_route(const char *mix_port, const char *device_port)

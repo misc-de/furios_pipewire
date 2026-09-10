@@ -1,311 +1,309 @@
 # furios_pipewire
 
-Audio auf dem FuriPhone (FuriOS, MediaTek mt6877) laeuft ab Werk ueber
-**PulseAudio + module-droid-card**; das mitgelieferte PipeWire ist auf Kamera
-und Screencast beschraenkt (`pipewire-droid.conf` laedt kein `api.alsa.*`).
+Audio on the FuriPhone (FuriOS, MediaTek mt6877) runs through
+**PulseAudio + module-droid-card** out of the box; the PipeWire that ships with
+it is limited to camera and screencast (`pipewire-droid.conf` loads no
+`api.alsa.*`).
 
-Dieses Verzeichnis (`~/Projekte/furios_pipewire`) enthaelt zweierlei:
+This repository contains two things:
 
-1. **`audioctl`** - Umschaltung zwischen Audio-Profilen, jederzeit reversibel.
-2. **`poc/spa-droid/`** - ein SPA-Plugin, das den Android-Audio-HAL direkt an
-   PipeWire anbindet, damit PulseAudio ganz entfallen kann.
+1. **`audioctl`** - switching between audio profiles, reversible at any time.
+2. **`poc/spa-droid/`** - an SPA plugin that connects the Android audio HAL
+   directly to PipeWire, so PulseAudio can be dropped entirely.
 
-## Profile (audioctl)
+## Profiles (audioctl)
 
-| Profil      | Bedeutung                                                        |
+| Profile     | Meaning                                                          |
 |-------------|------------------------------------------------------------------|
-| `standard`  | Auslieferungszustand: PulseAudio haelt den HAL                    |
-| `pw-tunnel` | PipeWire bekommt einen Sink via pulse-tunnel, PA bleibt HAL-Herr  |
-| `pw-hal`    | PipeWire spricht ueber `libspa-droid` direkt mit dem HAL          |
+| `standard`  | shipped state: PulseAudio holds the HAL                          |
+| `pw-tunnel` | PipeWire gets a sink via pulse-tunnel, PA stays HAL owner        |
+| `pw-hal`    | PipeWire talks to the HAL directly through `libspa-droid`        |
 
     audioctl status
-    audioctl try pw-hal     # nur bis zum Neustart, faellt automatisch zurueck
+    audioctl try pw-hal     # only until reboot, falls back automatically
     audioctl set standard   # persistent
 
-Sicherheitsnetz: `try` verwirft das Profil beim Neustart, und fehlt 15 s nach
-dem Wechsel ein Sink, schaltet audioctl von selbst auf `standard` zurueck.
-**`audioctl verify` prueft nur, ob ein Sink existiert - nicht, ob Ton fliesst.**
-Nach einem Wechsel wirklich etwas abspielen.
+Safety net: `try` discards the profile on reboot, and if no sink exists 15 s
+after the switch, audioctl falls back to `standard` on its own.
+**`audioctl verify` only checks that a sink exists - not that audio flows.**
+After a switch, actually play something.
 
-Vor dem Wechsel nach `pw-hal` prueft audioctl, ob das Plugin noch zur
-installierten PipeWire-Fassung passt (`gebaut-gegen` neben der Plugin-Datei).
-Bricht ein Systemupdate die SPA-Schnittstelle, waere `pw-hal` sonst
-kommentarlos stumm - jetzt kommt eine Warnung mit dem Hinweis, neu zu bauen.
+Before switching to `pw-hal`, audioctl checks whether the plugin still matches
+the installed PipeWire version (`built-against` next to the plugin file). If a
+system update breaks the SPA interface, `pw-hal` would otherwise go silent
+without a word - now there is a warning telling you to rebuild.
 
-`audioctl rescue` macht den Ton wieder hoerbar: Auslieferungszustand,
-Lautsprecher statt Ohrmuschel, nicht stumm, 65 %. `bt-call` faengt Abbrueche
-mit einer Trap ab, damit ein unterbrochener Test nichts Stummes hinterlaesst.
+`audioctl rescue` makes sound audible again: shipped state, speaker instead of
+earpiece, unmuted, 65 %. `bt-call` catches aborts with a trap so an interrupted
+test does not leave anything silent.
 
-Beim Wechsel beendet audioctl ausserdem `callaudiod` und `feedbackd`. Beide
-halten dauerhafte Verbindungen zum Audioserver und ueberleben einen
-Serverwechsel nicht: callaudiod findet danach keine Karte mehr, feedbackd
-scheitert an "Invalid state" - der Klingelton bleibt aus und nur die
-Vibration kommt noch. D-Bus startet beide bei Bedarf neu.
+On a switch audioctl also kills `callaudiod` and `feedbackd`. Both hold
+persistent connections to the audio server and do not survive a server change:
+callaudiod finds no card afterwards, feedbackd fails with "Invalid state" - the
+ringtone stays off and only the vibration is left. D-Bus restarts both on
+demand.
 
-## Stand
+## Status
 
-Wiedergabe und Aufnahme ueber PipeWire -> `libspa-droid` -> Android-HAL
-funktionieren, ebenso das Umschalten zwischen Lautsprecher, Ohrmuschel und
-Headset. Die Steuerkette der Telefonie ist vollstaendig:
+Playback and capture through PipeWire -> `libspa-droid` -> Android HAL work, as
+does switching between speaker, earpiece and headset. The telephony control
+chain is complete:
 
-| callaudiod            | Karte              | HAL                       |
+| callaudiod            | card               | HAL                       |
 |-----------------------|--------------------|---------------------------|
-| `SelectMode(1)`       | Profil `voicecall` | `AUDIO_MODE_IN_CALL`      |
-| `EnableSpeaker(false)`| `output-earpiece`  | Route `Earpiece`          |
-| `EnableSpeaker(true)` | `output-speaker`   | Route `Speaker`           |
-| `SelectMode(0)`       | Profil `default`   | `AUDIO_MODE_NORMAL`       |
+| `SelectMode(1)`       | profile `voicecall`| `AUDIO_MODE_IN_CALL`      |
+| `EnableSpeaker(false)`| `output-earpiece`  | route `Earpiece`          |
+| `EnableSpeaker(true)` | `output-speaker`   | route `Speaker`           |
+| `SelectMode(0)`       | profile `default`  | `AUDIO_MODE_NORMAL`       |
 
-**Am Geraet bestaetigt (2026-09-09)**: echtes Telefonat im Profil `pw-hal` -
-Klingelton hoerbar, beide Seiten hoeren einander, Lautsprecher-Taste schaltet
-hoerbar um, Medienwiedergabe danach unveraendert. Der Journalauszug dazu:
+**Confirmed on the device (2026-09-09)**: a real phone call in the `pw-hal`
+profile - ringtone audible, both sides hear each other, the speaker button
+switches audibly, media playback unchanged afterwards. The journal excerpt:
 
-    19:25:25  gnome-calls startet callaudiod
-    19:25:29  Profil voicecall -> AUDIO_MODE_IN_CALL -> Route Earpiece am HAL
-    19:25:41  Lautsprecher-Taste -> Route Speaker am HAL
-    19:25:48  wieder Ohrmuschel  -> Route Earpiece am HAL
-    19:25:50  Auflegen -> Profil default -> AUDIO_MODE_NORMAL
+    19:25:25  gnome-calls starts callaudiod
+    19:25:29  profile voicecall -> AUDIO_MODE_IN_CALL -> route Earpiece at the HAL
+    19:25:41  speaker button -> route Speaker at the HAL
+    19:25:48  back to earpiece -> route Earpiece at the HAL
+    19:25:50  hang up -> profile default -> AUDIO_MODE_NORMAL
 
-Damit callaudiod das tut, muss dreierlei stimmen, und jedes davon hat gekostet:
+For callaudiod to do this, three things have to be right, and every one of them
+cost time:
 
-- Der Sink muss `device.api = "droid-hal"` melden (die Kennung von
-  PulseAudios droid-Modul). Nur dann nimmt callaudiod seinen Droid-Pfad und
-  schaltet zwischen `default` und `voicecall`; mit `droid` faellt es auf den
-  ALSA-UCM-Weg zurueck, sucht Profile mit Praefix `HiFi`/`Voice Call` und tut
-  nichts ("set_card_profile: nothing to be done").
-- Die Profile muessen genau `default` und `voicecall` heissen.
-- Kabelports muessen als **nicht verfuegbar** gemeldet werden. Bei
-  Droid-Karten waehlt callaudiod sonst sofort das Headset - im Anruf landete
-  der Ton statt auf der Ohrmuschel im Nirgendwo. PulseAudio meldet sie auf
-  diesem Geraet ebenfalls als nicht verfuegbar; eine Klinkenerkennung gibt es
-  hier nicht (in `/sys/class/extcon` steht nur USB).
+- The sink has to report `device.api = "droid-hal"` (the identifier of
+  PulseAudio's droid module). Only then does callaudiod take its droid path and
+  switch between `default` and `voicecall`; with `droid` it falls back to the
+  ALSA UCM path, looks for profiles prefixed `HiFi`/`Voice Call` and does
+  nothing ("set_card_profile: nothing to be done").
+- The profiles have to be named exactly `default` and `voicecall`.
+- Wired ports have to be reported as **unavailable**. With droid cards
+  callaudiod otherwise grabs the headset immediately - during a call the audio
+  ended up nowhere instead of on the earpiece. PulseAudio reports them as
+  unavailable on this device as well; there is no jack detection here
+  (`/sys/class/extcon` only lists USB).
 
-## Als Paket
+## As a package
 
     ./packaging/build-deb.sh
     sudo dpkg -i packaging/furios-audio-pipewire_*.deb
 
-Das Paket bringt alles mit: Plugin, WirePlumber-Monitor und -Konfiguration,
-audioctl, die Umschalter-App samt Symbol, die systemd-Units. Es installiert
-nach `/usr`, die Skripte unten nach `/usr/local` - audioctl findet seine
-Dateien in beiden Pfaden.
+The package ships everything: the plugin, the WirePlumber monitor and
+configuration, audioctl, the switcher app with its icon, the systemd units. It
+installs into `/usr`, the scripts below into `/usr/local` - audioctl finds its
+files in both paths.
 
-Die Abhaengigkeit auf `pipewire (>= X, << X+1)` ist Absicht: das Plugin wird
-gegen eine bestimmte SPA-Schnittstelle gebaut. Bricht ein Update sie, waere der
-Ton sonst kommentarlos weg - so haelt apt das Paket zurueck, und `audioctl`
-warnt zusaetzlich vor dem Umschalten.
+The dependency on `pipewire (>= X, << X+1)` is deliberate: the plugin is built
+against a specific SPA interface. If an update breaks it the sound would
+otherwise disappear without a word - this way apt holds the package back, and
+`audioctl` warns before switching on top of that.
 
-Entfernen mit `sudo dpkg -r furios-audio-pipewire`. Steht dabei `pw-hal`
-persistent, warnt das Paket vorher - sonst waere nach dem naechsten Neustart
-kein Ton mehr da.
+Remove with `sudo dpkg -r furios-audio-pipewire`. If `pw-hal` is set
+persistently at that point, the package warns beforehand - otherwise there
+would be no sound after the next reboot.
 
-## Bauen
+## Building
 
-Die Upstream-Quellen werden nicht mitversioniert:
+The upstream sources are not versioned here:
 
     mkdir -p src && git clone https://github.com/FuriLabs/pulseaudio-modules-droid-modern \
-        src/pulseaudio-modules-droid-modern     # getestet mit d0e2330
+        src/pulseaudio-modules-droid-modern     # tested with d0e2330
 
     meson setup poc/spa-droid/build poc/spa-droid
     ninja -C poc/spa-droid/build
-    ./install-hal.sh        # braucht sudo, aendert das aktive Profil NICHT
+    ./install-hal.sh        # needs sudo, does NOT change the active profile
 
-Alternativ das Paket bauen (siehe oben) - das ist der Weg, der ein
-Systemupdate uebersteht.
+Alternatively build the package (see above) - that is the way that survives a
+system update.
 
-`poc/spa-droid/tools/port-droid-util.py` schneidet reproduzierbar die
-Funktionen aus `common/droid-util.c`, die PulseAudio-Graphobjekte
-dereferenzieren. Nach einem Upstream-Update erneut ausfuehren; das Skript
-meldet, wenn seine Muster nicht mehr passen.
+`poc/spa-droid/tools/port-droid-util.py` reproducibly cuts out the functions in
+`common/droid-util.c` that dereference PulseAudio graph objects. Run it again
+after an upstream update; the script reports when its patterns no longer match.
 
-## Aufbau
+## Structure
 
-`libspa-droid.so` exportiert drei Factories:
+`libspa-droid.so` exports three factories:
 
-- **`api.droid.device`** - die Karte. Liest die Android-Datei
-  `audio_policy_configuration.xml`, meldet Profile und Routen und erzeugt die
-  beiden Knoten. Die Routen heissen genau wie bei PulseAudios droid-card
-  (`output-earpiece`, `output-speaker`, `input-builtin_mic`), weil callaudiod
-  nach diesen Namen sucht.
-- **`api.droid.pcm`** - der Sink. `process()` schreibt in einen Ringpuffer,
-  ein eigener `writer_thread` ruft den HAL, weil `pa_droid_stream_write`
-  blockiert und deshalb nicht in den Graph-Thread darf.
-- **`api.droid.pcm.source`** - die Aufnahme, dasselbe rueckwaerts: ein
-  `reader_thread` ruft das blockierende `pa_droid_stream_read`.
+- **`api.droid.device`** - the card. Reads the Android file
+  `audio_policy_configuration.xml`, reports profiles and routes and creates the
+  two nodes. The routes are named exactly like PulseAudio's droid-card
+  (`output-earpiece`, `output-speaker`, `input-builtin_mic`), because
+  callaudiod looks for those names.
+- **`api.droid.pcm`** - the sink. `process()` writes into a ring buffer, a
+  separate `writer_thread` calls the HAL, because `pa_droid_stream_write`
+  blocks and therefore must not run on the graph thread.
+- **`api.droid.pcm.source`** - capture, the same thing backwards: a
+  `reader_thread` calls the blocking `pa_droid_stream_read`.
 
-`wireplumber/droid.lua` bindet das Device ein. Der Umweg ueber WirePlumber ist
-noetig: laesst man PipeWire das Device direkt aus `context.objects`
-instanziieren, entstehen rohe SPA-Knoten ohne Adapter - die haben keine
-Formatwandlung und erscheinen in pipewire-pulse gar nicht erst als Sink.
+`wireplumber/droid.lua` loads the device. The detour through WirePlumber is
+necessary: if PipeWire instantiates the device directly from `context.objects`,
+the result is raw SPA nodes without an adapter - those have no format
+conversion and never show up in pipewire-pulse as a sink.
 
-### Der Weg einer Routenaenderung
+### The path of a route change
 
     pactl set-sink-port droid-sink output-earpiece
-      -> Device (in WirePlumber): set_param(Route), merkt sich die Route
-      -> SERIAL-Bit kippt -> Ereignis device-params-changed
-      -> droid.lua reicht den Routennamen als SPA_PROP_params an den Knoten
-      -> Knoten (im PipeWire-Daemon): pa_droid_stream_set_route()
+      -> device (in WirePlumber): set_param(Route), remembers the route
+      -> SERIAL bit flips -> event device-params-changed
+      -> droid.lua passes the route name to the node as SPA_PROP_params
+      -> node (in the PipeWire daemon): pa_droid_stream_set_route()
 
-Der Umweg ist noetig, weil Device und Knoten in **verschiedenen Prozessen**
-laufen - nur der Knoten haelt den HAL-Stream.
+The detour is necessary because device and node run in **different processes** -
+only the node holds the HAL stream.
 
-## Fallen, die Zeit gekostet haben
+## Traps that cost time
 
-- **Ein Hardware-Sink muss den Graphen takten.** Ohne `spa_node_call_ready()`
-  aus einem eigenen timerfd ruft PipeWire `process()` nie auf - der Sink
-  erscheint, bleibt aber stumm.
-- **`spa_node_info.props` darf nicht NULL sein.** `module-adapter` reicht das
-  ungeprueft an `pw_properties_update` weiter und segfaultet.
-- **Ports muessen aus `hw->enabled_module` stammen.** `pa_droid_hw_module_get`
-  dupliziert die Konfiguration, `pa_droid_open_output_stream` vergleicht per
-  Zeigeridentitaet - Ports aus der eigenen Kopie werden immer abgelehnt.
-- **Nach dem Oeffnen fehlen sonst Routing und Pegel**: ohne
-  `pa_droid_stream_set_route()` und `set_volume(1.0)` bleibt der Stream stumm.
-- **Node-Tests ohne Adapter sind unvollstaendig** - `probe-droid-node` spricht
-  den Node direkt an und uebergeht genau die Schicht, die abgestuerzt ist.
-- **Param-Aenderungen meldet man ueber das SERIAL-Bit**, nicht ueber das Feld
-  `user` daneben: `params[i].flags ^= SPA_PARAM_INFO_SERIAL`. Ohne das erfaehrt
-  niemand von der neuen Route - PipeWire liefert Clients weiter den alten
-  zwischengespeicherten Wert, und WirePlumbers Routenpolitik ueberschreibt die
-  Auswahl gleich wieder.
-- **Puffergroesse ist das Graph-Quantum, nicht die HAL-Periode.** Beim Ausgang
-  sind beide zufaellig 4096 B, beim Eingang liefert der HAL 3840 B - ein zu
-  kleiner Puffer laesst libspa-audioconvert abstuerzen.
-- **`spa_log_info` ist unter PipeWires Standard-Loglevel unsichtbar.**
-  Diagnose einschalten mit:
+- **A hardware sink has to drive the graph.** Without `spa_node_call_ready()`
+  from its own timerfd PipeWire never calls `process()` - the sink appears but
+  stays silent.
+- **`spa_node_info.props` must not be NULL.** `module-adapter` passes it to
+  `pw_properties_update` unchecked and segfaults.
+- **Ports have to come from `hw->enabled_module`.** `pa_droid_hw_module_get`
+  duplicates the configuration, `pa_droid_open_output_stream` compares by
+  pointer identity - ports from your own copy are always rejected.
+- **Without them, routing and level are missing after opening**: without
+  `pa_droid_stream_set_route()` and `set_volume(1.0)` the stream stays silent.
+- **Node tests without an adapter are incomplete** - `probe-droid-node` talks to
+  the node directly and skips exactly the layer that crashed.
+- **Param changes are announced via the SERIAL bit**, not via the neighbouring
+  `user` field: `params[i].flags ^= SPA_PARAM_INFO_SERIAL`. Without that nobody
+  learns about the new route - PipeWire keeps handing clients the old cached
+  value, and WirePlumber's route policy overwrites the selection right away.
+- **The buffer size is the graph quantum, not the HAL period.** On output both
+  happen to be 4096 B, on input the HAL delivers 3840 B - too small a buffer
+  makes libspa-audioconvert crash.
+- **`spa_log_info` is invisible below PipeWire's default log level.** Turn
+  diagnostics on with:
 
       systemctl --user set-environment SPA_DROID_DIAG=1
 
-## Umschalten per Knopfdruck
+## Switching at the push of a button
 
     ./gui/install.sh
 
-Installiert einen kleinen GTK4/libadwaita-Umschalter samt Symbol und
-Startereintrag ("Audio Switch" im Anwendungsraster; die Oberflaeche ist
-englisch). Ein Schalter fuer
-den Stack, darunter was tatsaechlich laeuft, und ein Knopf **Ton
-wiederherstellen** - der stellt den Auslieferungszustand her, schaltet auf den
-Lautsprecher, hebt die Stummschaltung auf und setzt eine hoerbare Lautstaerke.
-Genau die Kombination, die nach einem misslungenen Test wie "gar nichts geht
-mehr" aussieht.
+Installs a small GTK4/libadwaita switcher with its icon and launcher entry
+("Audio Switch" in the app grid). One switch for the stack, underneath it what
+is actually running, and a **Restore sound** button - that returns to the
+shipped state, switches to the speaker, unmutes and sets an audible volume.
+Exactly the combination that looks like "nothing works any more" after a failed
+test.
 
-Standardmaessig merkt sich der Schalter die Auswahl **nicht**: ein Neustart
-fuehrt zum Auslieferungszustand zurueck. Wer es anders will, legt vorher den
-zweiten Schalter um.
+By default the switcher does **not** remember the choice: a reboot returns to
+the shipped state. If you want otherwise, flip the second switch first.
 
-Waehrend des Umschaltens laeuft ein **pulsierender Fortschrittsbalken**, in dem
-steht, was audioctl gerade meldet - die Zeilen werden gelesen, waehrend das
-Programm noch laeuft. Bewusst ohne Prozentzahl: wie lange es dauert, weiss
-vorher niemand, denn audioctl wartet bis zu 15 Sekunden auf einen Sink. Eine
-erfundene Zahl, die bei 90 % haengen bleibt, waere schlechter als gar keine.
+While switching, a **pulsing progress bar** shows what audioctl is currently
+reporting - the lines are read while the program is still running. Deliberately
+without a percentage: nobody knows in advance how long it takes, because
+audioctl waits up to 15 seconds for a sink. An invented number stuck at 90 %
+would be worse than none at all.
 
-## VoIP und Mikrofonwahl
+## VoIP and microphone selection
 
-Die Karte bietet vier Knoten: `droid-sink`/`droid-source` fuer alles Normale
-und `droid-voip-sink`/`droid-voip-source` fuer den VoIP-Pfad des HAL
-(mixPorts `voip_rx`/`voip_tx`). Letztere haben niedrige Prioritaet - dort
-landet nichts versehentlich. Ihre Aufnahme benutzt die Android-Audioquelle
-`voice communication`, fuer die der HAL seine Sprachaufbereitung einschaltet.
+The card offers four nodes: `droid-sink`/`droid-source` for everything normal
+and `droid-voip-sink`/`droid-voip-source` for the HAL's VoIP path (mix ports
+`voip_rx`/`voip_tx`). The latter have low priority - nothing ends up there by
+accident. Their capture uses the Android audio source `voice communication`,
+for which the HAL turns on its voice processing.
 
-Zwei Eigenheiten, die dabei Blut gekostet haben:
+Two quirks that drew blood:
 
-- **Routen nur auf dem primaeren Strom.** `pa_droid_stream_set_route()` prueft
-  das mit einer Zusicherung und **bricht den ganzen Prozess ab**, wenn man es
-  auf einem anderen mixPort versucht. Der VoIP-Knoten riss PipeWire so
-  reproduzierbar mit (SIGABRT). Das Routing gilt ohnehin fuer alle offenen
-  Stroeme - der primaere gibt es vor.
-- **16 kHz, nicht 48.** Der portierte Code erzwingt fuer `voip_rx` genau das
-  ("Override voip_rx channel map (mono) and sample rate (16000)"). Der Knoten
-  richtet sich deshalb nach `audio.rate` aus seinen Eigenschaften, statt stur
-  48 kHz anzubieten - sonst schriebe er mit dreifacher Geschwindigkeit hinein.
+- **Routing only on the primary stream.** `pa_droid_stream_set_route()` checks
+  that with an assertion and **aborts the whole process** if you try it on a
+  different mix port. The VoIP node reproducibly took PipeWire down that way
+  (SIGABRT). Routing applies to all open streams anyway - the primary one sets
+  it.
+- **16 kHz, not 48.** The ported code enforces exactly that for `voip_rx`
+  ("Override voip_rx channel map (mono) and sample rate (16000)"). The node
+  therefore follows `audio.rate` from its properties instead of stubbornly
+  offering 48 kHz - otherwise it would write into it at three times the speed.
 
-`wireplumber/droid-input-follows-output.lua` laesst das Mikrofon der
-Ausgabewahl folgen, wenn beide Enden zum selben Geraet gehoeren. Ohne das
-bleibt das Mikrofon beim Telefon, sobald callaudiod Sink und Source einmal
-festgenagelt hat.
+`wireplumber/droid-input-follows-output.lua` makes the microphone follow the
+output selection when both ends belong to the same device. Without it the
+microphone stays on the phone as soon as callaudiod has pinned sink and source
+once.
 
-## Echo im Gespraech
+## Echo during a call
 
-Die Gegenseite hoert sich selbst? Software hilft dagegen nicht: bei einem
-Mobilfunkgespraech laeuft der Sprachweg **Modem <-> DSP**, nicht ueber den
-Rechner - eine Echounterdrueckung in PipeWire oder PulseAudio saehe die Daten
-nie. Die Unterdrueckung sitzt im DSP und heisst bei MediaTek **DMNR**
-(Zweimikrofonverfahren gegen Stoergeraeusche und Echo).
+Does the far end hear itself? Software does not help: in a cellular call the
+voice path runs **modem <-> DSP**, not through the host - an echo canceller in
+PipeWire or PulseAudio would never see the data. The cancellation lives in the
+DSP and MediaTek calls it **DMNR** (dual-microphone noise and echo reduction).
 
-Die Abstimmungsdatei des Herstellers sagt auf diesem Geraet:
+On this device the vendor's tuning file says:
 
-    MTK_DUAL_MIC_SUPPORT         yes   zwei Mikrofone sind vorhanden
-    MTK_HANDSFREE_DMNR_SUPPORT   yes   der Chip kann Freisprech-DMNR
-    MTK_INCALL_HANDSFREE_DMNR    no    im Anruf ist sie abgeschaltet
+    MTK_DUAL_MIC_SUPPORT         yes   two microphones are present
+    MTK_HANDSFREE_DMNR_SUPPORT   yes   the chip can do handsfree DMNR
+    MTK_INCALL_HANDSFREE_DMNR    no    during a call it is disabled
     MTK_VOIP_HANDSFREE_DMNR      no
     MTK_VOIP_NORMAL_DMNR         no
 
-Zum Ausprobieren gibt es einen Schalter - in der Umschalter-App unter "Call
-echo", oder auf der Kommandozeile:
+There is a switch to try it - in the switcher app under "Call echo", or on the
+command line:
 
-    furios-audio-dmnr an       # geaenderte Kopie einhaengen
-    furios-audio-dmnr aus      # zurueck zum Original
+    furios-audio-dmnr on       # mount the modified copy
+    furios-audio-dmnr off      # back to the original
     furios-audio-dmnr status
 
-Er legt per Bind-Mount eine geaenderte Kopie ueber die Datei - die Partition
-ist schreibgeschuetzt und per dm-verity abgesichert, daran wird nicht
-geschraubt - und startet den Audiostack neu (`audioctl restart`, das Profil
-bleibt), damit der HAL sie liest. Ein Neustart des Geraets raeumt alles weg.
-**Ob es hilft, ist ungetestet** - das kann nur ein echtes Gespraech zeigen.
+It lays a modified copy over the file with a bind mount - the partition is
+read-only and protected by dm-verity, and is left alone - and restarts the
+audio stack (`audioctl restart`, the profile stays) so the HAL reads it. A
+reboot of the device clears everything away. **Whether it helps is untested** -
+only a real call can show that.
 
-Zwei Spuren, die sich als Sackgasse erwiesen haben:
+Two leads that turned out to be dead ends:
 
-- `realcall=on`, das PulseAudios Kartenmodul beim Anrufprofil schickt, **lehnt
-  dieser HAL ab** (`failed: -22`). Offenbar Qualcomm-Erbe. Der Code dafuer ist
-  da, die Option aber aus.
-- `speaker_before_voice=true` ist dagegen aktiv: der HAL routet jetzt vor dem
-  Moduswechsel kurz auf den Lautsprecher, wie es upstream fuer Geraete
-  empfiehlt, die den Anruf sonst falsch beginnen.
+- `realcall=on`, which PulseAudio's card module sends for the call profile, is
+  **rejected by this HAL** (`failed: -22`). Apparently a Qualcomm legacy. The
+  code for it is there, the option is off.
+- `speaker_before_voice=true` on the other hand is active: the HAL now briefly
+  routes to the speaker before the mode change, as upstream recommends for
+  devices that otherwise start a call wrongly.
 
 ## Bluetooth
 
-Damit PipeWire Bluetooth-Audio kann, muss `libspa-0.2-bluetooth` installiert
-sein - ohne das Paket gibt es gar keine BT-Unterstuetzung, WirePlumber meldet
-nur "BlueZ SPA plugin is missing or broken".
+For PipeWire to do Bluetooth audio, `libspa-0.2-bluetooth` has to be installed
+- without that package there is no BT support at all, WirePlumber only reports
+"BlueZ SPA plugin is missing or broken".
 
-**A2DP (Musik) funktioniert. Freisprechen (HFP) nicht - und zwar auf keinem
-Stack, auch nicht im Auslieferungszustand.** Nachgemessen:
+**A2DP (music) works. Hands-free (HFP) does not - on no stack, not even in the
+shipped state.** Measured:
 
-- ofono besitzt HFP: `hfp_ag_bluez5` ist fest eingebaut, `/bluetooth/profile/hfp_ag`
-  ist bei BlueZ registriert. PipeWires nativer Backend scheitert daneben an
-  `listen(): Address already in use` und `RegisterProfile() failed: NotPermitted`.
-- ofono legt fuer den verbundenen Kopfhoerer trotzdem keine Karte an
-  (`HandsfreeAudioManager.GetCards` bleibt leer).
-- Auf dem Auslieferungs-PulseAudio ist das Ergebnis dasselbe: `handsfree_head_unit`
-  laesst sich waehlen, die Quelle geht auf `RUNNING` und liefert **0 Bytes**;
-  `paplay` in die Gegenrichtung blockiert.
-- Die HAL-Konfiguration kennt BT-SCO-Geraeteports, aber weder unsere Karte noch
-  die von PulseAudio fuehren sie: auf Android-Geraeten laeuft SCO in Hardware
-  zwischen BT-Chip und Audio-DSP, nicht ueber den Rechner.
+- ofono owns HFP: `hfp_ag_bluez5` is built in, `/bluetooth/profile/hfp_ag` is
+  registered with BlueZ. Next to it PipeWire's native backend fails with
+  `listen(): Address already in use` and
+  `RegisterProfile() failed: NotPermitted`.
+- ofono still creates no card for the connected headset
+  (`HandsfreeAudioManager.GetCards` stays empty).
+- On the shipped PulseAudio the result is the same: `handsfree_head_unit` can be
+  selected, the source goes to `RUNNING` and delivers **0 bytes**; `paplay` in
+  the other direction blocks.
+- The HAL configuration knows BT SCO device ports, but neither our card nor
+  PulseAudio's exposes them: on Android devices SCO runs in hardware between the
+  BT chip and the audio DSP, not through the host.
 
-Deshalb bleibt es beim **ofono-Backend**: mit `native` erscheinen HFP-Profile,
-die stumm bleiben, und WirePlumber schaltet beim ersten Aufnahmeversuch dorthin
-um - was auch die Musikwiedergabe verdirbt.
+`51-bluez-ofono.conf` therefore sets the **native** backend - not for audio
+through the host, but because only then does the card offer a hands-free
+profile at all, and only then does the headset establish an SCO channel. The
+Android path needs that channel: the HAL puts the voice path onto the Bluetooth
+PCM line via `BT_SCO=on`, and that line only carries while the connection is
+up. See `audioctl bt-call`.
 
-**`priority.session` muss am Knoten gesetzt sein.** Fehlt sie, faellt
-WirePlumbers Geraetewahl auf `priority.driver` zurueck - und der ist hier
-50000, damit der Sink den Graphen taktet. Damit schlaegt der Knoten sogar eine
-ausdrueckliche Benutzerwahl, die mit 30000 gewichtet wird: es liesse sich
-ueberhaupt kein anderes Ausgabegeraet mehr auswaehlen, kein
-Bluetooth-Kopfhoerer, nichts. Das Symptom ist tueckisch, weil die Auswahl in
-der Oberflaeche einfach wirkungslos bleibt, ohne Fehlermeldung.
+**`priority.session` has to be set on the node.** Without it WirePlumber's
+device selection falls back to `priority.driver` - and that is 50000 here, so
+the sink drives the graph. That makes the node beat even an explicit user
+choice, which is weighted 30000: no other output device could be selected at
+all, no Bluetooth headphones, nothing. The symptom is nasty because the
+selection in the UI simply has no effect, without any error message.
 
-**Nach einem Profilwechsel den Kopfhoerer einmal neu verbinden.** audioctl
-startet WirePlumber neu; ein Geraet, das die Verbindung schon vorher hatte,
-registriert seine Profile nicht vollstaendig neu - die Karte zeigt dann nur
-einen Teil (etwa nur HFP, kein A2DP). Nach `bluetoothctl disconnect` und
-`connect` sind beide da.
+**Reconnect the headset once after a profile switch.** audioctl restarts
+WirePlumber; a device that was already connected before does not fully
+re-register its profiles - the card then shows only part of them (say only HFP,
+no A2DP). After `bluetoothctl disconnect` and `connect` both are there.
 
-## Testen ohne Installation
+## Testing without installing
 
     ninja -C poc/spa-droid/build
-    # build/spa-merged/: Symlinks auf alle System-SPA-Plugins plus unser droid/
+    # build/spa-merged/: symlinks to all system SPA plugins plus our droid/
     SPA_PLUGIN_DIR=.../spa-merged pipewire -c poc/spa-droid/test-crash.conf
     PIPEWIRE_REMOTE=pipewire-droidtest pw-cli ls Node
 
-`spa-inspect` taugt dafuer **nicht**: es dlopen't sein Argument direkt und
-fragt `SPA_PLUGIN_DIR` gar nicht.
+`spa-inspect` is **not** suitable for this: it dlopen's its argument directly
+and never consults `SPA_PLUGIN_DIR`.

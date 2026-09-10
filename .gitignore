@@ -4,14 +4,14 @@ poc/spa-droid/generated/
 *.o
 *.so
 
-# Upstream-Quellen: eigener Klon, siehe README (nicht mitversionieren)
+# Upstream sources: cloned separately, see README (not versioned here)
 src/pulseaudio-modules-droid-modern/
 
-# Erzeugte Konfiguration (entsteht aus der FuriOS-Vorlage)
+# Generated configuration (derived from the FuriOS template)
 pipewire-hal.conf
 
-# Testaufnahmen und Bauartefakte gehoeren nicht ins Repo - eine Mikrofon-
-# aufnahme aus einem Testlauf ist Umgebungston des Besitzers.
+# Test recordings and build artefacts do not belong in the repo - a
+# microphone recording from a test run is the owner's ambient audio.
 *.wav
 *.deb
 __pycache__/

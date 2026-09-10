@@ -1,5 +1,5 @@
-/* Implementierungen der PulseAudio-Hilfsfunktionen, die der portierte
- * droid-Code aufruft. Ersetzt pulsecore fuer den SPA-Port. */
+/* Implementations of the PulseAudio helper functions the ported droid code
+ * calls. Replaces pulsecore for the SPA port. */
 #include <stdlib.h>
 #include <string.h>
 #include "pulse/xmalloc.h"

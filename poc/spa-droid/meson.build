@@ -2,22 +2,19 @@ project('spa-droid', 'c',
   version : '0.1',
   default_options : ['c_std=gnu11', 'warning_level=1'])
 
-# Aus dem Projektverzeichnis abgeleitet, damit ein Verschieben des
-# Arbeitsbaums nichts kaputtmacht. Ueber fs.parent statt '..', denn
-# include_directories() vertraegt keine Pfade mit .. darin.
+# Derived from the project directory so that moving the work tree does not
+# break anything. Via fs.parent rather than '..', because
+# include_directories() does not accept paths containing '..'.
 fs = import('fs')
 repo_root = fs.parent(fs.parent(meson.project_source_root()))
 droid_src = repo_root / 'src/pulseaudio-modules-droid-modern/src'
 
 cc = meson.get_compiler('c')
 expat_dep = dependency('expat')
-# TODO: pa_channel_map_*/pa_sample_spec_*/pa_proplist_* sind reine Utilities
-# aus libpulse (Client-Lib, nicht der Daemon). Fuer das fertige Plugin durch
-# SPA-Aequivalente ersetzen, dann faellt diese Abhaengigkeit weg.
-# Kein libpulse mehr: die 14 Kleinigkeiten, fuer die es noetig war
-# (Kanalkarten, Abtastformate, eine winzige Eigenschaftsliste), stehen in
-# compat/pa-audio.c. Die Kopfdateien von libpulse bleiben in Gebrauch - die
-# Typen muessen zusammenpassen -, nur der Programmcode kommt jetzt von uns.
+# No more libpulse: the 14 small things it was needed for (channel maps,
+# sample formats, a tiny property list) now live in compat/pa-audio.c. The
+# libpulse headers stay in use - the types have to match - only the code is
+# ours now.
 libpulse_dep = dependency('libpulse', required : false)
 pulse_inc = include_directories()
 hybris_dep = cc.find_library('hybris-common', required : false)
@@ -25,7 +22,7 @@ hw_dep = cc.find_library('hardware', required : false)
 
 android_inc = include_directories('/usr/include/android')
 
-# Android-Version des Geraets (Halium 11)
+# Android version of the device (Halium 11)
 add_project_arguments(
   ['-DANDROID_VERSION_MAJOR=11', '-DANDROID_VERSION_MINOR=0', '-DANDROID_VERSION_PATCH=0',
    '-DHAVE_CONFIG_H', '-Wno-attributes', '-Wno-int-conversion', '-Wno-unused-parameter'],
@@ -34,13 +31,13 @@ add_project_arguments(
 compat_inc = include_directories('compat')
 droid_inc  = include_directories(droid_src / 'common', droid_src / 'common/include')
 
-# droid-util.c: PA-Graph-Funktionen werden reproduzierbar ausgeschlossen
+# droid-util.c: PA graph functions are excluded reproducibly
 droid_util_spa = custom_target('droid-util-spa.c',
   input : droid_src / 'common/droid-util.c',
   output : 'droid-util-spa.c',
   command : [find_program('tools/port-droid-util.py'), '@INPUT@', '@OUTPUT@'])
 
-# Der ohne PulseAudio portierte Teil von common/
+# The part of common/ ported without PulseAudio
 droid_common = static_library('droid-common',
   [ droid_util_spa,
     'compat/pa-compat.c',

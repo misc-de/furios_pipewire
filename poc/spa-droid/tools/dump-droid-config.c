@@ -1,5 +1,5 @@
-/* Verifiziert den PulseAudio-freien Port: liest die echte audio_policy-XML
- * des Geraets mit dem portierten Parser und gibt aus, was der HAL anbietet. */
+/* Verifies the PulseAudio-free port: reads the device's real audio_policy XML
+ * with the ported parser and prints what the HAL offers. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +24,7 @@ static void print_port(dm_config_port *p) {
         }
         printf("      %-34s %-7s type=%#010x %-38s -> %s\n",
                p->name, role_str(p->role), p->type,
-               devname ? devname : "(unbekannt)", paname ? paname : "(kein PA-Port)");
+               devname ? devname : "(unknown)", paname ? paname : "(no PA port)");
     } else {
         char *flags = pa_list_string_flags(p->flags);
         printf("      %-34s %-7s flags=%#x %s\n",

@@ -1,7 +1,8 @@
 #!/bin/bash
-# audioctl - Umschalten zwischen FuriOS-Standard-Audiostack und eigenen Profilen.
-# Kein dpkg-Eigentum wird angefasst; alles laeuft ueber Masken in /etc/systemd/user
-# und additive Units unter /usr/local. Rueckweg ist immer 'audioctl revert'.
+# audioctl - switch between the stock FuriOS audio stack and our own profiles.
+# Nothing owned by dpkg is touched; everything works through masks in
+# /etc/systemd/user and additive units under /usr/local. The way back is always
+# 'audioctl revert'.
 
 set -u
 
@@ -10,8 +11,8 @@ STICKY=$STATE_DIR/profile
 TRY=$STATE_DIR/profile.try
 ETCU=/etc/systemd/user
 DROPIN=$ETCU/pipewire.service.d/50-furios-audio.conf
-# Dateien koennen aus zwei Quellen kommen: aus dem Quellbaum installiert
-# (/usr/local) oder aus dem Paket (/usr). Beides muss gefunden werden.
+# Files can come from two sources: installed from the source tree
+# (/usr/local) or from the package (/usr). Both have to be found.
 first_existing() {
     local f
     for f in "$@"; do [ -e "$f" ] && { printf '%s' "$f"; return 0; }; done
@@ -27,11 +28,11 @@ die()  { printf 'audioctl: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*"; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
 
-[ "$(id -un)" = root ] && die "bitte als Benutzer furios aufrufen, nicht als root (sudo wird intern verwendet)."
+[ "$(id -un)" = root ] && die "please run as the furios user, not as root (sudo is used internally)."
 
 uctl() { systemctl --user "$@"; }
 
-# --- Masken: Datei -> /dev/null anlegen bzw. entfernen -----------------------
+# --- masks: create or remove a file -> /dev/null link ------------------------
 mask()   { for u in "$@"; do run sudo ln -sf /dev/null "$ETCU/$u"; done; }
 unmask() { for u in "$@"; do [ -L "$ETCU/$u" ] && [ "$(readlink "$ETCU/$u")" = /dev/null ] && run sudo rm -f "$ETCU/$u"; done; }
 
@@ -41,9 +42,9 @@ current_profile() {
     printf 'standard'
 }
 
-# Was laeuft WIRKLICH? Die Vermerkdatei kann veralten - genau das hat beim
-# ersten Anruftest in die Irre gefuehrt: status meldete pw-hal, tatsaechlich
-# lief PulseAudio, und der Anruf pruefte den falschen Stack.
+# What is REALLY running? The state file can go stale - which is exactly what
+# misled the first call test: status reported pw-hal while PulseAudio was
+# actually running, and the call tested the wrong stack.
 effective_profile() {
     if uctl is-active pulseaudio.service >/dev/null 2>&1; then
         if uctl is-active furios-pw-tunnel.service >/dev/null 2>&1; then
@@ -54,107 +55,106 @@ effective_profile() {
     elif uctl is-active pipewire-pulse.service >/dev/null 2>&1; then
         printf 'pw-hal'
     else
-        printf 'unklar'
+        printf 'unclear'
     fi
 }
 
 pulse_owner() {
     local s
     s=$(pactl info 2>/dev/null | sed -n 's/^Server Name: //p')
-    [ -n "$s" ] && printf '%s' "$s" || printf 'nicht erreichbar'
+    [ -n "$s" ] && printf '%s' "$s" || printf 'not reachable'
 }
 
-# Passt das Plugin noch zur installierten PipeWire-Fassung?
+# Does the plugin still match the installed PipeWire version?
 #
-# Das Plugin wird gegen eine bestimmte SPA-Schnittstelle gebaut. Bricht ein
-# Systemupdate sie, waere pw-hal kommentarlos stumm - der Auto-Revert faengt
-# das zwar ab, aber eine Warnung vorher erspart die Suche.
+# The plugin is built against a specific SPA interface. If a system update
+# breaks it, pw-hal would go silent without a word - the auto-revert catches
+# that, but a warning beforehand saves the search.
 plugin_version_check() {
     local dir=/usr/lib/aarch64-linux-gnu/spa-0.2/droid built now
-    [ -r "$dir/gebaut-gegen" ] || return 0
-    built=$(cat "$dir/gebaut-gegen")
+    [ -r "$dir/built-against" ] || return 0
+    built=$(cat "$dir/built-against")
     now=$(pkg-config --modversion libpipewire-0.3 2>/dev/null)
     [ -n "$now" ] || now=$(pipewire --version 2>/dev/null | sed -n 's/.*libpipewire \([0-9.]*\).*/\1/p' | head -1)
     [ -n "$now" ] || return 0
     if [ "$built" != "$now" ]; then
-        printf 'WARNUNG: Das Plugin wurde gegen PipeWire %s gebaut, installiert ist %s.\n' \
+        printf 'WARNING: the plugin was built against PipeWire %s, installed is %s.\n' \
             "$built" "$now" >&2
-        printf '         Wenn kein Ton kommt: im Projektverzeichnis neu bauen und\n' >&2
-        printf '         ./install-hal.sh erneut ausfuehren.\n' >&2
+        printf '         If there is no sound: rebuild in the project directory and\n' >&2
+        printf '         run ./install-hal.sh again.\n' >&2
     fi
     return 0
 }
 
-# Der Droid-Monitor von WirePlumber darf nur laufen, wenn PipeWire den HAL
-# auch halten soll. Im Profil pw-tunnel haelt ihn PulseAudio - wuerde der
-# Monitor dort starten, riefe er nach demselben Geraet.
+# WirePlumber's droid monitor may only run when PipeWire is meant to hold the
+# HAL. In the pw-tunnel profile PulseAudio holds it - if the monitor started
+# there it would reach for the same device.
 WPCONF=$(first_existing /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf \
                         /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf \
-                        /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf.aus \
-                        /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf.aus)
-WPCONF=${WPCONF%.aus}
+                        /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf.off \
+                        /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf.off)
+WPCONF=${WPCONF%.off}
 droid_monitor() {
     case "$1" in
-    an)  [ -e "$WPCONF.aus" ] && run sudo mv "$WPCONF.aus" "$WPCONF" ;;
-    aus) [ -e "$WPCONF" ]     && run sudo mv "$WPCONF" "$WPCONF.aus" ;;
+    on)  [ -e "$WPCONF.off" ] && run sudo mv "$WPCONF.off" "$WPCONF" ;;
+    off) [ -e "$WPCONF" ]     && run sudo mv "$WPCONF" "$WPCONF.off" ;;
     esac
     return 0
 }
 
-# --- Vorbedingungen je Profil ----------------------------------------------
+# --- preconditions per profile ---------------------------------------------
 preflight() {
     case "$1" in
     standard) : ;;
     pw-tunnel)
         [ -e /usr/lib/aarch64-linux-gnu/pipewire-0.3/libpipewire-module-pulse-tunnel.so ] \
-            || die "libpipewire-module-pulse-tunnel.so fehlt."
-        [ -e "$LOCAL/tunnel.conf" ] || die "$LOCAL/tunnel.conf fehlt."
+            || die "libpipewire-module-pulse-tunnel.so is missing."
+        [ -e "$LOCAL/tunnel.conf" ] || die "$LOCAL/tunnel.conf is missing."
         ;;
     pw-hal)
         plugin_version_check
         [ -e /usr/lib/aarch64-linux-gnu/spa-0.2/droid/libspa-droid.so ] \
-            || die "SPA-Droid-Plugin noch nicht gebaut - Profil pw-hal ist bis dahin gesperrt."
+            || die "SPA droid plugin not built yet - the pw-hal profile stays locked until then."
         command -v wireplumber >/dev/null \
-            || die "wireplumber nicht installiert (apt install wireplumber)."
+            || die "wireplumber is not installed (apt install wireplumber)."
         ;;
-    *) die "unbekanntes Profil '$1'. Bekannt: $PROFILES" ;;
+    *) die "unknown profile '$1'. Known: $PROFILES" ;;
     esac
 }
 
-# --- Profile anwenden -------------------------------------------------------
+# --- apply profiles ---------------------------------------------------------
 apply() {
     local p=$1
     case "$p" in
     standard)
-        droid_monitor an
+        droid_monitor on
         run uctl stop furios-pw-tunnel.service 2>/dev/null
         run uctl disable furios-pw-tunnel.service 2>/dev/null
-        # Maskieren stoppt einen LAUFENDEN Dienst nicht - erst stoppen,
-        # sonst haelt pipewire-pulse weiter den Pulse-Socket.
+        # Masking does not stop a RUNNING service - stop it first, otherwise
+        # pipewire-pulse keeps holding the Pulse socket.
         run uctl stop pipewire-pulse.service pipewire-pulse.socket 2>/dev/null
         run uctl stop wireplumber.service 2>/dev/null
         mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
         unmask pulseaudio.service pulseaudio.socket
         run sudo rm -f "$DROPIN"
         run uctl daemon-reload
-        # Ein gescheitertes pw-hal laesst pipewire in 'failed' zurueck - ohne
-        # reset-failed bliebe die Kamera tot. Erst zuruecksetzen, dann starten.
+        # A failed pw-hal leaves pipewire in 'failed' - without reset-failed
+        # the camera would stay dead. Reset first, then start.
         run uctl reset-failed pipewire.service 2>/dev/null
         run uctl restart pipewire.service
-        # restart statt start: pipewire-pulse nimmt den Socket beim Beenden mit,
-        # ein blosses start wuerde ihn nicht neu anlegen.
+        # restart rather than start: pipewire-pulse takes the socket down with
+        # it, so a plain start would not recreate it.
         run uctl restart pulseaudio.socket pulseaudio.service
         ;;
     pw-tunnel)
-        # PulseAudio behaelt HAL und Pulse-Socket. PipeWire bekommt zusaetzlich
-        # einen Tunnel-Sink. Telefonie bleibt unberuehrt.
+        # PulseAudio keeps the HAL and the Pulse socket. PipeWire additionally
+        # gets a tunnel sink. Telephony is untouched.
         #
-        # WirePlumber MUSS hier laufen: ohne Sitzungsverwalter verknuepft
-        # niemand die Stroeme, und der Tunnel-Sink bliebe unbenutzt - genau
-        # daran ist dieses Profil beim ersten Test gescheitert. Sein
-        # Droid-Monitor bleibt dabei aus, sonst riefe er nach dem HAL, den
-        # PulseAudio haelt.
-        droid_monitor aus
+        # WirePlumber MUST run here: without a session manager nobody links the
+        # streams and the tunnel sink would stay unused - which is exactly how
+        # this profile failed on its first test. Its droid monitor stays off,
+        # otherwise it would reach for the HAL that PulseAudio holds.
+        droid_monitor off
         mask   pipewire-pulse.service pipewire-pulse.socket
         unmask pulseaudio.service pulseaudio.socket wireplumber.service
         run sudo rm -f "$DROPIN"
@@ -164,19 +164,20 @@ apply() {
         run uctl enable --now furios-pw-tunnel.service
         ;;
     pw-hal)
-        # PipeWire uebernimmt den HAL. PulseAudio muss weichen (HAL ist exklusiv).
-        droid_monitor an
+        # PipeWire takes over the HAL. PulseAudio has to give way (the HAL is
+        # exclusive).
+        droid_monitor on
         run uctl stop furios-pw-tunnel.service 2>/dev/null
         run uctl disable furios-pw-tunnel.service 2>/dev/null
         run uctl stop pulseaudio.service pulseaudio.socket
         mask   pulseaudio.service pulseaudio.socket
         unmask pipewire-pulse.service pipewire-pulse.socket wireplumber.service
         run sudo mkdir -p "$ETCU/pipewire.service.d"
-        # Den systemd-Zusatz erzeugen statt eine feste Datei zu verlinken:
-        # der Pfad zur Konfiguration haengt davon ab, ob aus dem Quellbaum
-        # (/usr/local) oder aus dem Paket (/usr) installiert wurde.
+        # Generate the systemd drop-in instead of linking a fixed file: the
+        # path to the configuration depends on whether the install came from
+        # the source tree (/usr/local) or from the package (/usr).
         if [ "$DRY" = 1 ]; then
-            printf '  [Trockenlauf] %s schreiben (-c %s/pipewire-hal.conf)\n' \
+            printf '  [dry run] write %s (-c %s/pipewire-hal.conf)\n' \
                 "$DROPIN" "$LOCAL"
         else
             printf '[Service]\nExecStart=\nExecStart=/usr/bin/pipewire -c %s/pipewire-hal.conf\n' \
@@ -189,7 +190,7 @@ apply() {
     esac
 }
 
-# --- Verifikation: gibt es einen brauchbaren Sink? --------------------------
+# --- verification: is there a usable sink? ----------------------------------
 verify() {
     local i=0
     while [ $i -lt 15 ]; do
@@ -199,28 +200,27 @@ verify() {
     return 1
 }
 
-# callaudiod und feedbackd halten dauerhafte Verbindungen zum Audioserver.
-# Beim Profilwechsel wechselt der Server - danach findet callaudiod keine
-# Karte mehr ("No suitable card found") und feedbackd scheitert an
-# "Invalid state": kein Klingelton, nur noch Vibration. Beenden genuegt,
-# D-Bus startet beide beim naechsten Aufruf neu.
+# callaudiod and feedbackd hold persistent connections to the audio server.
+# A profile switch changes the server - afterwards callaudiod finds no card any
+# more ("No suitable card found") and feedbackd fails with "Invalid state": no
+# ringtone, only vibration. Killing them is enough, D-Bus starts both again on
+# the next call.
 restart_audio_clients() {
     local restarted=""
     pkill -x callaudiod 2>/dev/null && restarted="callaudiod"
     pkill -x feedbackd  2>/dev/null && restarted="${restarted:+$restarted, }feedbackd"
-    [ -n "$restarted" ] && info "neu gestartet: $restarted (D-Bus aktiviert sie bei Bedarf)"
+    [ -n "$restarted" ] && info "restarted: $restarted (D-Bus activates them on demand)"
     return 0
 }
 
-# Das Sicherheitsnetz muss aktiv sein: es verwirft beim Neustart ein
-# Testprofil. Aus einem Paket heraus kann das niemand einschalten - eine
-# Benutzer-Unit aktiviert nur der Benutzer selbst. Also hier, beim ersten
-# Umschalten.
+# The safety net has to be enabled: it discards a test profile on reboot.
+# A package cannot enable it - a user unit is only enabled by the user
+# themselves. So it happens here, on the first switch.
 ensure_safety_net() {
     uctl is-enabled furios-audio-apply.service >/dev/null 2>&1 && return 0
     if uctl cat furios-audio-apply.service >/dev/null 2>&1; then
         run uctl enable furios-audio-apply.service >/dev/null 2>&1 \
-            && info "Sicherheitsnetz aktiviert (verwirft Testprofile beim Neustart)"
+            && info "safety net enabled (discards test profiles on reboot)"
     fi
     return 0
 }
@@ -230,48 +230,46 @@ switch_to() {
     prev=$(current_profile)
     ensure_safety_net
     preflight "$p"
-    printf 'Wechsel: %s -> %s (%s)\n' "$prev" "$p" "$mode"
+    printf 'switching: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"
-    [ "$DRY" = 1 ] && { echo "Trockenlauf beendet, nichts geaendert."; return 0; }
+    [ "$DRY" = 1 ] && { echo "dry run finished, nothing changed."; return 0; }
 
     restart_audio_clients
 
     if verify; then
-        info "OK - Sink vorhanden: $(pactl list sinks short | awk '{print $2}' | paste -sd, -)"
-        info "Pulse-Server: $(pulse_owner)"
+        info "OK - sink present: $(pactl list sinks short | awk '{print $2}' | paste -sd, -)"
+        info "Pulse server: $(pulse_owner)"
         case "$mode" in
         sticky) mkdir -p "$STATE_DIR"; printf '%s\n' "$p" > "$STICKY"; rm -f "$TRY"
-                info "persistent gesetzt (ueberlebt Neustart)" ;;
+                info "set persistently (survives a reboot)" ;;
         try)    mkdir -p "$STATE_DIR"; printf '%s\n' "$p" > "$TRY"
-                info "nur bis zum naechsten Neustart - danach wieder '$(cat "$STICKY" 2>/dev/null || echo standard)'" ;;
+                info "only until the next reboot - then back to '$(cat "$STICKY" 2>/dev/null || echo standard)'" ;;
         esac
-        [ "$p" != standard ] && info "Telefonie bitte pruefen: Anruf, Klingelton, Ohrmuschel/Lautsprecher."
+        [ "$p" != standard ] && info "please check telephony: call, ringtone, earpiece/speaker."
         return 0
     fi
 
-    printf 'FEHLGESCHLAGEN - kein Sink nach 15s. Falle auf standard zurueck.\n' >&2
+    printf 'FAILED - no sink after 15s. Falling back to standard.\n' >&2
     apply standard
     rm -f "$TRY"
-    verify && info "standard wiederhergestellt." || info "ACHTUNG: auch standard liefert keinen Sink."
+    verify && info "standard restored." || info "WARNING: standard does not deliver a sink either."
     return 1
 }
 
-# --- Anruf auf ein Bluetooth-Headset legen ---------------------------------
+# --- put a call on a Bluetooth headset -------------------------------------
 #
-# callaudiod kennt nur Ohrmuschel und Lautsprecher. Fuer ein Headset muss
-# zweierlei zusammenkommen: der Kopfhoerer im Freisprechprofil (damit ein
-# SCO-Kanal steht) und die Telefonkarte auf die Route output-bluetooth_sco
-# (damit der HAL BT_SCO=on schickt und den Sprachpfad dorthin legt).
+# callaudiod only knows earpiece and speaker. For a headset two things have to
+# come together: the headset in its hands-free profile (so an SCO channel is
+# up) and the phone card on the route output-bluetooth_sco (so the HAL sends
+# BT_SCO=on and puts the voice path there).
 #
-# Die BT-Ports fehlen in der audio_policy-XML dieses Geraets - sie sind
-# auskommentiert. Unser Plugin baut sie selbst; der HAL braucht die Datei
-# nicht, er bekommt beim Routen nur den Geraetetyp.
-# Schreibt zusaetzlich ins Journal - beim Anruftest sitzt niemand vor dem
-# Terminal, und hinterher will man wissen, was wirklich passiert ist:
-#   journalctl --user -t audioctl --since -10min
-# Aktive Ports des jeweiligen Stacks. Die Knoten heissen unterschiedlich:
-# unter pw-hal droid-sink/droid-source, im Auslieferungszustand
-# sink.primary_output und die droid-Quelle von PulseAudio.
+# The BT ports are missing from this device's audio_policy XML - they are
+# commented out. Our plugin builds them itself; the HAL does not need the
+# file, when routing it only gets the device type.
+#
+# Active ports of the respective stack. The nodes are named differently: under
+# pw-hal droid-sink/droid-source, in the shipped state sink.primary_output and
+# PulseAudio's droid source.
 port_of() {
     local kind=$1 name
     for name in $2; do
@@ -291,8 +289,8 @@ droid_profile() {
     pactl list cards 2>/dev/null | sed -n '/Name: droid$/,/^$/p' | sed -n 's/.*Active Profile: //p'
 }
 
-# Schreibt zusaetzlich ins Journal - beim Anruftest sitzt niemand vor dem
-# Terminal, und hinterher will man wissen, was wirklich passiert ist:
+# Also writes to the journal - during a call test nobody is sitting at the
+# terminal, and afterwards you want to know what really happened:
 #   journalctl --user -t audioctl --since -10min
 btlog() {
     printf '%s\n' "$*"
@@ -300,69 +298,69 @@ btlog() {
     return 0
 }
 
-# Kopfhoerer ins Freisprechprofil zwingen, damit ein SCO-Kanal steht.
+# Force the headset into its hands-free profile so an SCO channel is up.
 bt_headset_profile() {
     local card=$1 want=$2 prof
     [ -n "$card" ] || return 1
     if [ "$want" = headset ]; then
-        pactl set-card-profile "$card" headset-head-unit 2>/dev/null && { btlog "bt-call: Kopfhoererprofil headset-head-unit"; return 0; }
-        pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null && { btlog "bt-call: Kopfhoererprofil headset-head-unit-cvsd (Schmalband)"; return 0; }
+        pactl set-card-profile "$card" headset-head-unit 2>/dev/null && { btlog "bt-call: headset profile headset-head-unit"; return 0; }
+        pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null && { btlog "bt-call: headset profile headset-head-unit-cvsd (narrowband)"; return 0; }
         prof=$(pactl list cards 2>/dev/null | sed -n "/$card/,/^$/p" | sed -n 's/.*Active Profile: //p')
-        btlog "bt-call: ACHTUNG Freisprechprofil nicht setzbar (aktiv: ${prof:-unbekannt})"
+        btlog "bt-call: WARNING hands-free profile could not be set (active: ${prof:-unknown})"
         return 1
     fi
     pactl set-card-profile "$card" a2dp-sink 2>/dev/null
     return 0
 }
 
-# Routen der Telefonkarte setzen und melden, was tatsaechlich ankam.
+# Set the phone card's routes and report what actually took effect.
 bt_set_ports() {
     local sink_port=$1 src_port=$2
     pactl set-sink-port   droid-sink   "$sink_port" 2>/dev/null \
-        && btlog "bt-call: Ausgang $sink_port gesetzt" \
-        || btlog "bt-call: FEHLER - Ausgang $sink_port liess sich nicht setzen"
+        && btlog "bt-call: output $sink_port set" \
+        || btlog "bt-call: ERROR - could not set output $sink_port"
     pactl set-source-port droid-source "$src_port" 2>/dev/null \
-        && btlog "bt-call: Eingang $src_port gesetzt" \
-        || btlog "bt-call: FEHLER - Eingang $src_port liess sich nicht setzen"
-    btlog "bt-call: tatsaechlich aktiv $(active_ports)"
+        && btlog "bt-call: input $src_port set" \
+        || btlog "bt-call: ERROR - could not set input $src_port"
+    btlog "bt-call: actually active $(active_ports)"
 }
 
-# Route gegen callaudiod verteidigen, solange das Gespraech laeuft.
+# Defend the route against callaudiod for as long as the call runs.
 bt_hold() {
     local sink_port=$1 src_port=$2 limit=$3 i=0 now
     while [ $i -lt "$limit" ]; do
         sleep 2
         now=$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')
         if [ "$now" != "$sink_port" ]; then
-            btlog "bt-call: Ausgang stand auf \"$now\" - setze erneut"
+            btlog "bt-call: output was on \"$now\" - setting it again"
             pactl set-sink-port   droid-sink   "$sink_port" 2>/dev/null
             pactl set-source-port droid-source "$src_port"  2>/dev/null
         fi
-        # Ende des Gespraechs? Dann aufhoeren.
+        # Call over? Then stop.
         [ "$(droid_profile)" = voicecall ] || return 0
         i=$((i+1))
     done
     return 0
 }
 
-# Ton wieder hoerbar machen - der Notnagel.
+# Make sound audible again - the emergency handle.
 #
-# Entstanden aus einem misslungenen Bluetooth-Test: danach stand der Ausgang
-# auf der Ohrmuschel und die Lautstaerke bei 18 %. Technisch lief alles, zu
-# hoeren war nichts. Genau diese Kombination raeumt rescue weg.
+# Born out of a failed Bluetooth test: afterwards the output was on the
+# earpiece and the volume at 18 %. Technically everything was running, nothing
+# was audible. That exact combination is what rescue clears away.
 rescue() {
     local to_standard=${1:-yes}
     [ "$to_standard" = yes ] && switch_to standard sticky
     pactl set-sink-mute   @DEFAULT_SINK@   0    2>/dev/null || true
     pactl set-source-mute @DEFAULT_SOURCE@ 0    2>/dev/null || true
     pactl set-sink-volume @DEFAULT_SINK@   65%  2>/dev/null || true
-    # Lautsprecher, nicht Ohrmuschel: auf der hoert man nichts, wenn man das
-    # Geraet nicht ans Ohr haelt.
+    # Speaker, not earpiece: on the earpiece you hear nothing unless you hold
+    # the device to your ear.
     pactl set-sink-port sink.primary_output output-speaker 2>/dev/null || \
     pactl set-sink-port droid-sink          output-speaker 2>/dev/null || true
     pactl set-source-port droid-source input-builtin_mic   2>/dev/null || true
-    info "Ton wiederhergestellt: Lautsprecher, 65 %, nicht stumm"
-    info "Aktiv: $(active_ports)"
+    info "sound restored: speaker, 65 %, not muted"
+    info "active: $(active_ports)"
     return 0
 }
 
@@ -370,47 +368,47 @@ bt_call() {
     local mode=$1 card waited
     card=$(pactl list short cards 2>/dev/null | awk '/bluez_card/ {print $2; exit}')
 
-    # Ein abgebrochener Test darf das Telefon nicht stumm zuruecklassen:
-    # Strg-C oder ein Fehler stellen den hoerbaren Zustand wieder her.
-    trap 'printf "\nAbgebrochen - stelle den Ton wieder her.\n" >&2; rescue no; trap - INT TERM EXIT; exit 130' INT TERM
+    # An aborted test must not leave the phone silent: Ctrl-C or an error
+    # restore an audible state.
+    trap 'printf "\naborted - restoring the sound.\n" >&2; rescue no; trap - INT TERM EXIT; exit 130' INT TERM
 
     case "$mode" in
     on)
-        [ -n "$card" ] || { btlog "bt-call: kein Bluetooth-Geraet verbunden"; return 1; }
-        btlog "bt-call: Karte $card"
+        [ -n "$card" ] || { btlog "bt-call: no Bluetooth device connected"; return 1; }
+        btlog "bt-call: card $card"
         bt_headset_profile "$card" headset
         bt_set_ports output-bluetooth_sco input-bluetooth_sco_headset
         bt_hold output-bluetooth_sco input-bluetooth_sco_headset 10
-        btlog "bt-call: Ende, aktiv $(active_ports)"
-        printf 'Zurueck mit: audioctl bt-call off\n'
+        btlog "bt-call: done, active $(active_ports)"
+        printf 'Back with: audioctl bt-call off\n'
         ;;
     off)
         bt_headset_profile "$card" a2dp
         bt_set_ports output-earpiece input-builtin_mic
         ;;
     watch)
-        # Vor dem Anruf starten: wartet, legt das Gespraech dann selbst aufs
-        # Headset und haelt die Route, bis aufgelegt wird. So muss waehrend
-        # des Telefonierens niemand etwas tippen - genau daran sind die
-        # bisherigen Versuche gescheitert.
-        [ -n "$card" ] || { btlog "bt-call watch: kein Bluetooth-Geraet verbunden"; return 1; }
-        btlog "bt-call watch: warte auf einen Anruf (Abbruch mit Strg-C)"
+        # Start this before the call: it waits, then puts the call on the
+        # headset itself and holds the route until you hang up. That way nobody
+        # has to type anything while on the phone - which is exactly what made
+        # the earlier attempts fail.
+        [ -n "$card" ] || { btlog "bt-call watch: no Bluetooth device connected"; return 1; }
+        btlog "bt-call watch: waiting for a call (abort with Ctrl-C)"
         waited=0
         while [ "$(droid_profile)" != voicecall ]; do
             sleep 1
             waited=$((waited+1))
-            [ $waited -ge 600 ] && { btlog "bt-call watch: nach 10 Minuten kein Anruf - Ende"; return 1; }
+            [ $waited -ge 600 ] && { btlog "bt-call watch: no call after 10 minutes - stopping"; return 1; }
         done
-        btlog "bt-call watch: Anruf erkannt nach ${waited}s"
+        btlog "bt-call watch: call detected after ${waited}s"
         bt_headset_profile "$card" headset
         bt_set_ports output-bluetooth_sco input-bluetooth_sco_headset
-        # Bis zum Auflegen halten, hoechstens 30 Minuten.
+        # Hold until hang-up, at most 30 minutes.
         bt_hold output-bluetooth_sco input-bluetooth_sco_headset 900
-        btlog "bt-call watch: Gespraech beendet - zurueck aufs Telefon"
+        btlog "bt-call watch: call ended - back to the phone"
         bt_headset_profile "$card" a2dp
         bt_set_ports output-earpiece input-builtin_mic
         ;;
-    *) trap - INT TERM; die "bt-call braucht 'on', 'off' oder 'watch'." ;;
+    *) trap - INT TERM; die "bt-call needs 'on', 'off' or 'watch'." ;;
     esac
     trap - INT TERM
     return 0
@@ -418,29 +416,29 @@ bt_call() {
 
 usage() {
     cat <<EOF
-audioctl - Audiostack umschalten
+audioctl - switch the audio stack
 
-  audioctl status              aktuellen Zustand zeigen
-  audioctl toggle              Schalter: standard <-> pw-hal (im Testmodus)
-  audioctl list                Profile auflisten
-  audioctl try <profil>        umschalten, faellt beim Neustart zurueck
-  audioctl set <profil>        umschalten und persistent merken
-  audioctl restart             Audiostack neu starten, Profil bleibt
-  audioctl rescue              Ton wieder hoerbar machen: Auslieferungszustand,
-                               Lautsprecher, 65 %, nicht stumm
-  audioctl bt-call watch       vor dem Anruf starten: legt das Gespraech dann
-                               selbst aufs Bluetooth-Headset und haelt es dort
-  audioctl bt-call on|off      laufenden Anruf von Hand umlegen
-  audioctl revert              sofort zurueck auf standard
-  audioctl verify              pruefen, ob ein Sink da ist
+  audioctl status              show the current state
+  audioctl toggle              switch: standard <-> pw-hal (in test mode)
+  audioctl list                list the profiles
+  audioctl try <profile>       switch, falls back on reboot
+  audioctl set <profile>       switch and remember persistently
+  audioctl restart             restart the audio stack, keep the profile
+  audioctl rescue              make sound audible again: shipped state,
+                               speaker, 65 %, not muted
+  audioctl bt-call watch       start before the call: puts the call on the
+                               Bluetooth headset itself and holds it there
+  audioctl bt-call on|off      move a running call by hand
+  audioctl revert              back to standard immediately
+  audioctl verify              check whether a sink is there
 
-  --dry-run                    nur zeigen, was passieren wuerde
+  --dry-run                    only show what would happen
 
-Profile:
-  standard    FuriOS wie ausgeliefert: PulseAudio haelt den HAL, PipeWire nur Video
-  pw-tunnel   wie standard, plus PipeWire-Tunnel-Sink (Telefonie unberuehrt)
-  pw-hal      PipeWire haelt den HAL per SPA-Droid-Plugin (Wiedergabe, Aufnahme
-              und Telefonie am Geraet bestaetigt)
+Profiles:
+  standard    FuriOS as shipped: PulseAudio holds the HAL, PipeWire does video
+  pw-tunnel   like standard, plus a PipeWire tunnel sink (telephony untouched)
+  pw-hal      PipeWire holds the HAL via the SPA droid plugin (playback, capture
+              and telephony confirmed on the device)
 EOF
 }
 
@@ -448,15 +446,15 @@ status() {
     local eff rec
     eff=$(effective_profile)
     rec=$(current_profile)
-    printf 'Profil (aktiv):     %s\n' "$eff"
+    printf 'Profile (active):   %s\n' "$eff"
     if [ "$eff" != "$rec" ]; then
-        printf 'ACHTUNG:            vermerkt ist "%s" - das passt nicht zum laufenden System.\n' "$rec"
-        printf '                    Mit "audioctl set %s" wieder in Einklang bringen.\n' "$eff"
+        printf 'WARNING:            recorded is "%s" - that does not match the running system.\n' "$rec"
+        printf '                    Bring it back in line with "audioctl set %s".\n' "$eff"
     fi
-    printf 'Profil (persistent):%s\n' " $(cat "$STICKY" 2>/dev/null || echo standard)"
-    [ -r "$TRY" ] && printf 'Testmodus:          ja - faellt beim Neustart zurueck\n'
-    printf 'Pulse-Server:       %s\n' "$(pulse_owner)"
-    printf 'Sinks:              %s\n' "$(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, - || echo keine)"
+    printf 'Profile (persistent):%s\n' " $(cat "$STICKY" 2>/dev/null || echo standard)"
+    [ -r "$TRY" ] && printf 'Test mode:          yes - falls back on reboot\n'
+    printf 'Pulse server:       %s\n' "$(pulse_owner)"
+    printf 'Sinks:              %s\n' "$(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, - || echo none)"
     printf '\nUnits:\n'
     for u in pulseaudio.service pipewire.service pipewire-pulse.service wireplumber.service furios-pw-tunnel.service; do
         printf '  %-28s %-10s %s\n' "$u" "$(uctl is-enabled "$u" 2>&1 | head -1)" "$(uctl is-active "$u" 2>&1 | head -1)"
@@ -467,28 +465,28 @@ args=(); for a in "$@"; do [ "$a" = --dry-run ] && DRY=1 || args+=("$a"); done
 set -- ${args+"${args[@]}"}
 case "${1:-status}" in
     status) status ;;
-    # Schalter: bewusst im Testmodus, damit ein Neustart immer zum
-    # Auslieferungszustand zurueckfuehrt.
+    # Toggle: deliberately in test mode, so a reboot always leads back to the
+    # shipped state.
     toggle) if [ "$(effective_profile)" = pw-hal ]; then
                 switch_to standard sticky
             else
                 switch_to pw-hal try
             fi ;;
     list)   printf '%s\n' $PROFILES ;;
-    try)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" try ;;
-    set)    [ $# -ge 2 ] || die "Profil fehlt."; switch_to "$2" sticky ;;
-    # Neu starten, ohne das Profil zu wechseln - etwa damit der HAL eine
-    # geaenderte Abstimmungsdatei neu liest.
+    try)    [ $# -ge 2 ] || die "profile missing."; switch_to "$2" try ;;
+    set)    [ $# -ge 2 ] || die "profile missing."; switch_to "$2" sticky ;;
+    # Restart without changing the profile - for instance so the HAL re-reads a
+    # modified tuning file.
     restart) p=$(effective_profile)
-             [ "$p" = unklar ] && p=$(current_profile)
-             printf 'Starte Audiostack neu (Profil %s)\n' "$p"
+             [ "$p" = unclear ] && p=$(current_profile)
+             printf 'restarting the audio stack (profile %s)\n' "$p"
              apply "$p"
-             verify && info "OK - Sink vorhanden: $(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, -)" \
-                    || printf 'ACHTUNG: kein Sink nach dem Neustart.\n' >&2 ;;
+             verify && info "OK - sink present: $(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, -)" \
+                    || printf 'WARNING: no sink after the restart.\n' >&2 ;;
     rescue) rescue ;;
-    bt-call) [ $# -ge 2 ] || die "bt-call braucht 'on', 'off' oder 'watch'."; bt_call "$2" ;;
+    bt-call) [ $# -ge 2 ] || die "bt-call needs 'on', 'off' or 'watch'."; bt_call "$2" ;;
     revert) switch_to standard sticky ;;
-    verify) verify && echo "OK - Sink vorhanden." || { echo "kein Sink." >&2; exit 1; } ;;
+    verify) verify && echo "OK - sink present." || { echo "no sink." >&2; exit 1; } ;;
     -h|--help|help) usage ;;
     *) usage; exit 1 ;;
 esac
