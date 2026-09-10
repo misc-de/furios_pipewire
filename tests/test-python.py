@@ -9,27 +9,42 @@ translating the project to English - silently breaks the app, and nothing
 notices until someone opens it and sees "unknown".
 """
 import importlib.util
+import io
 import re
-import subprocess
 import sys
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))
+
+import gi_stub  # noqa: E402  - has to come before anything that imports gi
+
+recorder = gi_stub.install()
 
 
 def load(path, name):
+    """Import a script by path, so its lines are the ones being measured.
+
+    Running it as a subprocess would be simpler and would tell the coverage
+    tracer nothing - it only sees what happens in this process.
+    """
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
 
 
+gen = load(ROOT / "gen-pipewire-hal-conf.py", "gen_hal_conf")
+watcher = load(ROOT / "tools" / "furios-audio-pause-on-disconnect.py", "watcher")
+switcher = load(ROOT / "gui" / "furios-audio-switch.py", "switcher")
+
+
 class ConfigGenerator(unittest.TestCase):
     """gen-pipewire-hal-conf.py rewrites FuriOS' own config."""
 
     def setUp(self):
-        self.gen = ROOT / "gen-pipewire-hal-conf.py"
         self.template = (
             "# Daemon config file\n"
             "context.properties = {\n"
@@ -43,11 +58,19 @@ class ConfigGenerator(unittest.TestCase):
         )
 
     def run_gen(self, text, tmp):
+        """Call main() in this process - a subprocess would not be measured."""
         src, dst = tmp / "in.conf", tmp / "out.conf"
         src.write_text(text)
-        res = subprocess.run([sys.executable, str(self.gen), str(src), str(dst)],
-                             capture_output=True, text=True)
-        return res, dst
+        out, err = io.StringIO(), io.StringIO()
+        argv = sys.argv
+        sys.argv = ["gen-pipewire-hal-conf.py", str(src), str(dst)]
+        try:
+            with redirect_stdout(out), redirect_stderr(err):
+                code = gen.main()
+        finally:
+            sys.argv = argv
+        return type("Result", (), {"returncode": code, "stderr": err.getvalue(),
+                                   "stdout": out.getvalue()}), dst
 
     def test_registers_the_plugin(self):
         import tempfile
@@ -74,6 +97,26 @@ class ConfigGenerator(unittest.TestCase):
             res, _ = self.run_gen("nothing we recognise\n", Path(d))
             self.assertNotEqual(res.returncode, 0)
             self.assertIn("context.spa-libs", res.stderr)
+
+    def test_it_notices_a_template_that_already_has_the_plugin(self):
+        """Running it twice must not register the library a second time."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            already = self.template.replace(
+                "context.spa-libs = {\n",
+                "context.spa-libs = {\n    api.droid.* = droid/libspa-droid\n")
+            res, dst = self.run_gen(already, Path(d))
+            self.assertEqual(res.returncode, 0)
+            self.assertIn("already in the template", res.stderr)
+            self.assertEqual(dst.read_text().count("api.droid.*"), 1)
+
+    def test_it_says_so_when_the_objects_block_is_gone(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            without = self.template.replace("context.objects = [\n]\n", "")
+            res, _ = self.run_gen(without, Path(d))
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("context.objects", res.stderr)
 
     def test_marks_the_file_as_generated(self):
         import tempfile
@@ -122,24 +165,589 @@ class AppReadsAudioctl(unittest.TestCase):
         self.assertIn('"state=on" in out', self.app)
 
 
-class PauseOnDisconnect(unittest.TestCase):
-    """The watcher that keeps music off the loudspeaker."""
+class FakeBus:
+    """A D-Bus connection that answers what a test tells it to.
 
-    def test_it_only_reacts_to_a_lost_connection(self):
-        src = (ROOT / "tools" / "furios-audio-pause-on-disconnect.py").read_text()
-        self.assertIn('changed.get("Connected") is False', src)
-        self.assertIn("org.bluez.Device1", src)
+    The watcher asks two things: who is on the bus, and what each MPRIS player
+    is doing. Everything else it does is call Pause, which is recorded.
+    """
+
+    def __init__(self, names=(), status=None, fail_on=None):
+        self.names = list(names)
+        self.status = status or {}
+        self.fail_on = fail_on or set()
+        self.paused = []
+        self.subscriptions = []
+
+    def call_sync(self, dest, path, iface, method, args, reply, flags,
+                  timeout, cancellable):
+        if method == "ListNames":
+            if "ListNames" in self.fail_on:
+                raise watcher.GLib.Error("no bus today")
+            return FakeVariant([self.names])
+        if method == "Get":
+            if dest in self.fail_on:
+                raise watcher.GLib.Error("player went away")
+            return FakeVariant([self.status.get(dest, "Stopped")])
+        if method == "Pause":
+            if dest in self.fail_on:
+                raise watcher.GLib.Error("will not pause")
+            self.paused.append(dest)
+            return None
+        raise AssertionError("unexpected call: %s" % method)
+
+    def signal_subscribe(self, *args):
+        self.subscriptions.append(args)
+        return 1
+
+
+class FakeVariant:
+    def __init__(self, value):
+        self.value = value
+
+    def unpack(self):
+        return self.value
+
+
+class SwitcherWords(unittest.TestCase):
+    """What the app puts in front of someone who is not reading code.
+
+    This is the part where being wrong is invisible: a label that says the
+    opposite of what is happening reads as a bug in the audio, and the person
+    goes looking in the wrong place. It happened once already - the app showed
+    "PipeWire holds the HAL" above "Sound server: PulseAudio", which is not a
+    contradiction but reads exactly like one.
+    """
+
+    def test_pipewires_pulse_interface_is_explained_rather_than_quoted(self):
+        said = switcher.server_in_words("PulseAudio (on PipeWire 1.6.6)")
+        self.assertIn("PipeWire", said)
+        self.assertIn("1.6.6", said)
+        self.assertIn("older apps", said)
+
+    def test_a_version_it_cannot_find_still_reads_sensibly(self):
+        said = switcher.server_in_words("PulseAudio (on PipeWire)")
+        self.assertIn("PipeWire", said)
+
+    def test_the_shipped_server_is_named_as_such(self):
+        self.assertIn("shipped", switcher.server_in_words("pulseaudio"))
+        self.assertIn("shipped", switcher.server_in_words("PulseAudio"))
+
+    def test_nothing_at_all_is_not_dressed_up(self):
+        self.assertEqual("not reachable", switcher.server_in_words(""))
+        self.assertEqual("not reachable", switcher.server_in_words("-"))
+        self.assertEqual("not reachable", switcher.server_in_words(None))
+
+    def test_something_unexpected_is_passed_through_unchanged(self):
+        self.assertEqual("jackd", switcher.server_in_words("jackd"))
+
+
+class FakeProcess:
+    """A Gio.Subprocess that hands back what a test wrote for it.
+
+    audioctl takes up to fifteen seconds and the window must not freeze, so the
+    app reads its output line by line as it arrives. That is the part worth
+    testing: not that a subprocess runs, but that the lines are assembled and
+    the end is noticed.
+    """
+
+    def __init__(self, lines=(), ok=True, fail_at=None):
+        self.lines = list(lines)
+        self.ok = ok
+        self.fail_at = fail_at
+        self.waited = False
+
+    def get_stdout_pipe(self):
+        return self
+
+    def get_successful(self):
+        return self.ok
+
+    def communicate_utf8_finish(self, _res):
+        if self.fail_at == "communicate":
+            raise switcher.GLib.Error("pipe broke")
+        return True, "\n".join(self.lines), None
+
+    def communicate_utf8_async(self, _stdin, _cancellable, callback):
+        callback(self, None)
+
+    def wait_async(self, _cancellable, callback):
+        callback(self, None)
+
+    def wait_finish(self, _res):
+        self.waited = True
+        if self.fail_at == "wait":
+            raise switcher.GLib.Error("never finished")
+
+
+class FakeStream:
+    """Gio.DataInputStream over the lines of a FakeProcess."""
+
+    def __init__(self, process):
+        self.process = process
+        self.index = 0
+
+    def read_line_async(self, _priority, _cancellable, callback):
+        callback(self, None)
+
+    def read_line_finish_utf8(self, _res):
+        if self.process.fail_at == "read":
+            raise switcher.GLib.Error("stream died")
+        if self.index >= len(self.process.lines):
+            return None, 0
+        line = self.process.lines[self.index]
+        self.index += 1
+        return line, len(line)
+
+
+class RunsAudioctl(unittest.TestCase):
+    """How the app talks to audioctl."""
+
+    def setUp(self):
+        self.process = None
+        self.original_new = switcher.Gio.Subprocess.new
+        self.original_stream = switcher.Gio.DataInputStream.new
+
+    def tearDown(self):
+        switcher.Gio.Subprocess.new = self.original_new
+        switcher.Gio.DataInputStream.new = self.original_stream
+
+    def arrange(self, **kwargs):
+        process = FakeProcess(**kwargs)
+        switcher.Gio.Subprocess.new = lambda *a, **k: process
+        switcher.Gio.DataInputStream.new = lambda pipe: FakeStream(process)
+        return process
+
+    def test_output_is_collected_and_handed_over_at_the_end(self):
+        self.arrange(lines=["one", "two"])
+        seen = []
+        switcher.run_async(["audioctl", "status"], lambda ok, out: seen.append((ok, out)))
+        self.assertEqual(seen, [(True, "one\ntwo")])
+
+    def test_with_a_line_callback_the_lines_arrive_as_they_come(self):
+        self.arrange(lines=["step one", "step two", ""])
+        lines, done = [], []
+        switcher.run_async(["audioctl", "set", "pw-hal"],
+                           lambda ok, out: done.append((ok, out)),
+                           on_line=lines.append)
+        self.assertEqual(lines, ["step one", "step two"])
+        self.assertEqual(done, [(True, "step one\nstep two")])
+
+    def test_a_command_that_fails_is_reported_as_such(self):
+        self.arrange(lines=["went wrong"], ok=False)
+        seen = []
+        switcher.run_async(["audioctl", "status"], lambda ok, out: seen.append((ok, out)))
+        self.assertEqual(seen[0][0], False)
+
+    def test_a_command_that_will_not_start_is_reported(self):
+        def refuse(*_a, **_k):
+            raise switcher.GLib.Error("no such file")
+        switcher.Gio.Subprocess.new = refuse
+        seen = []
+        switcher.run_async(["nothing"], lambda ok, out: seen.append((ok, out)))
+        self.assertEqual(seen[0][0], False)
+        self.assertIn("no such file", seen[0][1])
+
+    def test_a_pipe_that_breaks_while_reading_is_reported(self):
+        self.arrange(lines=["a"], fail_at="read")
+        seen = []
+        switcher.run_async(["audioctl"], lambda ok, out: seen.append((ok, out)),
+                           on_line=lambda _l: None)
+        self.assertEqual(seen[0][0], False)
+
+    def test_a_process_that_never_finishes_is_reported(self):
+        self.arrange(lines=[], fail_at="wait")
+        seen = []
+        switcher.run_async(["audioctl"], lambda ok, out: seen.append((ok, out)),
+                           on_line=lambda _l: None)
+        self.assertEqual(seen[0][0], False)
+
+    def test_a_broken_pipe_without_a_line_callback_is_reported(self):
+        self.arrange(lines=["x"], fail_at="communicate")
+        seen = []
+        switcher.run_async(["audioctl"], lambda ok, out: seen.append((ok, out)))
+        self.assertEqual(seen[0][0], False)
+
+
+class Recording:
+    """A widget that remembers what it was told, and answers what a test set."""
+
+    def __init__(self, active=False):
+        self.subtitle = None
+        self.sensitive = True
+        self.active = active
+        self.text = None
+        self.fraction = None
+        self.revealed = None
+
+    def set_subtitle(self, text):
+        self.subtitle = text
+
+    def set_sensitive(self, value):
+        self.sensitive = value
+
+    def set_active(self, value):
+        self.active = value
+
+    def get_active(self):
+        return self.active
+
+    def set_text(self, text):
+        self.text = text
+
+    def set_fraction(self, value):
+        self.fraction = value
+
+    def pulse(self):
+        self.fraction = "pulsing"
+
+    def set_reveal_child(self, value):
+        self.revealed = value
+
+    def add_toast(self, toast):
+        # The stub keeps constructor arguments as attributes, so the title of
+        # the toast is readable rather than the object's name.
+        self.text = getattr(toast, "title", toast)
+
+
+class TheWindow(unittest.TestCase):
+    """The window, driven through its own callbacks.
+
+    Building it needs a stub, and a stub proves nothing about GTK. What it does
+    prove is the part that has been wrong before: which words end up in front
+    of someone, and whether the switch follows the state or fights it.
+    """
+
+    def setUp(self):
+        self.win = switcher.Window(switcher.Adw.Application())
+        for name in ("row_profile", "row_server", "row_sinks", "switch_row",
+                     "persist_row", "dmnr_row", "refresh_btn", "progress",
+                     "progress_revealer", "toasts"):
+            setattr(self.win, name, Recording())
+        self.ran = []
+        self.original = switcher.run_async
+        switcher.run_async = lambda argv, done, on_line=None: self.ran.append(
+            (argv, done, on_line))
+
+    def tearDown(self):
+        switcher.run_async = self.original
+
+    STATUS = ("Profile (active):   pw-hal\n"
+              "Profile (persistent): standard\n"
+              "Test mode:          yes - falls back on reboot\n"
+              "Pulse server:       PulseAudio (on PipeWire 1.6.6)\n"
+              "Sinks:              droid-sink,droid-voip-sink\n")
+
+    def test_status_is_turned_into_something_a_person_can_read(self):
+        self.win.on_status(True, self.STATUS)
+        self.assertIn("PipeWire owns the HAL", self.win.row_profile.subtitle)
+        self.assertIn("until reboot", self.win.row_profile.subtitle)
+        self.assertIn("older apps", self.win.row_server.subtitle)
+        self.assertEqual("droid-sink, droid-voip-sink", self.win.row_sinks.subtitle)
+        self.assertTrue(self.win.switch_row.active)
+
+    def test_the_shipped_state_is_named_as_such(self):
+        self.win.on_status(True, "Profile (active):   standard\nSinks:              x\n")
+        self.assertIn("as shipped", self.win.row_profile.subtitle)
+        self.assertFalse(self.win.switch_row.active)
+
+    def test_the_tunnel_profile_has_its_own_sentence(self):
+        self.win.on_status(True, "Profile (active):   pw-tunnel\n")
+        self.assertIn("PipeWire gets a sink", self.win.row_profile.subtitle)
+
+    def test_a_profile_it_does_not_know_is_shown_as_it_is(self):
+        self.win.on_status(True, "Profile (active):   something-else\n")
+        self.assertIn("something-else", self.win.row_profile.subtitle)
+
+    def test_a_warning_from_audioctl_is_passed_on(self):
+        self.win.on_status(True, self.STATUS +
+                           "WARNING:            recorded is \"standard\"\n")
+        self.assertIn("recorded is", self.win.row_profile.subtitle)
+
+    def test_no_sinks_reads_as_none_rather_than_as_a_dash(self):
+        self.win.on_status(True, "Profile (active):   standard\nSinks:\n")
+        self.assertEqual("none", self.win.row_sinks.subtitle)
+
+    def test_the_switch_does_not_fire_while_it_is_being_synced(self):
+        """Following the state must not look like someone flipping it."""
+        self.win.on_status(True, self.STATUS)
+        self.assertEqual([], self.ran, "syncing the switch started a command")
+
+    def test_flipping_the_switch_on_asks_for_pw_hal(self):
+        self.win.switch_row.active = True
+        self.win.persist_row.active = False
+        self.win.on_switch(self.win.switch_row, None)
+        argv = self.ran[0][0]
+        self.assertEqual(["try", "pw-hal"], argv[1:])
+
+    def test_and_with_remember_ticked_it_asks_for_set(self):
+        self.win.switch_row.active = True
+        self.win.persist_row.active = True
+        self.win.on_switch(self.win.switch_row, None)
+        self.assertEqual(["set", "pw-hal"], self.ran[0][0][1:])
+
+    def test_flipping_it_off_always_sets_standard_persistently(self):
+        """Off means off after a reboot too - a test-mode "off" would come back."""
+        self.win.switch_row.active = False
+        self.win.on_switch(self.win.switch_row, None)
+        self.assertEqual(["set", "standard"], self.ran[0][0][1:])
+
+    def test_the_switch_is_ignored_while_something_is_running(self):
+        self.win.busy = True
+        self.win.on_switch(self.win.switch_row, None)
+        self.assertEqual([], self.ran)
+
+    def test_progress_shows_what_audioctl_says_and_cuts_it_to_a_line(self):
+        self.win.on_progress_line("x" * 200)
+        self.assertEqual(60, len(self.win.progress.text))
+
+    def test_a_finished_switch_shows_the_last_thing_it_said(self):
+        self.win.on_switched(True, "step\nplease check telephony\n")
+        self.assertIn("check telephony", str(self.win.toasts.text))
+
+    def test_a_switch_with_no_output_still_says_something(self):
+        self.win.on_switched(True, "")
+        self.assertIsNotNone(self.win.toasts.text)
+
+    def test_a_failed_switch_says_so_and_shows_the_output(self):
+        self.win.on_switched(False, "it went wrong")
+        self.assertIn("failed", str(self.win.toasts.text).lower())
+
+    def test_a_failed_switch_without_output_still_reports(self):
+        self.win.on_switched(False, "")
+        self.assertIsNotNone(self.win.toasts.text)
+
+    def test_the_echo_switch_asks_the_dmnr_helper(self):
+        self.win.dmnr_row.active = True
+        self.win.on_dmnr(self.win.dmnr_row, None)
+        self.assertEqual("on", self.ran[0][0][1])
+        self.ran.clear()
+        self.win.busy = False
+        self.win.dmnr_row.active = False
+        self.win.on_dmnr(self.win.dmnr_row, None)
+        self.assertEqual("off", self.ran[0][0][1])
+
+    def test_the_echo_switch_is_ignored_while_busy(self):
+        self.win.busy = True
+        self.win.on_dmnr(self.win.dmnr_row, None)
+        self.assertEqual([], self.ran)
+
+    def test_the_echo_result_is_reported_either_way(self):
+        self.win.on_dmnr_done(True, "state=on")
+        self.assertIn("Echo suppression", str(self.win.toasts.text))
+        self.win.on_dmnr_done(False, "")
+        self.assertIn("Could not", str(self.win.toasts.text))
+
+    def test_a_device_without_the_helper_disables_the_switch(self):
+        self.win.on_dmnr_status(False, "")
+        self.assertFalse(self.win.dmnr_row.sensitive)
+        self.assertIn("not available", self.win.dmnr_row.subtitle)
+
+    def test_the_echo_switch_follows_the_state_of_the_file(self):
+        self.win.on_dmnr_status(True, "state=on\nfile: ...\n")
+        self.assertTrue(self.win.dmnr_row.active)
+        self.assertIn("modified tuning file", self.win.dmnr_row.subtitle)
+        self.win.on_dmnr_status(True, "state=off\n")
+        self.assertFalse(self.win.dmnr_row.active)
+        self.assertIn("Vendor setting", self.win.dmnr_row.subtitle)
+
+    def test_restore_sound_runs_the_same_rescue_as_the_command_line(self):
+        self.win.on_rescue(None)
+        self.assertEqual("rescue", self.ran[0][0][1])
+
+    def test_restore_is_ignored_while_busy(self):
+        self.win.busy = True
+        self.win.on_rescue(None)
+        self.assertEqual([], self.ran)
+
+    def test_a_finished_restore_says_what_it_did(self):
+        self.win.on_rescued(True, "")
+        self.assertIn("65 %", str(self.win.toasts.text))
+        self.win.on_rescued(False, "no")
+        self.assertIn("failed", str(self.win.toasts.text).lower())
+
+    def test_refresh_asks_both_helpers(self):
+        self.win.refresh()
+        self.assertEqual(2, len(self.ran))
+
+    def test_busy_says_what_is_happening_and_locks_the_controls(self):
+        self.win.set_busy(True)
+        self.assertFalse(self.win.switch_row.sensitive)
+        self.assertIn("takes a moment", self.win.switch_row.subtitle)
+        self.win.switch_row.active = True
+        self.win.set_busy(False)
+        self.assertTrue(self.win.switch_row.sensitive)
+        self.assertIn("talks to the HAL", self.win.switch_row.subtitle)
+        self.win.switch_row.active = False
+        self.win.set_busy(False)
+        self.assertIn("as shipped", self.win.switch_row.subtitle)
+
+    def test_the_progress_bar_pulses_rather_than_inventing_a_percentage(self):
+        self.win.pulse_start("Switching …")
+        self.assertEqual("Switching …", self.win.progress.text)
+        self.assertEqual("pulsing", self.win.progress.fraction)
+        self.assertTrue(self.win.progress_revealer.revealed)
+        self.assertTrue(self.win._pulse_tick())
+        self.win.pulse_stop()
+        self.assertFalse(self.win.progress_revealer.revealed)
+
+    def test_the_application_opens_a_window(self):
+        app = switcher.App()
+        app.props.active_window = None
+        app.do_activate()
+
+
+class PauseOnDisconnect(unittest.TestCase):
+    """The watcher that keeps music off the loudspeaker.
+
+    Earbuds run out of battery mid-track; without this the audio moves to the
+    loudspeaker of a phone that may be in someone's pocket, in a room with
+    other people in it.
+    """
+
+    def test_a_player_that_is_playing_is_paused(self):
+        bus = FakeBus(names=["org.mpris.MediaPlayer2.emilia", "org.freedesktop.DBus"],
+                      status={"org.mpris.MediaPlayer2.emilia": "Playing"})
+        with redirect_stdout(io.StringIO()):
+            watcher.pause_all(bus)
+        self.assertEqual(bus.paused, ["org.mpris.MediaPlayer2.emilia"])
+
+    def test_a_player_that_is_paused_is_left_alone(self):
+        bus = FakeBus(names=["org.mpris.MediaPlayer2.emilia"],
+                      status={"org.mpris.MediaPlayer2.emilia": "Paused"})
+        with redirect_stdout(io.StringIO()):
+            watcher.pause_all(bus)
+        self.assertEqual(bus.paused, [])
+
+    def test_names_that_are_not_players_are_ignored(self):
+        bus = FakeBus(names=["org.freedesktop.DBus", "org.bluez"],
+                      status={})
+        with redirect_stdout(io.StringIO()):
+            watcher.pause_all(bus)
+        self.assertEqual(bus.paused, [])
+
+    def test_several_players_are_all_paused(self):
+        names = ["org.mpris.MediaPlayer2.a", "org.mpris.MediaPlayer2.b"]
+        bus = FakeBus(names=names, status={n: "Playing" for n in names})
+        with redirect_stdout(io.StringIO()):
+            watcher.pause_all(bus)
+        self.assertEqual(sorted(bus.paused), sorted(names))
+
+    def test_a_player_that_will_not_answer_is_skipped(self):
+        """A player can disappear between being listed and being asked."""
+        bus = FakeBus(names=["org.mpris.MediaPlayer2.gone"],
+                      status={}, fail_on={"org.mpris.MediaPlayer2.gone"})
+        with redirect_stdout(io.StringIO()):
+            watcher.pause_all(bus)
+        self.assertEqual(bus.paused, [])
+
+    def test_a_player_that_refuses_to_pause_is_reported(self):
+        bus = FakeBus(names=["org.mpris.MediaPlayer2.stubborn"],
+                      status={"org.mpris.MediaPlayer2.stubborn": "Playing"})
+        bus.fail_on = {"org.mpris.MediaPlayer2.stubborn"}
+        bus.status = {"org.mpris.MediaPlayer2.stubborn": "Playing"}
+
+        # Asking for its status has to succeed, only the pause fails.
+        original = bus.call_sync
+
+        def only_pause_fails(dest, path, iface, method, *rest):
+            if method == "Pause":
+                raise watcher.GLib.Error("will not pause")
+            bus.fail_on = set()
+            try:
+                return original(dest, path, iface, method, *rest)
+            finally:
+                bus.fail_on = {"org.mpris.MediaPlayer2.stubborn"}
+
+        bus.call_sync = only_pause_fails
+        out = io.StringIO()
+        with redirect_stdout(out):
+            watcher.pause_all(bus)
+        self.assertIn("could not pause", out.getvalue())
+
+    def test_a_bus_that_will_not_be_listed_gives_nothing(self):
+        bus = FakeBus(fail_on={"ListNames"})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(watcher.playing_players(bus), [])
+        self.assertIn("could not list bus names", out.getvalue())
+
+    def test_nothing_playing_says_so_rather_than_nothing(self):
+        bus = FakeBus(names=[])
+        out = io.StringIO()
+        with redirect_stdout(out):
+            watcher.pause_all(bus)
+        self.assertIn("nothing was playing", out.getvalue())
+
+    def test_it_watches_bluez_and_reacts_to_a_lost_connection(self):
+        """main() wires the signal up; the handler is what decides."""
+        buses = []
+
+        def bus_get_sync(kind, _cancellable):
+            bus = FakeBus(names=["org.mpris.MediaPlayer2.emilia"],
+                          status={"org.mpris.MediaPlayer2.emilia": "Playing"})
+            buses.append(bus)
+            return bus
+
+        original_get, original_loop = watcher.Gio.bus_get_sync, watcher.GLib.MainLoop
+        ran = []
+        watcher.Gio.bus_get_sync = bus_get_sync
+        watcher.GLib.MainLoop = lambda: type(
+            "Loop", (), {"run": lambda self: ran.append(True)})()
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                watcher.main()
+            self.assertIn("watching BlueZ", out.getvalue())
+            self.assertTrue(ran, "it has to keep running, not return at once")
+
+            system, session = buses[0], buses[1]
+            self.assertEqual(len(system.subscriptions), 1)
+            handler = system.subscriptions[0][-1]
+
+            # A Bluetooth device losing its connection: pause whatever plays.
+            with redirect_stdout(out):
+                handler(None, None, "/org/bluez/hci0/dev_AA", None, None,
+                        FakeVariant(["org.bluez.Device1", {"Connected": False},
+                                     []]))
+            self.assertEqual(session.paused, ["org.mpris.MediaPlayer2.emilia"])
+            self.assertIn("dev_AA disconnected", out.getvalue())
+
+            # Connecting is not our business.
+            session.paused = []
+            with redirect_stdout(out):
+                handler(None, None, "/org/bluez/hci0/dev_AA", None, None,
+                        FakeVariant(["org.bluez.Device1", {"Connected": True},
+                                     []]))
+            self.assertEqual(session.paused, [])
+
+            # Neither is anything that is not a Bluetooth device.
+            with redirect_stdout(out):
+                handler(None, None, "/org/bluez/hci0/dev_AA", None, None,
+                        FakeVariant(["org.bluez.Adapter1", {"Powered": False},
+                                     []]))
+            self.assertEqual(session.paused, [])
+        finally:
+            watcher.Gio.bus_get_sync = original_get
+            watcher.GLib.MainLoop = original_loop
 
     def test_it_pauses_rather_than_muting_anything(self):
+        """The alternative would be a phone that is silent for reasons nobody
+        remembers, which is worse than one that was briefly too loud."""
         src = (ROOT / "tools" / "furios-audio-pause-on-disconnect.py").read_text()
         self.assertIn('"Pause"', src)
         self.assertNotIn("set-sink-mute", src)
         self.assertNotIn("set_mute", src)
 
-    def test_it_leaves_players_that_are_not_playing_alone(self):
-        src = (ROOT / "tools" / "furios-audio-pause-on-disconnect.py").read_text()
-        self.assertIn('status == "Playing"', src)
-
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    # Built by hand rather than through unittest.main(), which looks for tests
+    # in sys.modules["__main__"] - and under the coverage tracer that is the
+    # tracer, not this file. It finds nothing there and says so quietly.
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    for obj in list(globals().values()):
+        if isinstance(obj, type) and issubclass(obj, unittest.TestCase):
+            suite.addTests(loader.loadTestsFromTestCase(obj))
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    sys.exit(0 if result.wasSuccessful() else 1)

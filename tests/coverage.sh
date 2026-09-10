@@ -81,6 +81,10 @@ else
 fi
 
 echo
+echo "== the Python parts =="
+"$ROOT/tests/coverage-python.sh" 2>/dev/null || echo "  could not be measured"
+
+echo
 echo "== audioctl =="
 "$ROOT/tests/coverage-shell.sh" 2>/dev/null || echo "  could not be measured"
 

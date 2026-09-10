@@ -159,6 +159,17 @@ reports line coverage. Everything that can be reached without hardware is at
 | `wireplumber/droid-default-sink-policy.lua` | 100 % of 61 |
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
 | `audioctl` | 100 % of 260 |
+| `gui/furios-audio-switch.py` | 100 % of 267 |
+| `tools/furios-audio-pause-on-disconnect.py` | 100 % of 61 |
+| `gen-pipewire-hal-conf.py` | 100 % of 28 |
+
+The Python is measured with the standard library's `trace` module, and runs
+against `tests/gi_stub.py` - a stand-in for PyGObject, because both files start
+with `import gi` and pulling in GTK, libadwaita and a main loop says nothing
+about whether the code is right. The stub fabricates whatever is asked of it
+and remembers how it was called, so a test can look at which widget was built
+and with what. It proves the parts that decide things decide them right; it
+proves nothing about GTK.
 
 `audioctl` is measured with bash's own tracing: `PS4` carries `LINENO`, `set -x`
 prints it, and what is left is arithmetic. It runs against a `PATH` where
