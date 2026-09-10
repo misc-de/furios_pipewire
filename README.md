@@ -149,7 +149,8 @@ laufen - nur der Knoten haelt den HAL-Stream.
     ./gui/install.sh
 
 Installiert einen kleinen GTK4/libadwaita-Umschalter samt Symbol und
-Startereintrag ("Audio-Umschalter" im Anwendungsraster). Ein Schalter fuer
+Startereintrag ("Audio Switch" im Anwendungsraster; die Oberflaeche ist
+englisch). Ein Schalter fuer
 den Stack, darunter was tatsaechlich laeuft, und ein Knopf **Ton
 wiederherstellen** - der stellt den Auslieferungszustand her, schaltet auf den
 Lautsprecher, hebt die Stummschaltung auf und setzt eine hoerbare Lautstaerke.
