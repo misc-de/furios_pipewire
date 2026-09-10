@@ -236,17 +236,26 @@ static void test_route_description(void)
 		printf("  \033[31mFAIL\033[0m the call tap still reads like an input device\n");
 	}
 
-	/* Everything else keeps the manufacturer's own word for their hardware.
-	 * Inventing better names is how a description ends up claiming a thing
-	 * nobody checked - "Built-In Top Mic" would be a fine example, on a
-	 * device whose vendor configuration says it has one microphone. */
+	/* The microphones say where they are - the holes are visible on the case
+	 * - and the second one says it is not a second signal, because measuring
+	 * showed both ports deliver the same capsule. A label that promised a
+	 * separate top microphone would be the honest-sounding kind of wrong. */
 	checks++;
-	if (spa_streq(route_description("input-builtin_mic", "Built-In Mic"),
-				"Built-In Mic"))
-		printf("  \033[32mok\033[0m   the microphone keeps the vendor's own label\n");
+	if (strstr(route_description("input-builtin_mic", "Built-In Mic"),
+				"bottom") != NULL)
+		printf("  \033[32mok\033[0m   the main microphone says where it is\n");
 	else {
 		failures++;
-		printf("  \033[31mFAIL\033[0m the microphone label was invented somewhere\n");
+		printf("  \033[31mFAIL\033[0m the main microphone lost its position\n");
+	}
+
+	checks++;
+	if (strstr(route_description("input-back_mic", "Built-In Back Mic"),
+				"no separate signal") != NULL)
+		printf("  \033[32mok\033[0m   the second port does not promise a second microphone\n");
+	else {
+		failures++;
+		printf("  \033[31mFAIL\033[0m the second port claims a signal it does not deliver\n");
 	}
 
 	checks++;

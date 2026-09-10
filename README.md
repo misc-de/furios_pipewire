@@ -219,6 +219,16 @@ only the node holds the HAL stream.
   The capture node now hears about the end of the call and sets its source
   again. Measured after hanging up: RMS 548 across 3304 distinct sample values,
   where before the fix it was RMS 0.0 and exactly one value.
+- **The phone has two microphones; the ports reach only one of them.** Both
+  holes are visible on the case, one at each end, and Android offers
+  `input-builtin_mic` and `input-back_mic` accordingly. Selecting between them
+  changes nothing: with the bottom-firing speaker playing, three runs through
+  each port measured 2876-3011 RMS, under four percent apart, where a capsule
+  at the far end of the phone would be several decibels down. The HAL chooses
+  its capsule by audio source and mode, not by the device it is routed to. The
+  descriptions say both parts of that - where the hole is, and that the second
+  port is not a second signal - because a label promising a top microphone
+  would be the honest-sounding kind of wrong.
 - **Two input ports are not microphones, and both used to rank like one.**
   `Voice Call In` is the tap on the call itself - outside a call it delivers
   digital silence - and `Built-In Back Mic` is the second capsule the DSP pairs

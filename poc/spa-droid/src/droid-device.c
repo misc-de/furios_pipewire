@@ -249,6 +249,21 @@ static const char *route_description(const char *pa_name, const char *fallback)
 		const char *description;
 	} overrides[] = {
 		{ "input-voice_call", "Voice Call Tap (not a microphone)" },
+		/* The phone has two microphone holes, one at each end - that much is
+		 * visible on the case. Android's own labels ("Built-In Mic",
+		 * "Built-In Back Mic") say which port is primary but nothing about
+		 * where, so the position is worth adding.
+		 *
+		 * What is not worth pretending is that selecting the second one gets
+		 * you the second capsule. It does not, on this HAL: with the
+		 * bottom-firing speaker playing, both ports measured 2876-3011 RMS
+		 * across three runs each - under four percent apart, where a
+		 * microphone at the far end of the phone would be several decibels
+		 * down. The HAL picks its capsule by audio source and mode, not by
+		 * the device we route to. So the label says where the hole is and
+		 * that the signal is the same one. */
+		{ "input-builtin_mic", "Built-In Mic (bottom)" },
+		{ "input-back_mic",    "Built-In Mic (top, no separate signal)" },
 	};
 	size_t i;
 
