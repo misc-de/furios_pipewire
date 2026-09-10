@@ -198,6 +198,31 @@ Programm noch laeuft. Bewusst ohne Prozentzahl: wie lange es dauert, weiss
 vorher niemand, denn audioctl wartet bis zu 15 Sekunden auf einen Sink. Eine
 erfundene Zahl, die bei 90 % haengen bleibt, waere schlechter als gar keine.
 
+## VoIP und Mikrofonwahl
+
+Die Karte bietet vier Knoten: `droid-sink`/`droid-source` fuer alles Normale
+und `droid-voip-sink`/`droid-voip-source` fuer den VoIP-Pfad des HAL
+(mixPorts `voip_rx`/`voip_tx`). Letztere haben niedrige Prioritaet - dort
+landet nichts versehentlich. Ihre Aufnahme benutzt die Android-Audioquelle
+`voice communication`, fuer die der HAL seine Sprachaufbereitung einschaltet.
+
+Zwei Eigenheiten, die dabei Blut gekostet haben:
+
+- **Routen nur auf dem primaeren Strom.** `pa_droid_stream_set_route()` prueft
+  das mit einer Zusicherung und **bricht den ganzen Prozess ab**, wenn man es
+  auf einem anderen mixPort versucht. Der VoIP-Knoten riss PipeWire so
+  reproduzierbar mit (SIGABRT). Das Routing gilt ohnehin fuer alle offenen
+  Stroeme - der primaere gibt es vor.
+- **16 kHz, nicht 48.** Der portierte Code erzwingt fuer `voip_rx` genau das
+  ("Override voip_rx channel map (mono) and sample rate (16000)"). Der Knoten
+  richtet sich deshalb nach `audio.rate` aus seinen Eigenschaften, statt stur
+  48 kHz anzubieten - sonst schriebe er mit dreifacher Geschwindigkeit hinein.
+
+`wireplumber/droid-input-follows-output.lua` laesst das Mikrofon der
+Ausgabewahl folgen, wenn beide Enden zum selben Geraet gehoeren. Ohne das
+bleibt das Mikrofon beim Telefon, sobald callaudiod Sink und Source einmal
+festgenagelt hat.
+
 ## Echo im Gespraech
 
 Die Gegenseite hoert sich selbst? Software hilft dagegen nicht: bei einem

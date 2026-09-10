@@ -46,6 +46,13 @@
 #define DEV_SOURCE  1
 #define N_DEVICES   2
 
+/* Zusaetzliche Knoten fuer den VoIP-Pfad des HAL. Sie haengen an eigenen
+ * mixPorts (voip_rx/voip_tx) und bekommen bewusst KEIN card.profile.device:
+ * geroutet wird ueber den primaeren Strom, und die Routenpolitik soll sie in
+ * Ruhe lassen. */
+#define OBJ_VOIP_SINK   2
+#define OBJ_VOIP_SOURCE 3
+
 #define PROFILE_OFF           0
 #define PROFILE_DEFAULT       1
 #define PROFILE_VOICECALL     2
@@ -444,6 +451,51 @@ static void emit_node(struct impl *this, uint32_t device)
 	spa_device_emit_object_info(&this->hooks, device, &info);
 }
 
+/* Der VoIP-Pfad des HAL: eigene mixPorts, eigene Aufbereitung. Android nutzt
+ * ihn fuer Sprachanrufe ueber das Netz - der HAL schaltet dafuer seine
+ * Echounterdrueckung und Rauschminderung anders als bei Musik.
+ *
+ * Niedrige Prioritaet: nichts soll versehentlich hier landen. Wer den Pfad
+ * will, waehlt ihn ausdruecklich (oder eine Regel schickt Gespraeche dorthin). */
+static void emit_voip_node(struct impl *this, bool sink)
+{
+	struct spa_device_object_info info;
+	struct spa_dict_item items[12];
+	uint32_t n = 0;
+
+	items[n++] = SPA_DICT_ITEM_INIT("node.name",
+			sink ? "droid-voip-sink" : "droid-voip-source");
+	items[n++] = SPA_DICT_ITEM_INIT("node.description",
+			sink ? "Android HAL (VoIP-Wiedergabe)" : "Android HAL (VoIP-Aufnahme)");
+	items[n++] = SPA_DICT_ITEM_INIT("media.class",
+			sink ? "Audio/Sink" : "Audio/Source");
+	items[n++] = SPA_DICT_ITEM_INIT("device.api", DROID_API_NAME);
+	items[n++] = SPA_DICT_ITEM_INIT("droid.mix-port", sink ? "voip_rx" : "voip_tx");
+	if (!sink)
+		/* Genau diese Quelle laesst den HAL seine Sprachaufbereitung
+		 * einschalten - die Schreibweise mit Leerzeichen ist die des
+		 * Umsetzungstabelle, nicht meine Wahl. */
+		items[n++] = SPA_DICT_ITEM_INIT("droid.audio-source", "voice communication");
+	items[n++] = SPA_DICT_ITEM_INIT("audio.format", "S16LE");
+	/* 16 kHz, nicht 48: der HAL erzwingt fuer voip_rx genau das ("Override
+	 * voip_rx channel map (mono) and sample rate (16000)"). Boeten wir 48 kHz
+	 * an, schriebe der Knoten mit dreifacher Geschwindigkeit hinein. */
+	items[n++] = SPA_DICT_ITEM_INIT("audio.rate", "16000");
+	items[n++] = SPA_DICT_ITEM_INIT("audio.channels", sink ? "2" : "1");
+	items[n++] = SPA_DICT_ITEM_INIT("audio.position", sink ? "FL,FR" : "MONO");
+	items[n++] = SPA_DICT_ITEM_INIT("node.driver", "true");
+	items[n++] = SPA_DICT_ITEM_INIT("priority.session", "500");
+
+	info = SPA_DEVICE_OBJECT_INFO_INIT();
+	info.type = SPA_TYPE_INTERFACE_Node;
+	info.factory_name = sink ? "api.droid.pcm" : "api.droid.pcm.source";
+	info.change_mask = SPA_DEVICE_OBJECT_CHANGE_MASK_PROPS;
+	info.props = &SPA_DICT_INIT(items, n);
+
+	spa_device_emit_object_info(&this->hooks,
+			sink ? OBJ_VOIP_SINK : OBJ_VOIP_SOURCE, &info);
+}
+
 static void emit_nodes(struct impl *this, bool present)
 {
 	uint32_t i;
@@ -454,9 +506,13 @@ static void emit_nodes(struct impl *this, bool present)
 	if (present) {
 		emit_node(this, DEV_SINK);
 		emit_node(this, DEV_SOURCE);
+		emit_voip_node(this, true);
+		emit_voip_node(this, false);
 	} else {
 		for (i = 0; i < N_DEVICES; i++)
 			spa_device_emit_object_info(&this->hooks, i, NULL);
+		spa_device_emit_object_info(&this->hooks, OBJ_VOIP_SINK, NULL);
+		spa_device_emit_object_info(&this->hooks, OBJ_VOIP_SOURCE, NULL);
 	}
 	this->nodes_emitted = present;
 }

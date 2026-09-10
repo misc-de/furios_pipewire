@@ -121,6 +121,8 @@ struct impl {
 	char audio_source[32];      /* Android-Audioquelle, z. B. "mic" */
 	char hw_options[192];       /* Optionen fuer das HAL-Modul, s. impl_init */
 	char config_file[192];
+	uint32_t pref_rate;         /* Wunschwerte aus den Knoteneigenschaften */
+	uint32_t pref_channels;
 	char wanted_port[64];       /* vom Device gewuenschte Route */
 	bool mode_holds_hal;        /* HAL nur wegen Anrufmodus offen */
 	bool in_call;               /* Modus ist AUDIO_MODE_IN_CALL */
@@ -337,9 +339,9 @@ static int hal_open(struct impl *this)
 
 	spec.format = PA_SAMPLE_S16LE;
 	spec.rate = this->port.have_format
-		? this->port.current_format.info.raw.rate : DEFAULT_RATE;
+		? this->port.current_format.info.raw.rate : this->pref_rate;
 	spec.channels = this->port.have_format
-		? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS;
+		? this->port.current_format.info.raw.channels : this->pref_channels;
 	if (spec.channels == 1)
 		pa_channel_map_init_mono(&map);
 	else
@@ -356,13 +358,29 @@ static int hal_open(struct impl *this)
 
 	this->hal_latency_ns = (uint64_t) pa_droid_stream_get_latency(this->stream) * 1000;
 	latency_changed(this);
+	/* Der HAL darf die Wunschwerte ueberschreiben - fuer voip_rx tut er das
+	 * sogar immer. Merkt man es nicht, spielt der Ton in falscher
+	 * Geschwindigkeit. Also nachsehen und sagen. */
+	{
+		const pa_sample_spec *got = pa_droid_stream_sample_spec(this->stream);
+		if (got && (got->rate != spec.rate || got->channels != spec.channels))
+			spa_log_warn(this->log, NAME " HAL nahm %u Hz/%u Kanaele statt "
+					"%u Hz/%u - der Ton wird verstimmt klingen",
+					got->rate, got->channels, spec.rate, spec.channels);
+	}
 	spa_log_info(this->log, NAME " Stream offen: %s -> %s, %u Hz, %u Kanaele, Puffer %zu B",
 			mix->name, dev->name, spec.rate, spec.channels,
 			pa_droid_stream_buffer_size(this->stream));
 
 	/* Ohne diese beiden Schritte oeffnet der Stream zwar, bleibt aber stumm.
 	 * PulseAudios droid-sink macht genau dasselbe (do_routing/update_volumes). */
-	if (pa_droid_stream_set_route(this->stream, dev) < 0)
+	/* NUR auf dem primaeren Strom: pa_droid_stream_set_route() prueft das mit
+	 * einer Zusicherung und bricht den ganzen Prozess ab, wenn man es auf
+	 * einem anderen mixPort versucht (voip_rx zum Beispiel). Das Routing gilt
+	 * ohnehin fuer alle offenen Stroeme - der primaere gibt es vor. */
+	if (!pa_droid_stream_is_primary(this->stream))
+		DIAG(this, "kein primaerer Strom - Routing macht der primaere");
+	else if (pa_droid_stream_set_route(this->stream, dev) < 0)
 		spa_log_warn(this->log, NAME " Routing auf \"%s\" fehlgeschlagen", dev->name);
 	else
 		DIAG(this, "Routing gesetzt: %s", dev->name);
@@ -866,13 +884,18 @@ static int port_enum_formats(struct impl *this, struct spa_pod_builder *b,
 	if (index > 0)
 		return 0;
 
+	/* Der bevorzugte Wert steht vorn in der Auswahl - sonst nimmt der Adapter
+	 * den Standard und ignoriert audio.rate aus den Knoteneigenschaften. Fuer
+	 * den VoIP-Kanal ist das entscheidend: der HAL erzwingt dort 16 kHz. */
 	*param = spa_pod_builder_add_object(b,
 		SPA_TYPE_OBJECT_Format, SPA_PARAM_EnumFormat,
 		SPA_FORMAT_mediaType,      SPA_POD_Id(SPA_MEDIA_TYPE_audio),
 		SPA_FORMAT_mediaSubtype,   SPA_POD_Id(SPA_MEDIA_SUBTYPE_raw),
 		SPA_FORMAT_AUDIO_format,   SPA_POD_Id(SPA_AUDIO_FORMAT_S16_LE),
-		SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(DEFAULT_RATE, 8000, 48000),
-		SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(DEFAULT_CHANNELS, 1, 2));
+		SPA_FORMAT_AUDIO_rate,     SPA_POD_CHOICE_RANGE_Int(
+						(int) this->pref_rate, 8000, 48000),
+		SPA_FORMAT_AUDIO_channels, SPA_POD_CHOICE_RANGE_Int(
+						(int) this->pref_channels, 1, 2));
 	return 1;
 }
 
@@ -1385,6 +1408,21 @@ static int impl_init(const struct spa_handle_factory *factory,
 	if (str)
 		snprintf(this->input_port_name, sizeof(this->input_port_name), "%s", str);
 
+	/* Wunschformat aus den Knoteneigenschaften. Der VoIP-Kanal laeuft mit
+	 * 16 kHz, der primaere mit 48. */
+	this->pref_rate = DEFAULT_RATE;
+	this->pref_channels = DEFAULT_CHANNELS;
+	if (info) {
+		if ((str = spa_dict_lookup(info, "audio.rate")))
+			spa_atou32(str, &this->pref_rate, 10);
+		if ((str = spa_dict_lookup(info, "audio.channels")))
+			spa_atou32(str, &this->pref_channels, 10);
+	}
+	if (this->pref_rate < 8000 || this->pref_rate > 48000)
+		this->pref_rate = DEFAULT_RATE;
+	if (this->pref_channels < 1 || this->pref_channels > 2)
+		this->pref_channels = DEFAULT_CHANNELS;
+
 	/* Herstelleroptionen des HAL-Moduls. Voreinstellung siehe hal_open(). */
 	str = info ? spa_dict_lookup(info, "droid.hw-options") : NULL;
 	snprintf(this->hw_options, sizeof(this->hw_options), "%s",
@@ -1498,6 +1536,8 @@ static int apply_route(struct impl *this, const char *route)
 
 	if (this->capture)
 		res = pa_droid_hw_set_input_device(this->stream, dev) ? 0 : -EIO;
+	else if (!pa_droid_stream_is_primary(this->stream))
+		return 0;   /* siehe hal_open(): nur der primaere Strom routet */
 	else
 		res = pa_droid_stream_set_route(this->stream, dev);
 
@@ -1608,7 +1648,8 @@ static int apply_mode(struct impl *this, const char *mode)
 	 * spaeteres Umschalten auf genau diese Route waere dann ein No-Op, und
 	 * HAL und Karte blieben dauerhaft uneins. Deshalb die zuletzt vom Device
 	 * gewuenschte Route neu setzen. */
-	if (this->wanted_port[0] && this->stream) {
+	if (this->wanted_port[0] && this->stream &&
+	    pa_droid_stream_is_primary(this->stream)) {
 		dm_config_port *dev = dm_config_find_port(this->hw->enabled_module,
 				this->wanted_port);
 		if (dev)
