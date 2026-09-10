@@ -531,10 +531,21 @@ device disappears. Unplugging a headset mid playback left the default on
 speaker, so the phone simply went quiet. `droid-default-sink-policy.lua` puts
 it back.
 
-**The microphone deliberately stays on the phone.** The BT card offers a source
-and it reads happily - 192000 bytes of pure silence, RMS 0, peak 0. It is a
-loopback node that exists so that opening it triggers the headset profile, and
-that path carries no audio here either.
+**The microphone deliberately stays on the phone, and is no longer offered at
+all.** The BT card offers a source and it reads happily - 192000 bytes of pure
+silence, RMS 0, peak 0. It is a loopback node that exists so that opening it
+triggers the headset profile, and that path carries no audio here either. It
+is kept alive in every profile by WirePlumber's setting
+`bluetooth.autoswitch-to-headset-profile`, whose own description is "Always
+show microphone for Bluetooth headsets" - so every recorder listed the headset
+as a microphone, picking it appeared to work, and the recording was silence.
+Measured again on 2026-09-10, 3 s at 16 kHz mono: 48000 samples, **one**
+distinct value, RMS 0, in the A2DP profile and in the hands-free profile
+alike. The setting is off in `51-bluez-ofono.conf`; the loopback source now
+exists only while the card really is in a hands-free profile, which is where a
+call puts it. `droid-input-follows-output.lua` keeps its Bluetooth guard
+anyway - the node can still appear, and the rule that the microphone must not
+follow onto it has not changed.
 
 **Bluetooth music quality is a codec question, and Debian is one codec short.**
 `libspa-0.2-bluetooth` ships modules for SBC, LDAC, aptX, Opus and LC3 - but
