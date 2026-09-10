@@ -145,8 +145,8 @@ ear.
 
     ./tests/coverage.sh
 
-reports line coverage. The four C files that can be reached without hardware
-are at **100 %**:
+reports line coverage. Everything that can be reached without hardware is at
+**100 %**:
 
 | | |
 |---|---|
@@ -154,6 +154,18 @@ are at **100 %**:
 | `compat/pa-audio.c` | 100 % of 87 |
 | `compat/pa-compat.c` | 100 % of 77 |
 | `compat/pa-containers.c` | 100 % of 172 |
+| `wireplumber/droid.lua` | 100 % of 133 |
+| `wireplumber/droid-bluetooth-call.lua` | 100 % of 97 |
+| `wireplumber/droid-default-sink-policy.lua` | 100 % of 61 |
+| `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
+
+The WirePlumber scripts run inside a session manager, so `tests/lua/` gives
+them one: a stub shallow enough to read in a sitting, where object managers
+return what a test put there and every call the script makes is recorded, so a
+test can look at what it did rather than at what it said. Coverage comes from
+Lua's own line hook rather than a tool - same reason as the rest of the suite,
+this has to run on the phone. A script that passes against the stub is one
+whose logic holds, not one that is known to work on the device.
 
 The card is started the way the daemon starts it - init, listen, enumerate,
 set, sync, clear - against `tests/audio-policy-fixture.xml` rather than the

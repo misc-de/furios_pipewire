@@ -37,12 +37,6 @@ function btCard ()
   }
 end
 
-function droidCard ()
-  return cutils.get_object_manager ("device"):lookup {
-    Constraint { "device.api", "=", "droid-hal" },
-  }
-end
-
 function inVoiceCall (dev)
   for p in dev:iterate_params ("Profile") do
     local profile = cutils.parseParam (p, "Profile")

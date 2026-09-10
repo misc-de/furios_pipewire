@@ -52,10 +52,32 @@ else
     printf '  \033[33mskipped\033[0m - no build tree, see "Building" in README.md\n'
 fi
 
+# --- the WirePlumber scripts ------------------------------------------------
+#
+# They run inside a session manager, so they get one: tests/lua/ has a stub
+# shallow enough to read in a sitting. Twice in one day an error in these
+# scripts took WirePlumber down and every sound with it, which is the whole
+# argument for testing them.
+if command -v lua5.4 >/dev/null 2>&1; then
+    for t in "$HERE"/lua/test-*.lua; do
+        [ -e "$t" ] || continue
+        name=$(basename "$t" .lua)
+        printf '\n\033[1m== %s\033[0m\n' "${name#test-}"
+        if TEST_ROOT="$ROOT" LUA_COVERAGE="${LUA_COVERAGE:-}" lua5.4 "$t"; then
+            :
+        else
+            FAILED=$((FAILED + 1))
+        fi
+    done
+else
+    printf '\n\033[1m== wireplumber scripts\033[0m\n'
+    printf '  \033[33mskipped\033[0m - lua5.4 not installed (apt install lua5.4)\n'
+fi
+
 # --- shell syntax, cheap and worth it ---------------------------------------
 printf '\n\033[1m== shell scripts parse\033[0m\n'
 for f in "$ROOT"/*.sh "$ROOT"/audioctl "$ROOT"/gui/*.sh "$ROOT"/tools/*.sh \
-         "$ROOT"/experiments/*.sh "$ROOT"/packaging/*.sh; do
+         "$ROOT"/experiments/*.sh "$ROOT"/packaging/*.sh "$ROOT"/tests/*.sh; do
     [ -e "$f" ] || continue
     if bash -n "$f" 2>/dev/null; then
         printf '  \033[32mok\033[0m   %s\n' "${f#$ROOT/}"
@@ -64,6 +86,21 @@ for f in "$ROOT"/*.sh "$ROOT"/audioctl "$ROOT"/gui/*.sh "$ROOT"/tools/*.sh \
         FAILED=$((FAILED + 1))
     fi
 done
+
+printf '\n\033[1m== lua scripts parse\033[0m\n'
+if command -v luac5.4 >/dev/null 2>&1; then
+    for f in "$ROOT"/wireplumber/*.lua "$ROOT"/tests/lua/*.lua; do
+        [ -e "$f" ] || continue
+        if luac5.4 -p "$f" 2>/dev/null; then
+            printf '  \033[32mok\033[0m   %s\n' "${f#$ROOT/}"
+        else
+            printf '  \033[31mFAIL\033[0m %s\n' "${f#$ROOT/}"
+            FAILED=$((FAILED + 1))
+        fi
+    done
+else
+    printf '  \033[33mskipped\033[0m - luac5.4 not installed\n'
+fi
 
 printf '\n\033[1m== python scripts parse\033[0m\n'
 for f in "$ROOT"/*.py "$ROOT"/gui/*.py "$ROOT"/tools/*.py "$ROOT"/poc/spa-droid/tools/*.py; do

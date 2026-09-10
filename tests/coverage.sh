@@ -70,4 +70,15 @@ for f in pa-audio.c pa-compat.c pa-containers.c; do
 done
 
 echo
+echo "== the WirePlumber scripts =="
+if command -v lua5.4 >/dev/null 2>&1; then
+    for t in "$ROOT"/tests/lua/test-*.lua; do
+        [ -e "$t" ] || continue
+        TEST_ROOT="$ROOT" LUA_COVERAGE=1 lua5.4 "$t" 2>/dev/null | grep "% of"
+    done
+else
+    echo "  skipped - lua5.4 not installed"
+fi
+
+echo
 echo "  droid-pcm.c: no test binary - it opens the HAL to do anything at all"
