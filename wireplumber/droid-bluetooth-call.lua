@@ -47,6 +47,17 @@ SETTING = "furios.bluetooth-call-routing"
 -- in well under a second.
 MAX_DEFENDS = 3
 
+-- How long to leave callaudiod alone before touching the Bluetooth card.
+--
+-- callaudiod runs a sequence of PulseAudio operations when a call starts -
+-- park the output, set the real port, set the input port - and it waits for
+-- each one. Changing the Bluetooth card's profile in the middle of that
+-- changes the set of cards and nodes underneath it, and its next SelectMode
+-- then blocks until the D-Bus timeout: 25 seconds with no audio in either
+-- direction, or a hang-up that leaves the phone in the voicecall profile.
+-- Measured sequence takes about 200 ms; a second and a half is room to spare.
+TAKEOVER_DELAY_MS = 1500
+
 in_bt_call = false
 gave_up = false
 defends = 0
@@ -135,11 +146,7 @@ function setBtProfile (card, name)
   return false
 end
 
-function enterBtCall (dev, card)
-  saved_routes = activeRoutes (dev)
-  in_bt_call = true
-  defends = 0
-
+function takeOver (dev, card)
   local prof = setBtProfile (card, "headset-head-unit")
              or setBtProfile (card, "headset-head-unit-cvsd")
   local sink = setRouteByName (dev, BT_SINK_ROUTE)
@@ -156,6 +163,28 @@ function enterBtCall (dev, card)
     in_bt_call = false
     saved_routes = nil
   end
+end
+
+function enterBtCall (dev, card)
+  saved_routes = activeRoutes (dev)
+  in_bt_call = true
+  defends = 0
+
+  -- Not now: callaudiod is still setting the call up, and pulling the cards
+  -- around underneath it is what wedges it. Marked as taken over straight
+  -- away all the same, so a second event does not schedule this twice.
+  Core.timeout_add (TAKEOVER_DELAY_MS, function ()
+    -- The call may be over by the time this runs.
+    if in_bt_call then
+      local ok, err = pcall (function () takeOver (dev, card) end)
+      if not ok then
+        in_bt_call = false
+        saved_routes = nil
+        log:warning ("bluetooth call: giving up - " .. tostring (err))
+      end
+    end
+    return false
+  end)
 end
 
 function leaveBtCall (dev, card)

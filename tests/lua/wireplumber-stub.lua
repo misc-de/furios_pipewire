@@ -158,10 +158,19 @@ local script_state = {
   "gave_up", "defends",
 }
 
+-- Run every timer callback that is waiting, the way the main loop would.
+function M.fire_timers()
+  local pending, n = M.timers, 0
+  M.timers = {}
+  for _, fn in ipairs(pending) do fn(); n = n + 1 end
+  return n
+end
+
 function M.install()
   M.reset()
   M.objects = { node = {}, device = {}, metadata = {} }
   M.settings = {}
+  M.timers = {}
   for _, name in ipairs(script_state) do _G[name] = nil end
 
   local log = {}
@@ -195,6 +204,19 @@ function M.install()
   }
 
   Feature = { SpaDevice = { ENABLED = 1 }, Proxy = { BOUND = 2 } }
+
+  -- Timers. A script that waits before acting still has to be testable, so
+  -- the callbacks are collected here and the test decides when they run -
+  -- which also makes "what happens if the call is over by then" a case one
+  -- can actually write down.
+  M.timers = {}
+  Core = {
+    timeout_add = function (ms, fn)
+      record("timeout_add", ms)
+      table.insert(M.timers, fn)
+      return { ms = ms }
+    end,
+  }
 
   -- WirePlumber's settings. A script reading one that nobody set gets
   -- nothing back, which is what happens on a device where the schema entry is

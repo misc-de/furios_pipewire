@@ -41,7 +41,10 @@ end
 
 local function fire(dev)
   local hook = wp.hooks["monitor/droid-bluetooth-call"]
-  T.traced(function () hook.execute({ get_subject = function () return dev end }) end)
+  T.traced(function () T.traced(function () hook.execute({ get_subject = function () return dev end }) end) end)
+  -- The takeover waits for callaudiod to finish; in a test the main loop is
+  -- us, so run whatever is waiting.
+  T.traced(function () wp.fire_timers() end)
 end
 
 local function route_names_set()
@@ -229,5 +232,49 @@ local idle = wp.add("device", bt_card())
 fire(idle)
 T.check_equal("a headset outside a call is left alone", 0,
               #wp.calls_of("set_params"))
+
+-- The Bluetooth card is not touched while callaudiod is still setting the call
+-- up. Pulling the cards around underneath it is what wedged it for 25 seconds.
+setup()
+dev = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card())
+local hook = wp.hooks["monitor/droid-bluetooth-call"]
+wp.reset()
+T.traced(function () hook.execute({ get_subject = function () return dev end }) end)
+T.check_equal("nothing is set while callaudiod is still working", 0,
+              #wp.calls_of("set_params"))
+T.check("but a takeover is scheduled", #wp.calls_of("timeout_add") == 1)
+T.check("and not immediately", wp.calls_of("timeout_add")[1].args[1] >= 1000)
+T.traced(function () wp.fire_timers() end)
+T.check("afterwards it takes over", #wp.calls_of("set_params") >= 3)
+
+-- The call can be over before the delay is up.
+setup()
+dev = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card())
+hook = wp.hooks["monitor/droid-bluetooth-call"]
+T.traced(function () hook.execute({ get_subject = function () return dev end }) end)
+dev.params.Profile = { { name = "default" } }
+T.traced(function () hook.execute({ get_subject = function () return dev end }) end)   -- hung up
+wp.reset()
+T.traced(function () wp.fire_timers() end)
+T.check_equal("a call that ended before the delay is not taken over", 0,
+              #wp.calls_of("set_params"))
+
+-- And it can throw once it runs, long after the event that scheduled it. The
+-- hook's own pcall is gone by then, so the timer needs its own.
+setup()
+dev = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card())
+hook = wp.hooks["monitor/droid-bluetooth-call"]
+T.traced(function () hook.execute({ get_subject = function () return dev end }) end)
+dev.iterate_params = function () error("the card went away") end
+wp.reset()
+T.traced(function () wp.fire_timers() end)
+local caught = false
+for _, c in ipairs(wp.calls_of("log")) do
+  if tostring(c.args[2]):find("giving up", 1, true) then caught = true end
+end
+T.check("a takeover that throws is caught, not thrown at the monitor", caught)
 
 T.done()
