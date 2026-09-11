@@ -671,6 +671,66 @@ with one distinct value to the host, that is the answer for this device:
 mobile voice path runs modem <-> DSP, the HAL will say it has put that path on
 the Bluetooth line, and no sound comes out of it.
 
+### Why the same phone does this under Android
+
+Because it is not the same software talking to the chip.
+
+A Bluetooth call is a **hardware path**, not a stream through the computer: BT
+chip -> PCM/I2S -> audio DSP -> modem. That is the whole reason the audio HAL
+has a `BT_SCO=on` switch at all. The path has **two ends**, and both have to be
+configured.
+
+Android configures both. This device carries
+`/android/vendor/lib64/libbt-vendor.so`, and inside it:
+
+    BT_VND_OP_SCO_CFG
+
+That is the vendor operation "configure the SCO audio interface" from Android's
+Bluetooth HAL. Android's own Bluetooth stack loads that library and calls it,
+and MediaTek's code then programs the **controller's** PCM interface so SCO
+audio goes out on the line to the DSP.
+
+We only ever configure the other end. `BT_SCO=on` tells the DSP to take the
+voice path from the Bluetooth PCM line - and it does, and says so, and patches
+both directions. Nobody has told the controller to put anything on that line.
+Two ends of one wire, one of them switched.
+
+BlueZ cannot make that call. `libbt-vendor.so` is an Android HAL library driven
+by Android's Bluetooth stack; BlueZ has no concept of it. What BlueZ does
+instead is what the Linux Bluetooth subsystem does: open an SCO socket and
+expect the audio **over HCI, in the host**. Which is exactly why the
+measurement there is digital silence - we are listening somewhere the audio was
+never routed.
+
+The modern Linux answer to this exists and is missing from this kernel.
+PipeWire can do it: `bluez5.hw-offload-datapath`, with the code to match
+("Bluetooth audio offload active", "set offload codec succeeded"). It needs the
+kernel to configure the controller's data path, which means
+`hci_configure_data_path`. On this phone:
+
+    $ grep -c hci_configure_data_path /proc/kallsyms
+    0
+
+Kernel 4.19. That machinery reached mainline years later.
+
+So: same silicon, different stack. Android throws a vendor switch the Linux
+Bluetooth subsystem has no equivalent for on this kernel, and the one modern
+mechanism that would replace it is not there. It is not a configuration
+mistake, and it is not a small patch:
+
+- backporting the kernel offload work to 4.19 **and** a MediaTek BT driver that
+  implements the data-path configuration is a large undertaking;
+- loading `libbt-vendor.so` through libhybris and sending `BT_VND_OP_SCO_CFG`
+  ourselves is conceivable - the audio HAL is loaded exactly that way - but the
+  library expects Android's Bluetooth stack around it, it would contend with
+  BlueZ over the HCI transport, and here the controller belongs to the kernel
+  driver. That is a research project with a fair chance of taking Bluetooth
+  down with it.
+
+None of this is particular to this project. It is a Halium/Droidian boundary,
+and it is why the shipped PulseAudio cannot do it either - which was measured,
+not assumed.
+
 So it stays **off**. The script stays too, because none of it is wrong and
 another device may well behave differently:
 
