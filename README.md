@@ -643,19 +643,40 @@ changed nothing. Two things were wrong, both invisible to a dry run:
   - 25 seconds, no audio, or a hang-up that leaves the phone in the
   `voicecall` profile.
 
-Both now have an answer. The script gives up after three rounds of the route
-fight and hands the call back to the phone - a call on the earpiece is a
-nuisance, a call with no audio is not - and it waits 1.5 s before touching the
-Bluetooth card at all, which is well clear of callaudiod's own ~200 ms
-sequence. It also notices a headset connected *during* a call, which it could
-not before: nothing moves on the phone card then, so the Bluetooth card
-announcing itself is the only notice there is.
+Both were fixed. The script gives up after three rounds of the route fight and
+hands the call back to the phone - a call on the earpiece is a nuisance, a call
+with no audio is not - and it no longer waits a fixed span before touching the
+Bluetooth card but waits for the card to go **quiet**: every route or profile
+change while the call is being set up arms the wait again, and only a second in
+which nothing moves lets the takeover through. A fixed delay was tried first
+and was not enough, because the profile goes to `voicecall` while the phone is
+still *ringing* - the delay elapsed 14 ms before callaudiod set the port it
+wanted. It also notices a headset connected *during* a call, which it could not
+before: nothing moves on the phone card then, so the Bluetooth card announcing
+itself is the only notice there is.
 
-It stays **off** until a real call has shown that it works. Turn it on with
+Measured on the third call, with all of that in place:
+
+    14:49:17.175  profile voicecall
+    14:49:17.573  callaudiod sets the earpiece
+    14:49:18.625  takeover -> BT SCO          (+1.05 s of quiet)
+    14:49:18.637  hw set_parameters(BT_SCO=on)
+                  no route change for the rest of the call
+
+Nothing fought, the state was exactly what it should be - and **there was no
+audio in either direction**, on the headset or on the phone. Put next to the
+other end of the same question, where the SCO channel delivers 48000 samples
+with one distinct value to the host, that is the answer for this device:
+**Bluetooth telephony does not work here, by any of the paths there are.** The
+mobile voice path runs modem <-> DSP, the HAL will say it has put that path on
+the Bluetooth line, and no sound comes out of it.
+
+So it stays **off**. The script stays too, because none of it is wrong and
+another device may well behave differently:
 
     wpctl settings -s furios.bluetooth-call-routing true
 
-and off again the same way with `false`. The setting is declared in
+turns it on, `false` turns it off again. The setting is declared in
 `51-bluez-ofono.conf`; WirePlumber ignores a setting it has no schema entry
 for, silently, which is why the declaration is there and why
 `tests/test-wireplumber-conf.sh` checks every name in those files.
