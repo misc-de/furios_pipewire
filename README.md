@@ -81,6 +81,20 @@ cost time:
   unavailable on this device as well; there is no jack detection here
   (`/sys/class/extcon` only lists USB).
 
+**Everything callaudiod touches is fragile in the same way.** It keeps one
+reference to the card and waits, synchronously, for each PulseAudio operation
+it starts. Anything that changes the set of cards or nodes underneath it -
+WirePlumber restarting, a profile switch, a Bluetooth card appearing or
+changing profile - leaves its next `SelectMode` waiting for a completion that
+never comes. The caller gives up after the D-Bus timeout of 25 seconds,
+gnome-calls logs `Failed to select audio mode: Timeout was reached`, and the
+call has no audio in either direction: the card never reaches the `voicecall`
+profile, so the HAL never leaves `AUDIO_MODE_NORMAL` and there is no voice
+path to hear. Picking a device by hand does not help, because it is the mode
+that is missing, not the device. Three of these on one day, each with a
+different trigger, are the reason for the three paragraphs below. Confirmed
+working again on 2026-09-11 after them.
+
 **callaudiod has to be restarted whenever the card is.** It looks the card up
 once and keeps its index; a WirePlumber restart destroys every device and
 creates it again with a new one - measured: card 161 before, 248 after.
@@ -112,6 +126,14 @@ on the earpiece, and picking a device by hand changes nothing because the mode
 is what is missing. `audioctl` now starts callaudiod itself after a switch,
 with a method that asks nothing of it, and `SelectMode` then answers in about
 a second.
+
+**And nothing may pull the cards around while a call is being set up.** That
+is the third trigger, and it was self-inflicted: `droid-bluetooth-call.lua`
+switched the headset into its hands-free profile the moment the call started,
+which is exactly when callaudiod is working through its own sequence. It now
+waits 1.5 s before touching the Bluetooth card - callaudiod's sequence takes
+about 200 ms - and the automatic routing is off by default until a real call
+has shown that the whole thing works. See **Bluetooth** below.
 
 ## As a package
 
@@ -188,10 +210,11 @@ reports line coverage. Everything that can be reached without hardware is at
 | `compat/pa-compat.c` | 100 % of 77 |
 | `compat/pa-containers.c` | 100 % of 172 |
 | `wireplumber/droid.lua` | 100 % of 133 |
-| `wireplumber/droid-bluetooth-call.lua` | 100 % of 97 |
+| `wireplumber/droid-bluetooth-call.lua` | 100 % of 140 |
 | `wireplumber/droid-default-sink-policy.lua` | 100 % of 61 |
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
-| `audioctl` | 100 % of 260 |
+| `audioctl` | 100 % of 271 |
+| `tools/furios-audio-callaudio-refresh` | 100 % of 9 |
 | `gui/furios-audio-switch.py` | 100 % of 267 |
 | `tools/furios-audio-pause-on-disconnect.py` | 100 % of 61 |
 | `gen-pipewire-hal-conf.py` | 100 % of 28 |
@@ -203,6 +226,16 @@ about whether the code is right. The stub fabricates whatever is asked of it
 and remembers how it was called, so a test can look at which widget was built
 and with what. It proves the parts that decide things decide them right; it
 proves nothing about GTK.
+
+Two suites do not measure code but names and decisions around it.
+`tests/test-wireplumber-conf.sh` checks every setting in `wireplumber/*.conf`
+against WirePlumber's schema - or against the schema we declare ourselves in
+the same file - and every `monitor.bluez.properties` key against the strings in
+libspa-bluez5, because a name neither of them knows is ignored rather than
+refused. `tests/test-callaudio-refresh.sh` covers the small script that gives
+callaudiod a fresh view of the card: never during a call, stop it when its card
+is gone, and start it again with a method that asks nothing of it - starting it
+with `SelectMode` blocks for the same 25 seconds.
 
 `audioctl` is measured with bash's own tracing: `PS4` carries `LINENO`, `set -x`
 prints it, and what is left is arithmetic. It runs against a `PATH` where
@@ -297,6 +330,28 @@ The detour is necessary because device and node run in **different processes** -
 only the node holds the HAL stream.
 
 ## Traps that cost time
+
+**A configuration key that does not exist is not an error.** WirePlumber and
+the SPA plugins read their configuration, find a name they have no schema or
+handler for, and carry on with the default. The sound then behaves as if the
+file were not there, and nothing says why. `bluez5.reconnect-profiles` sat in
+`51-bluez-ofono.conf` for a day with a comment explaining what it did; it is a
+PulseAudio name, and it exists nowhere in PipeWire, WirePlumber or
+libspa-bluez5. The property does exist as `bluez5.auto-connect`, and the case
+it is for is reproducible: leave the card in a hands-free profile, restart
+WirePlumber, and without it only `off` and the two headset profiles remain
+until someone disconnects and reconnects by hand; with it all three A2DP
+profiles come back and the card picks `a2dp-sink` again on its own.
+`tests/test-wireplumber-conf.sh` now checks the names in those files against
+WirePlumber's own schema and the strings in libspa-bluez5.
+
+**The package version sorts by commit count, not by commit hash.** dpkg
+compares runs of digits numerically and everything else as text, so with
+`0.1.0+git<date>.<hash>` it was the hash that decided the order between two
+builds of the same day - and hashes are not monotonic. A dirty build of an
+older commit outranked a clean newer one, and installing the newer package was
+announced as a downgrade. `git rev-list --count HEAD` leads the version now;
+date and hash follow, where they can be read but cannot affect the order.
 
 - **A hardware sink has to drive the graph.** Without `spa_node_call_ready()`
   from its own timerfd PipeWire never calls `process()` - the sink appears but
@@ -517,16 +572,17 @@ call or ringtone and never taken back). The pin is dropped rather than
 replaced, so the phone takes over again the moment the headset is gone. Never
 during a call.
 
-**A call moves to a connected headset by itself.** On this device the voice
-path of a mobile call never reaches the host - it runs modem <-> DSP. The
-headset is served by the HAL, which puts the path onto the Bluetooth PCM line
-when the card is routed to a BT SCO device. `droid-bluetooth-call.lua` does the
-three things that have to happen together: headset into a hands-free profile so
-an SCO channel exists, card onto `output-bluetooth_sco` and
-`input-bluetooth_sco_headset`, and the route set again whenever callaudiod
-moves it back to the earpiece. Everything is undone when the call ends.
+**Moving a call to a connected headset is built, and switched off.** On this
+device the voice path of a mobile call never reaches the host - it runs modem
+<-> DSP. The headset is served by the HAL, which puts the path onto the
+Bluetooth PCM line when the card is routed to a BT SCO device.
+`droid-bluetooth-call.lua` does the three things that have to happen together:
+headset into a hands-free profile so an SCO channel exists, card onto
+`output-bluetooth_sco` and `input-bluetooth_sco_headset`, and the route set
+again whenever callaudiod moves it back to the earpiece. Everything is undone
+when the call ends.
 
-Dry run with a simulated call - what the HAL reports:
+The dry run was convincing - this is what the HAL reports:
 
     hw set_parameters(BT_SCO=on)
     Created output audio patch "primary output"->"BT SCO"
@@ -534,9 +590,36 @@ Dry run with a simulated call - what the HAL reports:
     Created input audio patch "primary input"<-"BT SCO Headset Mic"
 
 The microphone comes along on the same channel; there is nothing separate to
-switch. Forcing the port back to the earpiece mid-call was reverted within
-seconds, and hanging up restored speaker, built-in microphone and A2DP.
-**A real call has not confirmed this yet.**
+switch. And then the first real call had no audio at all - not on the headset,
+not on the earpiece, in neither direction, and picking the earpiece by hand
+changed nothing. Two things were wrong, both invisible to a dry run:
+
+- **The route does not stay.** callaudiod only knows earpiece and speaker and
+  resets the port during a call. The script set it back, callaudiod set it
+  again, two to three round trips a second, and the HAL tore the voice path
+  down and rebuilt it each time (`BT_SCO=off`, `BT_SCO=on`, ...).
+- **Changing the Bluetooth profile mid-setup wedges callaudiod.** It changes
+  the set of cards underneath a sequence of PulseAudio operations callaudiod
+  is waiting on, and its next `SelectMode` then blocks until the D-Bus timeout
+  - 25 seconds, no audio, or a hang-up that leaves the phone in the
+  `voicecall` profile.
+
+Both now have an answer. The script gives up after three rounds of the route
+fight and hands the call back to the phone - a call on the earpiece is a
+nuisance, a call with no audio is not - and it waits 1.5 s before touching the
+Bluetooth card at all, which is well clear of callaudiod's own ~200 ms
+sequence. It also notices a headset connected *during* a call, which it could
+not before: nothing moves on the phone card then, so the Bluetooth card
+announcing itself is the only notice there is.
+
+It stays **off** until a real call has shown that it works. Turn it on with
+
+    wpctl settings -s furios.bluetooth-call-routing true
+
+and off again the same way with `false`. The setting is declared in
+`51-bluez-ofono.conf`; WirePlumber ignores a setting it has no schema entry
+for, silently, which is why the declaration is there and why
+`tests/test-wireplumber-conf.sh` checks every name in those files.
 
 **The host-side headset microphone delivers nothing**, and that is not a
 configuration mistake: with the card in `headset-head-unit` and the native
@@ -598,10 +681,14 @@ Reading what a headset actually offers, rather than guessing:
     busctl get-property org.bluez /org/bluez/hci0/dev_<MAC>/sep3 \
         org.bluez.MediaEndpoint1 Capabilities # SBC: 4th byte is the max bitpool
 
-**Reconnect the headset once after a profile switch.** audioctl restarts
-WirePlumber; a device that was already connected before does not fully
-re-register its profiles - the card then shows only part of them (say only HFP,
-no A2DP). After `bluetoothctl disconnect` and `connect` both are there.
+**A headset that was connected before a WirePlumber restart loses half its
+profiles.** The card then shows only part of them - say the two headset
+profiles and no A2DP at all, so music would play in mono at 16 kHz.
+`bluetoothctl disconnect` and `connect` brings them back, which is not
+something to ask of anyone; `bluez5.auto-connect` in `51-bluez-ofono.conf`
+asks for the missing role instead. Measured both ways: without it only `off`
+and the headset profiles survived a restart in hands-free, with it all three
+A2DP profiles came back and the card picked `a2dp-sink` again on its own.
 
 ## Testing without installing
 
