@@ -123,7 +123,8 @@ def install():
     gi.require_version = lambda *a, **k: None
     repository = types.ModuleType("gi.repository")
 
-    for name in ("Gtk", "Adw", "Gio", "GLib", "GObject", "Gdk"):
+    for name in ("Gtk", "Adw", "Gio", "GLib", "GObject", "Gdk",
+                 "Polkit", "PolkitAgent"):
         module = _factory(name)
         setattr(repository, name, module)
         sys.modules["gi.repository." + name] = module

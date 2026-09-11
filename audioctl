@@ -32,13 +32,51 @@ die()  { printf 'audioctl: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*"; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
 
-[ "$(id -un)" = root ] && die "please run as the furios user, not as root (sudo is used internally)."
+[ "$(id -un)" = root ] && die "please run as the furios user, not as root - it asks for the password itself where it needs one."
 
 uctl() { systemctl --user "$@"; }
 
+# --- the one privileged step -------------------------------------------------
+#
+# Everything that needs root goes through furios-audio-helper, which knows five
+# operations and takes no paths from here at all. pkexec asks for the password
+# (see de.furios.audioctl.policy); polkit remembers it for a few minutes, so a
+# switch asks once rather than once per step.
+#
+# Not sudo: FuriOS ships "furios ALL=(ALL) NOPASSWD:ALL", so sudo would never
+# ask - and the point is to ask. sudo stays as the fallback for a system
+# without polkit, where the alternative would be no switching at all.
+HELPER=$(first_existing /usr/local/libexec/furios-audio-helper \
+                        /usr/libexec/furios-audio-helper)
+# Can anybody actually answer a password prompt right now?
+#
+# pkexec needs someone to ask. In a terminal it brings its own prompt; in the
+# graphical session the switcher app registers an agent while it is open.
+# Neither is true for the safety net that runs at boot to drop a test profile -
+# and a safety net that stops to ask for a password is not one, so that path
+# uses sudo, which FuriOS lets through without asking.
+can_ask() {
+    [ -n "${AUDIOCTL_NONINTERACTIVE:-}" ] && return 1
+    command -v pkexec >/dev/null 2>&1 || return 1
+    [ -x "$HELPER" ] || return 1
+    [ -t 0 ] && return 0
+    [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && return 0
+    return 1
+}
+
+priv() {
+    if [ -n "${AUDIOCTL_PRIV:-}" ]; then
+        "$AUDIOCTL_PRIV" "$@"
+    elif can_ask; then
+        pkexec "$HELPER" "$@"
+    else
+        sudo "$HELPER" "$@"
+    fi
+}
+
 # --- masks: create or remove a file -> /dev/null link ------------------------
-mask()   { for u in "$@"; do run sudo ln -sf /dev/null "$ETCU/$u"; done; }
-unmask() { for u in "$@"; do [ -L "$ETCU/$u" ] && [ "$(readlink "$ETCU/$u")" = /dev/null ] && run sudo rm -f "$ETCU/$u"; done; }
+mask()   { run priv mask "$@"; }
+unmask() { run priv unmask "$@"; }
 
 current_profile() {
     [ -r "$TRY" ]    && { printf '%s' "$(cat "$TRY")";    return; }
@@ -122,8 +160,8 @@ WPCONF=$(first_existing /usr/local/share/wireplumber/wireplumber.conf.d/50-droid
 WPCONF=${WPCONF%.off}
 droid_monitor() {
     case "$1" in
-    on)  [ -e "$WPCONF.off" ] && run sudo mv "$WPCONF.off" "$WPCONF" ;;
-    off) [ -e "$WPCONF" ]     && run sudo mv "$WPCONF" "$WPCONF.off" ;;
+    on)  [ -e "$WPCONF.off" ] && run priv wpconf on ;;
+    off) [ -e "$WPCONF" ]     && run priv wpconf off ;;
     esac
     return 0
 }
@@ -163,7 +201,7 @@ apply() {
         run uctl stop wireplumber.service 2>/dev/null
         mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
         unmask pulseaudio.service pulseaudio.socket
-        run sudo rm -f "$DROPIN"
+        run priv dropin-remove
         run uctl daemon-reload
         # A failed pw-hal leaves pipewire in 'failed' - without reset-failed
         # the camera would stay dead. Reset first, then start.
@@ -184,7 +222,7 @@ apply() {
         droid_monitor off
         mask   pipewire-pulse.service pipewire-pulse.socket
         unmask pulseaudio.service pulseaudio.socket wireplumber.service
-        run sudo rm -f "$DROPIN"
+        run priv dropin-remove
         run uctl daemon-reload
         run uctl start pulseaudio.socket pulseaudio.service
         run uctl restart wireplumber.service
@@ -199,16 +237,15 @@ apply() {
         run uctl stop pulseaudio.service pulseaudio.socket
         mask   pulseaudio.service pulseaudio.socket
         unmask pipewire-pulse.service pipewire-pulse.socket wireplumber.service
-        run sudo mkdir -p "$ETCU/pipewire.service.d"
-        # Generate the systemd drop-in instead of linking a fixed file: the
-        # path to the configuration depends on whether the install came from
-        # the source tree (/usr/local) or from the package (/usr).
+        # The drop-in is generated rather than a fixed file linked into place:
+        # the path to the configuration depends on whether the install came
+        # from the source tree (/usr/local) or from the package (/usr). The
+        # helper works that out itself - it takes no path from here.
         if [ "$DRY" = 1 ]; then
             printf '  [dry run] write %s (-c %s/pipewire-hal.conf)\n' \
                 "$DROPIN" "$LOCAL"
         else
-            printf '[Service]\nExecStart=\nExecStart=/usr/bin/pipewire -c %s/pipewire-hal.conf\n' \
-                "$LOCAL" | sudo tee "$DROPIN" >/dev/null
+            priv dropin-write
         fi
         run uctl daemon-reload
         run uctl restart pipewire.service

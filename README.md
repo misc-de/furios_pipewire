@@ -213,9 +213,10 @@ reports line coverage. Everything that can be reached without hardware is at
 | `wireplumber/droid-bluetooth-call.lua` | 100 % of 140 |
 | `wireplumber/droid-default-sink-policy.lua` | 100 % of 61 |
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
-| `audioctl` | 100 % of 271 |
+| `audioctl` | 100 % of 282 |
 | `tools/furios-audio-callaudio-refresh` | 100 % of 9 |
-| `gui/furios-audio-switch.py` | 100 % of 267 |
+| `tools/furios-audio-helper` | 100 % of 44 |
+| `gui/furios-audio-switch.py` | 100 % of 383 |
 | `tools/furios-audio-pause-on-disconnect.py` | 100 % of 61 |
 | `gen-pipewire-hal-conf.py` | 100 % of 28 |
 
@@ -433,6 +434,44 @@ date and hash follow, where they can be read but cannot affect the order.
   diagnostics on with:
 
       systemctl --user set-environment SPA_DROID_DIAG=1
+
+## The one thing that needs root
+
+Switching the stack masks system units in `/etc/systemd/user` and writes one
+systemd drop-in. Everything else `audioctl` does runs as the user.
+
+That part used to be `sudo ln`, `sudo rm`, `sudo mv` and `sudo tee` straight
+out of `audioctl` - root for arbitrary commands with arbitrary arguments. It is
+now `/usr/libexec/furios-audio-helper`, which knows five operations and takes
+no paths from its caller at all: the unit names are checked against a list and
+every path is fixed in the helper. Masking is a symlink to `/dev/null`, and
+doing that to the wrong unit is how a phone stops booting.
+
+`pkexec` authenticates the caller against `de.furios.audioctl.configure`
+(`auth_self_keep`: your own password, remembered for a few minutes, so a switch
+asks once rather than once per step). This matters more than it looks, because
+FuriOS ships
+
+    furios ALL=(ALL) NOPASSWD:ALL
+
+in `/etc/sudoers` - the whole user has passwordless root, so `sudo` would never
+ask for anything. polkit does not go through sudo and is unaffected by that
+line.
+
+**The switcher app brings its own password dialog.** polkit asks whatever
+authentication agent the session registered, and phosh registers none - so on
+this phone every polkit action fails with "No authentication agent found",
+ours included. `PasswordAgent` in `gui/furios-audio-switch.py` registers one
+while the app is open, and unregisters it on shutdown. In a terminal `pkexec`
+brings its own prompt, so `audioctl` works there either way; if neither is
+available the app says so in a toast rather than letting a switch fail with
+nothing on screen.
+
+**The safety net at boot does not ask.** `furios-audio-apply.service` drops a
+test profile before the sound stack starts, and nobody is there to type a
+password - a safety net that stops to ask for one is not a safety net. It sets
+`AUDIOCTL_NONINTERACTIVE=1`, and `audioctl` then uses `sudo`, which that
+sudoers line lets through.
 
 ## Switching at the push of a button
 

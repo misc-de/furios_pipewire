@@ -24,12 +24,37 @@ load_audioctl() {
     AUDIOCTL_LIB=1 . "$HERE/../audioctl"
 }
 
-# sudo runs the command without being root. Every path the tests hand it lies
-# inside the temporary directory, so the commands are harmless - and some of
-# them have to actually happen: droid_monitor is a "sudo mv", and a sudo that
-# swallowed it would test nothing.
-printf '#!/bin/sh\nexec "$@"\n' > "$STUBDIR/sudo"
-chmod +x "$STUBDIR/sudo"
+# The privileged half. On the phone this is pkexec plus furios-audio-helper,
+# which asks for a password and then writes into /etc; here it is a stand-in
+# that does the same five things inside the temporary directory. Some of them
+# have to actually happen - droid_monitor moves a file, and a stub that
+# swallowed it would test nothing - and what the tests are really checking is
+# that audioctl asks for the right operation with the right arguments. The
+# helper itself has its own suite.
+cat > "$STUBDIR/priv" <<'PRIV'
+#!/bin/sh
+set -u
+printf '%s\n' "$*" >> "$STUBDIR/priv.args"
+op=$1; shift
+case "$op" in
+mask)   for u in "$@"; do ln -sf /dev/null "$AUDIOCTL_ETCU/$u"; done ;;
+unmask) for u in "$@"; do
+            [ -L "$AUDIOCTL_ETCU/$u" ] && rm -f "$AUDIOCTL_ETCU/$u"
+        done ;;
+wpconf) case "$1" in
+        on)  [ -e "$WPCONF.off" ] && mv "$WPCONF.off" "$WPCONF" ;;
+        off) [ -e "$WPCONF" ]     && mv "$WPCONF" "$WPCONF.off" ;;
+        esac ;;
+dropin-write)  mkdir -p "$(dirname "$AUDIOCTL_DROPIN")"
+               echo drop-in > "$AUDIOCTL_DROPIN" ;;
+dropin-remove) rm -f "$AUDIOCTL_DROPIN" ;;
+*) exit 64 ;;
+esac
+exit 0
+PRIV
+chmod +x "$STUBDIR/priv"
+export AUDIOCTL_PRIV="$STUBDIR/priv"
+export STUBDIR
 
 # --- verify(): the safety net -----------------------------------------------
 #
@@ -160,6 +185,7 @@ with_audioctl() {
       AUDIOCTL_LIB=1 . "$HERE/../audioctl"
       STATE_DIR="$STUBDIR/state"; STICKY="$STATE_DIR/profile"; TRY="$STATE_DIR/profile.try"
       ETCU="$STUBDIR/etc"; DROPIN="$ETCU/pipewire.service.d/50-furios-audio.conf"
+      export AUDIOCTL_ETCU="$ETCU" AUDIOCTL_DROPIN="$DROPIN" WPCONF
       mkdir -p "$STATE_DIR" "$ETCU"
       eval "$snippet" )
 }
@@ -240,6 +266,47 @@ check "a phone without busctl is not held up by it" "yes" \
 make_recording_stub busctl 1 ""
 check "and neither is one where the service will not start" "yes" \
     "$(with_audioctl 'restart_audio_clients >/dev/null 2>&1 && echo yes || echo no')"
+
+# --- who gets asked for the password ---------------------------------------
+#
+# pkexec needs somebody who can answer. At boot nobody can, and a safety net
+# that stops to ask for a password is not one.
+# A terminal is the one case that needs a real one, so the check runs under a
+# pseudo-terminal rather than pretending.
+if command -v script >/dev/null 2>&1; then
+    check "in a terminal it asks" "yes" \
+        "$(script -qec "HELPER=$(command -v sh) AUDIOCTL_ETCU=$STUBDIR/etc bash -c '
+            AUDIOCTL_LIB=1 . \"$HERE/../audioctl\"
+            HELPER=$(command -v sh)
+            can_ask && echo yes || echo no'" /dev/null </dev/null 2>/dev/null | tr -d '\r\n')"
+fi
+check "in the graphical session it asks" "yes" \
+    "$(with_audioctl 'HELPER=$(command -v sh); unset AUDIOCTL_NONINTERACTIVE
+        WAYLAND_DISPLAY=wayland-0; can_ask <&- && echo yes || echo no')"
+check "at boot it does not" "no" \
+    "$(with_audioctl 'HELPER=$(command -v sh); AUDIOCTL_NONINTERACTIVE=1
+        WAYLAND_DISPLAY=wayland-0; can_ask && echo yes || echo no')"
+check "and not without a helper to run either" "no" \
+    "$(with_audioctl 'HELPER=/nonexistent; unset AUDIOCTL_NONINTERACTIVE
+        WAYLAND_DISPLAY=wayland-0; can_ask && echo yes || echo no')"
+check "nor with nobody and nothing" "no" \
+    "$(with_audioctl 'HELPER=$(command -v sh); unset AUDIOCTL_NONINTERACTIVE
+        unset WAYLAND_DISPLAY DISPLAY; can_ask <&- && echo yes || echo no')"
+
+# And which of the two actually gets run. The helper is the same either way;
+# what differs is who authenticates the caller.
+make_recording_stub pkexec 0 ""
+make_recording_stub sudo 0 ""
+rm -f "$STUBDIR/pkexec.args" "$STUBDIR/sudo.args"
+check "with somebody to ask, the call goes through pkexec" "yes" \
+    "$(with_audioctl 'unset AUDIOCTL_PRIV; HELPER=$(command -v sh)
+        WAYLAND_DISPLAY=wayland-0; priv mask pulseaudio.service
+        grep -q "mask pulseaudio.service" "$STUBDIR/pkexec.args" && echo yes || echo no')"
+check "at boot it goes through sudo instead" "yes" \
+    "$(with_audioctl 'unset AUDIOCTL_PRIV; HELPER=$(command -v sh)
+        AUDIOCTL_NONINTERACTIVE=1; priv dropin-remove
+        grep -q dropin-remove "$STUBDIR/sudo.args" && echo yes || echo no')"
+export AUDIOCTL_PRIV="$STUBDIR/priv"
 
 # --- the safety net --------------------------------------------------------
 stub_systemctl none none

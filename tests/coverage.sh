@@ -123,3 +123,6 @@ echo "== the shell parts =="
 "$ROOT/tests/coverage-shell.sh" "$ROOT/tools/furios-audio-callaudio-refresh" \
     "$ROOT/tests/test-callaudio-refresh.sh" 2>/dev/null \
     || echo "  furios-audio-callaudio-refresh could not be measured"
+"$ROOT/tests/coverage-shell.sh" "$ROOT/tools/furios-audio-helper" \
+    "$ROOT/tests/test-helper.sh" 2>/dev/null \
+    || echo "  furios-audio-helper could not be measured"

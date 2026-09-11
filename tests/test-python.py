@@ -9,6 +9,7 @@ translating the project to English - silently breaks the app, and nothing
 notices until someone opens it and sees "unknown".
 """
 import importlib.util
+import os
 import io
 import re
 import sys
@@ -595,6 +596,293 @@ class TheWindow(unittest.TestCase):
         app = switcher.App()
         app.props.active_window = None
         app.do_activate()
+
+    def test_it_says_when_no_password_prompt_is_possible(self):
+        """A switch that fails with nothing on screen is the worst outcome."""
+        self.win.note_no_agent()
+        said = [c for c in recorder.calls if c[0] == "Adw.Toast"]
+        self.assertTrue(any("terminal" in str(c[2].get("title", "")) for c in said))
+
+
+
+class ThePasswordAgent(unittest.TestCase):
+    """The agent the app brings because nothing else on the phone has one.
+
+    polkit is not here to be stubbed convincingly - what can be checked is the
+    part that has to be right whatever polkit does: whose password is asked
+    for, that every way out ends the request, and that a cancel is told to
+    polkit rather than left hanging. A request nobody answers is a switch that
+    never happens and a dialog that never closes.
+    """
+
+    class Identity:
+        def __init__(self, uid):
+            self.uid = uid
+
+        def get_uid(self):
+            return self.uid
+
+    class Session:
+        def __init__(self):
+            self.signals = {}
+            self.responses = []
+            self.initiated = False
+            self.cancelled = False
+
+        def connect(self, name, fn):
+            self.signals[name] = fn
+
+        def initiate(self):
+            self.initiated = True
+
+        def response(self, text):
+            self.responses.append(text)
+
+        def cancel(self):
+            self.cancelled = True
+
+    class Task:
+        def __init__(self):
+            self.returned = None
+
+        def return_boolean(self, value):
+            self.returned = value
+
+    def setUp(self):
+        self.agent = switcher.PasswordAgent(Recording())
+        self.session = self.Session()
+        self.task = self.Task()
+        self.dialogs = []
+
+        def show(message):
+            self.dialogs.append(message)
+            self.agent.dialog = Recording()
+            self.agent.entry = Recording()
+            self.agent.entry.text = "hunter2"
+            self.agent.entry.get_text = lambda: self.agent.entry.text
+            self.agent.dialog.close = lambda: self.dialogs.append("closed")
+            self.agent.dialog.set_body = lambda t: self.dialogs.append(t)
+
+        # Patched on the class, not on the instance: under the stub an
+        # instance attribute never wins over a real method, which is exactly
+        # the kind of quiet nothing this suite exists to avoid.
+        self.original_show = switcher.PasswordAgent.show_dialog
+        switcher.PasswordAgent.show_dialog = lambda agent, message: show(message)
+        switcher.PolkitAgent.Session.new = lambda identity, cookie: self.session
+        switcher.Gio.Task.new = lambda *a, **k: self.task
+
+    def tearDown(self):
+        switcher.PasswordAgent.show_dialog = self.original_show
+
+    def initiate(self, identities):
+        self.agent.do_initiate_authentication(
+            "de.furios.audioctl.configure", "Switch the audio stack", None, None,
+            "cookie", identities, None, None, None)
+
+    def test_our_own_user_is_asked_not_somebody_else(self):
+        me = os.getuid()
+        picked = switcher.PasswordAgent.pick_identity(
+            [self.Identity(me + 1), self.Identity(me)])
+        self.assertEqual(me, picked.get_uid())
+
+    def test_with_no_identity_of_ours_the_first_one_is_taken(self):
+        picked = switcher.PasswordAgent.pick_identity([self.Identity(4242)])
+        self.assertEqual(4242, picked.get_uid())
+
+    def test_no_identities_at_all_is_not_a_crash(self):
+        self.assertIsNone(switcher.PasswordAgent.pick_identity([]))
+
+    def test_a_request_with_nobody_to_ask_ends_the_request(self):
+        self.initiate([])
+        self.assertTrue(self.task.returned)
+
+    def test_the_dialog_carries_polkits_own_message(self):
+        self.initiate([self.Identity(os.getuid())])
+        self.assertIn("Switch the audio stack", self.dialogs)
+        self.assertTrue(self.session.initiated)
+
+    def test_what_was_typed_goes_back_to_polkit(self):
+        self.initiate([self.Identity(os.getuid())])
+        self.agent.on_response(self.agent.dialog, "ok")
+        self.assertEqual(["hunter2"], self.session.responses)
+
+    def test_a_cancel_is_told_to_polkit(self):
+        self.initiate([self.Identity(os.getuid())])
+        self.agent.on_response(self.agent.dialog, "cancel")
+        self.assertTrue(self.session.cancelled)
+
+    def test_a_cancel_with_no_session_still_ends_the_request(self):
+        self.agent.task = self.task
+        self.agent.session = None
+        self.agent.on_response(None, "cancel")
+        self.assertTrue(self.task.returned)
+
+    def test_the_request_ends_when_polkit_says_it_is_over(self):
+        self.initiate([self.Identity(os.getuid())])
+        self.agent.on_completed(self.session, False)
+        self.assertTrue(self.task.returned)
+        self.assertIn("closed", self.dialogs)
+
+    def test_ending_twice_does_not_answer_twice(self):
+        self.initiate([self.Identity(os.getuid())])
+        self.agent.on_completed(self.session, True)
+        self.task.returned = None
+        self.agent.finish()
+        self.assertIsNone(self.task.returned)
+
+    def test_pam_asking_again_puts_the_dialog_back(self):
+        self.initiate([self.Identity(os.getuid())])
+        self.agent.on_response(self.agent.dialog, "ok")
+        self.agent.dialog = None
+        self.agent.on_request(self.session, "Password again:", False)
+        self.assertIn("Password again:", self.dialogs)
+
+    def test_a_message_from_pam_is_shown_where_the_question_was(self):
+        self.initiate([self.Identity(os.getuid())])
+        self.agent.on_show_message(self.session, "Sorry, try again")
+        self.assertIn("Sorry, try again", self.dialogs)
+
+    def test_a_message_with_no_dialog_is_dropped_rather_than_thrown(self):
+        self.agent.dialog = None
+        self.agent.on_show_message(self.session, "too late")
+        self.assertNotIn("too late", self.dialogs)
+
+    def test_finishing_the_vfunc_says_it_handled_it(self):
+        self.assertTrue(self.agent.do_initiate_authentication_finish(None))
+
+    def test_registering_reports_whether_it_worked(self):
+        switcher.PolkitAgent.register_listener = lambda *a: "handle"
+        self.assertTrue(self.agent.register())
+        self.assertEqual("handle", self.agent.handle)
+
+    def test_a_session_polkit_will_not_give_us_is_not_an_error(self):
+        def boom(*a):
+            raise RuntimeError("no session")
+
+        switcher.PolkitAgent.register_listener = boom
+        self.assertFalse(self.agent.register())
+        self.assertIsNone(self.agent.handle)
+
+    def test_unregistering_what_was_never_registered(self):
+        self.agent.handle = None
+        self.agent.unregister()   # must not raise
+
+    def test_unregistering_survives_polkit_refusing(self):
+        def boom(*a):
+            raise RuntimeError("gone")
+
+        self.agent.handle = "handle"
+        switcher.PolkitAgent.unregister_listener = boom
+        self.agent.unregister()
+        self.assertIsNone(self.agent.handle)
+
+
+    def test_an_identity_that_will_not_say_who_it_is(self):
+        class Mute:
+            def get_uid(self):
+                raise RuntimeError("no uid")
+
+        first = Mute()
+        self.assertIs(first, switcher.PasswordAgent.pick_identity([first]))
+
+    def test_without_the_polkit_bindings_there_is_no_agent(self):
+        original = switcher.HAVE_POLKIT
+        switcher.HAVE_POLKIT = False
+        try:
+            self.assertFalse(switcher.PasswordAgent(Recording()).register())
+        finally:
+            switcher.HAVE_POLKIT = original
+
+    def test_the_dialog_is_built_with_a_way_out(self):
+        switcher.PasswordAgent.show_dialog = self.original_show
+        agent = switcher.PasswordAgent(Recording())
+        agent.show_dialog("Switch the audio stack")
+        self.assertIsNotNone(agent.dialog)
+        agent.close_dialog()
+        self.assertIsNone(agent.dialog)
+
+    def test_closing_a_dialog_that_is_not_there(self):
+        self.agent.dialog = None
+        self.agent.close_dialog()   # must not raise
+
+
+    def test_a_system_without_the_polkit_bindings_still_starts(self):
+        """gir1.2-polkit-1.0 is a package, and a package can be absent.
+
+        The app has to come up there too - without a password prompt, but with
+        everything else. Loading it again with the bindings refused is the only
+        way to walk that branch.
+        """
+        import gi
+
+        original = gi.require_version
+
+        def refuse(name, version):
+            if name.startswith("Polkit"):
+                raise ValueError("no polkit here")
+
+        gi.require_version = refuse
+        try:
+            again = load(ROOT / "gui" / "furios-audio-switch.py", "switcher_nopolkit")
+        finally:
+            gi.require_version = original
+        self.assertFalse(again.HAVE_POLKIT)
+        self.assertFalse(again.PasswordAgent(Recording()).register())
+
+
+class TheApplication(unittest.TestCase):
+    """Starting and stopping, which is where the agent is put in place."""
+
+    class Win:
+        def __init__(self):
+            self.presented = False
+            self.noted = False
+
+        def present(self):
+            self.presented = True
+
+        def note_no_agent(self):
+            self.noted = True
+
+    def app_with(self, registers):
+        app = switcher.App()
+        win = self.Win()
+        app.props.active_window = win
+        switcher.PasswordAgent.register = lambda agent: registers
+        switcher.PasswordAgent.unregister = lambda agent: setattr(
+            agent, "handle", "unregistered")
+        return app, win
+
+    def test_the_window_is_shown_and_the_agent_registered(self):
+        app, win = self.app_with(True)
+        app.do_activate()
+        self.assertTrue(win.presented)
+        self.assertIsNotNone(app.agent)
+        self.assertFalse(win.noted)
+
+    def test_without_an_agent_the_window_says_so(self):
+        app, win = self.app_with(False)
+        app.do_activate()
+        self.assertTrue(win.noted)
+
+    def test_activating_twice_does_not_register_twice(self):
+        app, win = self.app_with(True)
+        app.do_activate()
+        first = app.agent
+        app.do_activate()
+        self.assertIs(first, app.agent)
+
+    def test_shutting_down_hands_authentication_back(self):
+        app, win = self.app_with(True)
+        app.do_activate()
+        agent = app.agent
+        app.do_shutdown()
+        self.assertEqual("unregistered", agent.handle)
+        self.assertIsNone(app.agent)
+
+    def test_shutting_down_without_ever_starting(self):
+        app = switcher.App()
+        app.do_shutdown()   # must not raise
 
 
 class PauseOnDisconnect(unittest.TestCase):
