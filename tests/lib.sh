@@ -63,3 +63,22 @@ make_stub() {
     } > "$STUBDIR/$name"
     chmod +x "$STUBDIR/$name"
 }
+
+# The same, but it also writes down how it was called.
+#
+# Sometimes what matters is not what a command answered but that it was asked
+# at all, and with what - "callaudiod was started with a harmless method, not
+# with SelectMode" is exactly that kind of check.
+make_recording_stub() {
+    # make_recording_stub <name> <exit code> <stdout...>
+    local name=$1 code=$2; shift 2
+    {
+        printf '#!/bin/sh\n'
+        printf 'printf "%%s\\n" "$*" >> "%s/%s.args"\n' "$STUBDIR" "$name"
+        if [ -n "$*" ]; then
+            printf "cat <<'OUT'\n%s\nOUT\n" "$*"
+        fi
+        printf 'exit %s\n' "$code"
+    } > "$STUBDIR/$name"
+    chmod +x "$STUBDIR/$name"
+}

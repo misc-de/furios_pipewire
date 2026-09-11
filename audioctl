@@ -248,6 +248,31 @@ restart_audio_clients() {
     pkill -x callaudiod 2>/dev/null && restarted="callaudiod"
     pkill -x feedbackd  2>/dev/null && restarted="${restarted:+$restarted, }feedbackd"
     [ -n "$restarted" ] && info "restarted: $restarted (D-Bus activates them on demand)"
+    warm_callaudiod
+    return 0
+}
+
+# Start callaudiod now, rather than letting the first call pay for it.
+#
+# Measured on 2026-09-11: when SelectMode is the method that activates
+# callaudiod over D-Bus, it arrives while callaudiod is still bringing its
+# PulseAudio connection up ("PA not ready") and blocks until the D-Bus
+# timeout - 25 seconds, twice out of two tries against our stack, never
+# against the shipped one. gnome-calls then logs "Failed to select audio mode:
+# Timeout was reached", the card never reaches the voicecall profile, and the
+# call has no audio in either direction. That is what a first call after every
+# profile switch looked like, because switching kills callaudiod.
+#
+# Reading a property activates the service without asking it to do anything,
+# and after that SelectMode answers in about a second. A failure here is not
+# worth reporting: the worst case is the state we were in anyway.
+warm_callaudiod() {
+    command -v busctl >/dev/null 2>&1 || return 0
+    [ "$DRY" = 1 ] && { printf '  [dry] warm up callaudiod\n'; return 0; }
+    busctl --user get-property org.mobian_project.CallAudio \
+        /org/mobian_project/CallAudio org.mobian_project.CallAudio AudioMode \
+        >/dev/null 2>&1 || true
+    sleep "${CALLAUDIO_WARMUP:-2}"
     return 0
 }
 

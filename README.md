@@ -81,6 +81,20 @@ cost time:
   unavailable on this device as well; there is no jack detection here
   (`/sys/class/extcon` only lists USB).
 
+**The first call after a profile switch used to have no audio at all**, and
+the reason was not in the sound path. Switching profiles kills callaudiod, so
+the next call starts it again through D-Bus - and when `SelectMode` is the
+method that activates it, the call arrives while callaudiod is still bringing
+its PulseAudio connection up. It blocks until the D-Bus timeout: 25 seconds,
+two tries out of two against this stack, never against the shipped one.
+gnome-calls logs `Failed to select audio mode: Timeout was reached`, the card
+never reaches the `voicecall` profile, the HAL never leaves
+`AUDIO_MODE_NORMAL`, and neither side hears anything - not on a headset, not
+on the earpiece, and picking a device by hand changes nothing because the mode
+is what is missing. `audioctl` now starts callaudiod itself after a switch,
+with a method that asks nothing of it, and `SelectMode` then answers in about
+a second.
+
 ## As a package
 
     ./packaging/build-deb.sh

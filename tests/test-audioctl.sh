@@ -156,6 +156,7 @@ with_audioctl() {
     ( set +u
       BT_HOLD_INTERVAL=0
       VERIFY_TRIES=1
+      CALLAUDIO_WARMUP=0
       AUDIOCTL_LIB=1 . "$HERE/../audioctl"
       STATE_DIR="$STUBDIR/state"; STICKY="$STATE_DIR/profile"; TRY="$STATE_DIR/profile.try"
       ETCU="$STUBDIR/etc"; DROPIN="$ETCU/pipewire.service.d/50-furios-audio.conf"
@@ -221,6 +222,24 @@ check "restarting the clients reports what it killed" "yes" \
 stub pkill 1 ""
 check "and says nothing when there was nothing to kill" "" \
     "$(with_audioctl 'restart_audio_clients')"
+
+# Killing callaudiod is not enough: the call that starts it again must not be
+# SelectMode, or it blocks for 25 seconds and the first call after a switch has
+# no audio at all. So it is started here, with a method that asks nothing of
+# it.
+stub pkill 0 ""
+make_recording_stub busctl 0 "u 0"
+rm -f "$STUBDIR/busctl.args"
+check "callaudiod is started again before anyone calls" "yes" \
+    "$(with_audioctl 'restart_audio_clients >/dev/null; grep -q AudioMode "$STUBDIR/busctl.args" && echo yes || echo no')"
+check "and it is only asked for its state, nothing more" "yes" \
+    "$(with_audioctl 'restart_audio_clients >/dev/null; grep -q SelectMode "$STUBDIR/busctl.args" && echo no || echo yes')"
+rm -f "$STUBDIR/busctl"
+check "a phone without busctl is not held up by it" "yes" \
+    "$(with_audioctl 'restart_audio_clients >/dev/null 2>&1 && echo yes || echo no')"
+make_recording_stub busctl 1 ""
+check "and neither is one where the service will not start" "yes" \
+    "$(with_audioctl 'restart_audio_clients >/dev/null 2>&1 && echo yes || echo no')"
 
 # --- the safety net --------------------------------------------------------
 stub_systemctl none none
