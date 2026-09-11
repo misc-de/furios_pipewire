@@ -47,21 +47,35 @@ SETTING = "furios.bluetooth-call-routing"
 -- in well under a second.
 MAX_DEFENDS = 3
 
--- How long to leave callaudiod alone before touching the Bluetooth card.
+-- How long the card has to be QUIET before touching the Bluetooth side.
 --
 -- callaudiod runs a sequence of PulseAudio operations when a call starts -
 -- park the output, set the real port, set the input port - and it waits for
--- each one. Changing the Bluetooth card's profile in the middle of that
--- changes the set of cards and nodes underneath it, and its next SelectMode
--- then blocks until the D-Bus timeout: 25 seconds with no audio in either
--- direction, or a hang-up that leaves the phone in the voicecall profile.
--- Measured sequence takes about 200 ms; a second and a half is room to spare.
-TAKEOVER_DELAY_MS = 1500
+-- each one. Changing the route or the Bluetooth profile in the middle of that
+-- changes the cards underneath it, and its next SelectMode then blocks until
+-- the D-Bus timeout: 25 seconds with no audio in either direction.
+--
+-- A fixed delay from the first sight of the call is not enough, and a real
+-- call showed why: the profile goes to voicecall while the phone is still
+-- ringing, so a delay started there elapsed in the middle of callaudiod's
+-- work. Measured: the takeover landed 14 ms before callaudiod set the port.
+--
+-- So the wait is not for a span of time but for quiet. Every route or profile
+-- change while the call is being set up starts it again, and the takeover
+-- happens only when nothing has moved for this long. callaudiod's own
+-- sequence is about 200 ms end to end, so a second of silence means it is
+-- finished.
+QUIET_MS = 1000
 
 in_bt_call = false
 gave_up = false
 defends = 0
 saved_routes = nil
+
+-- Bumped by every event while we are waiting. A timer that fires with a stale
+-- number knows something moved after it was armed, and stands down.
+quiet_token = 0
+took_over = false
 
 -- Off unless someone turned it on. An unknown setting, an older WirePlumber,
 -- anything unexpected: all of that has to come out as "leave the call alone".
@@ -147,6 +161,7 @@ function setBtProfile (card, name)
 end
 
 function takeOver (dev, card)
+  took_over = true
   local prof = setBtProfile (card, "headset-head-unit")
              or setBtProfile (card, "headset-head-unit-cvsd")
   local sink = setRouteByName (dev, BT_SINK_ROUTE)
@@ -168,20 +183,27 @@ end
 function enterBtCall (dev, card)
   saved_routes = activeRoutes (dev)
   in_bt_call = true
+  took_over = false
   defends = 0
+  waitForQuiet (dev, card)
+end
 
-  -- Not now: callaudiod is still setting the call up, and pulling the cards
-  -- around underneath it is what wedges it. Marked as taken over straight
-  -- away all the same, so a second event does not schedule this twice.
-  Core.timeout_add (TAKEOVER_DELAY_MS, function ()
-    -- The call may be over by the time this runs.
-    if in_bt_call then
-      local ok, err = pcall (function () takeOver (dev, card) end)
-      if not ok then
-        in_bt_call = false
-        saved_routes = nil
-        log:warning ("bluetooth call: giving up - " .. tostring (err))
-      end
+-- Arm the takeover, and re-arm it whenever anything moves.
+function waitForQuiet (dev, card)
+  quiet_token = quiet_token + 1
+  local mine = quiet_token
+
+  Core.timeout_add (QUIET_MS, function ()
+    -- Something moved after this timer was armed, or the call ended: either
+    -- way this one is not the timer that acts.
+    if mine ~= quiet_token or not in_bt_call then
+      return false
+    end
+    local ok, err = pcall (function () takeOver (dev, card) end)
+    if not ok then
+      in_bt_call = false
+      saved_routes = nil
+      log:warning ("bluetooth call: giving up - " .. tostring (err))
     end
     return false
   end)
@@ -236,6 +258,11 @@ function defendRoute (dev, card)
     end
   end
 
+  -- Counted on every attempt, not on every observed loss. Reading the card and
+  -- acting on what it said is a race against the other side setting it back,
+  -- and losing that race meant the count stayed at zero while the two of us
+  -- traded the route several times a second - which is exactly the state this
+  -- is here to end.
   defends = defends + 1
   if defends > MAX_DEFENDS then
     giveUp (dev, card, "the route will not stay on the headset")
@@ -296,7 +323,13 @@ bluetooth_call_hook = SimpleEventHook {
         -- time.
         gave_up = false
       elseif call and in_bt_call then
-        defendRoute (dev, card)
+        if saved_routes ~= nil and not took_over then
+          -- Still waiting for callaudiod to finish: anything that moves
+          -- starts the wait again.
+          waitForQuiet (dev, card)
+        else
+          defendRoute (dev, card)
+        end
       end
     end)
     if not ok then

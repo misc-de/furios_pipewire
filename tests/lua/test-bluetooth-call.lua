@@ -277,4 +277,28 @@ for _, c in ipairs(wp.calls_of("log")) do
 end
 T.check("a takeover that throws is caught, not thrown at the monitor", caught)
 
+-- The wait is for quiet, not for a span of time. A real call showed why: the
+-- profile goes to voicecall while the phone is still ringing, so a fixed delay
+-- started there ran out in the middle of callaudiod's work - 14 ms before
+-- callaudiod set the port it wanted.
+setup()
+dev = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card())
+hook = wp.hooks["monitor/droid-bluetooth-call"]
+T.traced(function () hook.execute({ get_subject = function () return dev end }) end)
+T.check_equal("the call arms a wait", 1, #wp.calls_of("timeout_add"))
+
+-- callaudiod is still moving things: another event before the timer fires.
+T.traced(function () hook.execute({ get_subject = function () return dev end }) end)
+T.check_equal("something moving arms it again", 2, #wp.calls_of("timeout_add"))
+
+wp.reset()
+T.traced(function () wp.fire_timers() end)
+local profiles = 0
+for _, c in ipairs(wp.calls_of("set_params")) do
+  if c.args[2] == "Profile" then profiles = profiles + 1 end
+end
+T.check_equal("but the card is still taken over exactly once - the timer armed "
+              .. "before the move stands down", 1, profiles)
+
 T.done()

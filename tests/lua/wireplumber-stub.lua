@@ -155,7 +155,7 @@ end
 local script_state = {
   "last_route", "last_route_volume", "last_mode", "last_volume",
   "in_bt_call", "saved_routes", "mixer", "device", "log",
-  "gave_up", "defends",
+  "gave_up", "defends", "quiet_token", "took_over",
 }
 
 -- Run every timer callback that is waiting, the way the main loop would.
