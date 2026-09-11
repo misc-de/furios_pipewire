@@ -67,6 +67,12 @@ function btCard ()
   }
 end
 
+function droidCard ()
+  return cutils.get_object_manager ("device"):lookup {
+    Constraint { "device.api", "=", "droid-hal" },
+  }
+end
+
 function inVoiceCall (dev)
   for p in dev:iterate_params ("Profile") do
     local profile = cutils.parseParam (p, "Profile")
@@ -166,7 +172,16 @@ end
 
 -- Hand the call back to the phone and do not try again until it is over.
 function giveUp (dev, card, why)
-  log:warning ("bluetooth call: " .. why .. " - the call goes back to the phone")
+  -- Say what was on the route instead. When this fires, the interesting
+  -- question is who keeps taking it away, and the name is the only clue there
+  -- is from inside here.
+  local found = {}
+  for _, name in pairs (activeRoutes (dev)) do
+    table.insert (found, name)
+  end
+  log:warning ("bluetooth call: " .. why .. " (route is on " ..
+               (next (found) and table.concat (found, ", ") or "nothing") ..
+               ") - the call goes back to the phone")
   in_bt_call = false
   gave_up = true
   defends = 0
@@ -217,7 +232,21 @@ bluetooth_call_hook = SimpleEventHook {
   },
   execute = function (event)
     local dev = event:get_subject ()
-    if dev.properties["device.api"] ~= "droid-hal" then
+    local api = dev.properties["device.api"]
+
+    -- A headset that is connected while the call is already running.
+    --
+    -- The phone card emits nothing at all in that case - its profile and its
+    -- routes are exactly as they were - so waiting for it means waiting
+    -- forever. The Bluetooth card, on the other hand, announces itself as it
+    -- settles, and that is the only moment there is to notice. Everything
+    -- after this point works on the phone card, as before.
+    if api == "bluez5" then
+      dev = droidCard ()
+      if dev == nil then
+        return
+      end
+    elseif api ~= "droid-hal" then
       return
     end
 

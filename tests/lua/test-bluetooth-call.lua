@@ -199,4 +199,35 @@ fire(dev)
 T.check("the next call is not held against the last one",
         #wp.calls_of("set_params") >= 1)
 
+-- The headset is connected in the middle of a running call. The phone card
+-- says nothing then - its profile and routes have not moved - so the only
+-- notice is the Bluetooth card announcing itself.
+setup()
+dev = wp.add("device", droid_card("voicecall"))
+fire(dev)                                   -- a call, no headset yet
+T.check_equal("a call that starts without a headset is left alone", 0,
+              #wp.calls_of("set_params"))
+
+wp.reset()
+local late = wp.add("device", bt_card())
+fire(late)                                  -- the headset announces itself
+T.check("a headset connected mid-call is picked up", #wp.calls_of("set_params") >= 3)
+
+-- The same event with no phone card anywhere is not something to act on.
+setup()
+wp.add("device", bt_card())
+wp.objects.device = { wp.objects.device[1] }   -- only the headset exists
+fire(wp.objects.device[1])
+T.check_equal("a headset with no phone card changes nothing", 0,
+              #wp.calls_of("set_params"))
+
+-- And when there is no call, a headset coming and going is none of our
+-- business.
+setup()
+dev = wp.add("device", droid_card("default"))
+local idle = wp.add("device", bt_card())
+fire(idle)
+T.check_equal("a headset outside a call is left alone", 0,
+              #wp.calls_of("set_params"))
+
 T.done()
