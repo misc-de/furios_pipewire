@@ -184,9 +184,11 @@ static uint32_t route_priority(audio_devices_t type)
  * the Android mechanism that puts the voice path onto the Bluetooth PCM line.
  * So we build the ports ourselves.
  *
- * This device's controller does not carry SCO over HCI (hciconfig shows sco:0
- * in both directions) but in hardware between the BT chip and the audio DSP.
- * That makes this the only possible path for calls over a headset. */
+ * This device's controller does not carry SCO over HCI - measured on a link
+ * that really stood: 3987 packets sent, zero received. The data goes over
+ * MediaTek's own link to the application processor (ALSA device 55, BTCVSD),
+ * where the HAL runs the codec in software. That makes this the only path for
+ * calls over a headset, and it does work: see the README. */
 static dm_config_port synthetic_ports[2];
 
 static void add_synthetic_bt_routes(struct impl *this)

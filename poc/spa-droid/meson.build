@@ -165,3 +165,23 @@ executable('probe-droid-hal', 'tools/probe-droid-hal.c',
 
 executable('probe-droid-node', 'tools/probe-droid-node.c',
   dependencies : [spa_dep, cc.find_library('dl', required : false)])
+
+# A SCO link of our own, with no PipeWire in between - see tools/probe-bt-sco.c
+executable('probe-bt-sco', 'tools/probe-bt-sco.c',
+  dependencies : [cc.find_library('bluetooth'),
+                  cc.find_library('m', required : false)])
+
+# Does the HAL play to Bluetooth SCO when it is handed the device directly?
+executable('probe-bt-sco-out', 'tools/probe-bt-sco-out.c',
+  include_directories : [compat_inc, droid_inc, android_inc],
+  link_with : droid_common,
+  dependencies : [hybris_dep, hw_dep,
+                  cc.find_library('m', required : false),
+                  cc.find_library('pthread', required : false)])
+
+executable('probe-bt-sco-in', 'tools/probe-bt-sco-in.c',
+  include_directories : [compat_inc, droid_inc, android_inc],
+  link_with : droid_common,
+  dependencies : [hybris_dep, hw_dep,
+                  cc.find_library('m', required : false),
+                  cc.find_library('pthread', required : false)])

@@ -126,6 +126,7 @@ struct impl {
 	uint32_t pref_rate;         /* preferred values from the node properties */
 	uint32_t pref_channels;
 	char wanted_port[64];       /* route requested by the device */
+	char wanted_route[64];      /* ... under the name the device uses for it */
 	bool mode_holds_hal;        /* HAL only kept open for call mode */
 	bool in_call;               /* mode is AUDIO_MODE_IN_CALL */
 	uint64_t hal_latency_ns;    /* remembered at open time, see latency_ns() */
@@ -180,6 +181,11 @@ struct port;
 static void emit_port_info(struct impl *this, struct port *port, bool full);
 static void latency_changed(struct impl *this);
 static int apply_voice_volume(struct impl *this, const char *value);
+/* Bluetooth is commented out of this device's audio_policy XML, so the port
+ * for it does not exist in the parsed configuration and has to be built.
+ * That lookup lives further down, next to the route handling. */
+static dm_config_port *port_by_route_name(struct impl *this, const char *route);
+static void bt_sco_announce(struct impl *this, const dm_config_port *dev);
 
 /* ------------------------------------------------------------------ HAL */
 
@@ -188,6 +194,11 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 {
 	const pa_sample_spec *got;
 	dm_config_port *mix, *dev;
+
+	/* Same as on the output side: the HAL wants to know about Bluetooth
+	 * before the stream exists, not after. */
+	if (this->wanted_route[0])
+		bt_sco_announce(this, port_by_route_name(this, this->wanted_route));
 
 	/* Unlike the output side, the input takes the mix port by NAME - so the
 	 * pointer-identity trap does not apply here. */
@@ -230,7 +241,9 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	}
 
 	mix = dm_config_find_mix_port(this->hw->enabled_module, this->mix_port_name);
-	if (this->wanted_port[0])
+	if (this->wanted_route[0])
+		dev = port_by_route_name(this, this->wanted_route);
+	else if (this->wanted_port[0])
 		dev = dm_config_find_port(this->hw->enabled_module, this->wanted_port);
 	else if (this->input_port_name[0])
 		dev = dm_config_find_port(this->hw->enabled_module, this->input_port_name);
@@ -261,6 +274,32 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 
 /* One reference that is never returned; see the note in hal_open(). */
 static pa_droid_hw_module *hw_module_keepalive;
+
+/* The HAL has to know about Bluetooth before the stream is opened.
+ *
+ * pa_droid_stream_set_route() sends BT_SCO=on as a side effect, but it needs
+ * an open stream - so on the first open after a route change nothing had told
+ * the HAL yet, and it opened a Bluetooth stream that stayed silent: the right
+ * PCM device (pcmC0D55p), the chip even fetching the data, and nothing in the
+ * ear. Android sets the parameter on the device, before opening. So do we. */
+static void bt_sco_announce(struct impl *this, const dm_config_port *dev)
+{
+	bool bt;
+
+	if (!this->hw || !dev)
+		return;
+
+	bt = dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO ||
+	     dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET ||
+	     dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT ||
+	     dev->type == AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET;
+
+	if (pa_droid_set_parameters(this->hw, bt ? "BT_SCO=on" : "BT_SCO=off") < 0)
+		spa_log_warn(this->log, NAME " the HAL did not take BT_SCO=%s",
+				bt ? "on" : "off");
+	else
+		DIAG(this, "BT_SCO=%s sent before opening", bt ? "on" : "off");
+}
 
 static int hal_open(struct impl *this)
 {
@@ -344,11 +383,20 @@ static int hal_open(struct impl *this)
 	 * IDENTITY against hw->enabled_module. Ports from our own copy are
 	 * therefore always rejected - they must come from the HAL module. */
 	mix = dm_config_find_mix_port(this->hw->enabled_module, this->mix_port_name);
-	dev = this->wanted_port[0]
-		? dm_config_find_port(this->hw->enabled_module, this->wanted_port)
-		: NULL;
-	if (!dev)
+	/* Not dm_config_find_port() alone: the Bluetooth ports are missing from
+	 * this device's audio_policy XML, so a name lookup returns nothing and
+	 * the fallback below would quietly play to the speaker instead - which is
+	 * exactly what it did, while every log line said "BT SCO". */
+	dev = this->wanted_route[0] ? port_by_route_name(this, this->wanted_route) : NULL;
+	if (!dev && this->wanted_port[0])
+		dev = dm_config_find_port(this->hw->enabled_module, this->wanted_port);
+	if (!dev) {
+		if (this->wanted_route[0])
+			spa_log_warn(this->log, NAME " route \"%s\" is not available - "
+					"falling back to the default output",
+					this->wanted_route);
 		dev = dm_config_default_output_device(this->hw->enabled_module);
+	}
 	if (!mix || !dev) {
 		spa_log_error(this->log, NAME " mix port \"%s\" or default output missing",
 				this->mix_port_name);
@@ -366,6 +414,8 @@ static int hal_open(struct impl *this)
 		pa_channel_map_init_mono(&map);
 	else
 		pa_channel_map_init_stereo(&map);
+
+	bt_sco_announce(this, dev);
 
 	this->stream = pa_droid_open_output_stream(this->hw, &spec, &map, mix, dev);
 	if (!this->stream) {
@@ -1554,29 +1604,52 @@ static dm_config_port *port_by_route_name(struct impl *this, const char *route)
 			return port;
 	}
 
-	/* Bluetooth is missing from this device's audio_policy XML (all commented
-	 * out). The HAL does not need that file - when routing it only gets the
-	 * device type - so we build the port ourselves. The device reports the
-	 * same routes. */
+	/* Bluetooth is missing from this device's audio_policy XML - the whole
+	 * section is commented out, lines 167-217, and takes every BT SCO and
+	 * A2DP device port with it. The HAL does not read that file; when
+	 * routing it only gets the device type. So we add the port ourselves,
+	 * once, into the module's own lists.
+	 *
+	 * Registering it there rather than keeping it aside matters:
+	 * pa_droid_open_output_stream() checks the port it is handed against
+	 * dm_config_find_device_port(), which searches exactly those lists. A
+	 * port that only we know about is refused, and the stream never opens.
+	 *
+	 * Ownership follows the config's own rule - module->ports frees the
+	 * ports, device_ports is a view - so the allocation has to match. */
 	{
-		static dm_config_port bt_out, bt_in;
-		dm_config_port *p = NULL;
+		static const struct {
+			const char *route;
+			const char *name;
+			audio_devices_t type;
+			dm_config_role_t role;
+		} missing[] = {
+			{ "output-bluetooth_sco",        "BT SCO",
+			  AUDIO_DEVICE_OUT_BLUETOOTH_SCO,        DM_CONFIG_ROLE_SINK },
+			{ "input-bluetooth_sco_headset", "BT SCO Headset Mic",
+			  AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET, DM_CONFIG_ROLE_SOURCE },
+		};
+		size_t i;
 
-		if (spa_streq(route, "output-bluetooth_sco")) {
-			p = &bt_out;
-			p->name = (char *) "BT SCO";
-			p->role = DM_CONFIG_ROLE_SINK;
-			p->type = AUDIO_DEVICE_OUT_BLUETOOTH_SCO;
-		} else if (spa_streq(route, "input-bluetooth_sco_headset")) {
-			p = &bt_in;
-			p->name = (char *) "BT SCO Headset Mic";
-			p->role = DM_CONFIG_ROLE_SOURCE;
-			p->type = AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET;
-		}
-		if (p) {
+		for (i = 0; i < SPA_N_ELEMENTS(missing); i++) {
+			dm_config_port *p;
+
+			if (!spa_streq(route, missing[i].route))
+				continue;
+
+			p = pa_xnew0(dm_config_port, 1);
 			p->module = module;
 			p->port_type = DM_CONFIG_TYPE_DEVICE_PORT;
-			p->address = (char *) "";
+			p->name = pa_xstrdup(missing[i].name);
+			p->address = pa_xstrdup("");
+			p->role = missing[i].role;
+			p->type = missing[i].type;
+			p->profiles = dm_list_new();
+
+			dm_list_push_back(module->ports, p);
+			dm_list_push_back(module->device_ports, p);
+			spa_log_info(this->log, NAME " \"%s\" is missing from the audio "
+					"policy configuration - added it", p->name);
 			return p;
 		}
 	}
@@ -1597,6 +1670,7 @@ static int apply_route(struct impl *this, const char *route)
 	}
 
 	snprintf(this->wanted_port, sizeof(this->wanted_port), "%s", dev->name);
+	snprintf(this->wanted_route, sizeof(this->wanted_route), "%s", route);
 
 	if (!this->stream) {
 		spa_log_info(this->log, NAME " route \"%s\" remembered (HAL still closed)", dev->name);

@@ -561,28 +561,42 @@ For PipeWire to do Bluetooth audio, `libspa-0.2-bluetooth` has to be installed
 - without that package there is no BT support at all, WirePlumber only reports
 "BlueZ SPA plugin is missing or broken".
 
-**A2DP (music) works. Hands-free (HFP) does not - on no stack, not even in the
-shipped state.** Measured:
+**A2DP (music) works. Hands-free (HFP) works too, since 2026-09-11** - and the
+reason it did not for so long was ours, twice over:
 
-- ofono owns HFP: `hfp_ag_bluez5` is built in, `/bluetooth/profile/hfp_ag` is
-  registered with BlueZ. Next to it PipeWire's native backend fails with
-  `listen(): Address already in use` and
-  `RegisterProfile() failed: NotPermitted`.
-- ofono still creates no card for the connected headset
-  (`HandsfreeAudioManager.GetCards` stays empty).
-- On the shipped PulseAudio the result is the same: `handsfree_head_unit` can be
-  selected, the source goes to `RUNNING` and delivers **0 bytes**; `paplay` in
-  the other direction blocks.
-- The HAL configuration knows BT SCO device ports, but neither our card nor
-  PulseAudio's exposes them: on Android devices SCO runs in hardware between the
-  BT chip and the audio DSP, not through the host.
+- **The headset sat in its charging case for every single test.** Earbuds
+  accept the SCO link in there and drop it again after 25-50 ms; `btmon` says
+  `Disconnect Complete, Reason: Remote User Terminated Connection (0x13)`. Out
+  of the case the same link stands for as long as you want. Three "failed"
+  calls and an entire wrong theory came out of that one detail. Ask about the
+  case before measuring anything.
+- **Bluetooth is commented out of this device's audio policy.** In
+  `/android/vendor/etc/audio_policy_configuration.xml` lines 167-217 are a
+  single XML comment, and it swallows every BT SCO and A2DP device port. The
+  parsed configuration has nine device ports and no Bluetooth, so looking a
+  port up by name found nothing and `hal_open()` fell through to the default
+  output - **the speaker, without a word** - while every log line said
+  `BT SCO`.
+
+**SCO does not travel over HCI on this chip.** Measured with a link that really
+stood: 3987 SCO packets sent, **zero received**, nothing audible at the headset,
+microphone reading exactly zero. BlueZ is not where this audio is.
+
+Where it is: MediaTek moves SCO between the Bluetooth chip and the
+**application processor** over its own link, and the kernel exposes it as ALSA
+device 55 - `BTCVSD`, playback and capture, 87 driver symbols in
+`/proc/kallsyms`. The Android HAL opens that device and runs the codec in
+software; `libcvsd_mtk.so` and `libmsbc_mtk.so` are both on the phone, and the
+HAL's own strings name exactly the mixer controls the kernel driver offers
+(`BTCVSD Band`, `BTCVSD Loopback Switch`, `BTCVSD Rx Timestamp`). Nothing about
+that path is closed to us.
 
 `51-bluez-ofono.conf` therefore sets the **native** backend - not for audio
-through the host, but because only then does the card offer a hands-free
-profile at all, and only then does the headset establish an SCO channel. The
-Android path needs that channel: the HAL puts the voice path onto the Bluetooth
-PCM line via `BT_SCO=on`, and that line only carries while the connection is
-up. See `audioctl bt-call`.
+through the host, which does not happen here, but because only that backend
+offers a hands-free profile at all, and the air link has to exist before the
+chip has anything to carry. Without an active stream on `bluez_output.*` in a
+`headset-head-unit` profile there is no SCO connection. **PipeWire holds the
+link, the HAL carries the sound.**
 
 **`priority.session` has to be set on the node.** Without it WirePlumber's
 device selection falls back to `priority.driver` - and that is 50000 here, so
@@ -664,90 +678,108 @@ Measured on the third call, with all of that in place:
                   no route change for the rest of the call
 
 Nothing fought, the state was exactly what it should be - and **there was no
-audio in either direction**, on the headset or on the phone. Put next to the
-other end of the same question, where the SCO channel delivers 48000 samples
-with one distinct value to the host, that is the answer for this device:
-**Bluetooth telephony does not work here, by any of the paths there are.** The
-mobile voice path runs modem <-> DSP, the HAL will say it has put that path on
-the Bluetooth line, and no sound comes out of it.
+audio in either direction**. For a day that read as the end of the road. It was
+not: the headset was in its case, so the link was gone 30 ms after it came up,
+and the route to `BT SCO` was quietly landing on the speaker.
 
-### Why the same phone does this under Android
+### What actually carries a Bluetooth call here
 
-Because it is not the same software talking to the chip.
+Three fixes in `droid-pcm.c`, every one of them found by measuring rather than
+by reasoning:
 
-A Bluetooth call is a **hardware path**, not a stream through the computer: BT
-chip -> PCM/I2S -> audio DSP -> modem. That is the whole reason the audio HAL
-has a `BT_SCO=on` switch at all. The path has **two ends**, and both have to be
-configured.
+1. **Resolve the route by its route name, not by the HAL port name.** The
+   Bluetooth ports are missing from the audio policy, so
+   `dm_config_find_port(module, "BT SCO")` returns NULL and the old code fell
+   through to `dm_config_default_output_device()`. `apply_route()` now also
+   remembers the route name, `hal_open()` resolves it through
+   `port_by_route_name()`, and a route that cannot be honoured **warns**
+   instead of silently playing somewhere else.
+2. **Register the port we build ourselves.**
+   `pa_droid_open_output_stream()` checks the port it is handed against
+   `dm_config_find_device_port()`, which searches the module's own lists - so a
+   port only we knew about was refused with
+   `output stream "primary output" -> "BT SCO" failed`. It now goes into
+   `module->ports` and `module->device_ports`, allocated to match the
+   configuration's ownership rule: `ports` frees them, `device_ports` is a
+   view.
+3. **`BT_SCO=on` has to reach the HAL before the stream is opened.**
+   `pa_droid_stream_set_route()` sends it as a side effect, but it needs an
+   open stream - so on the first open after a route change nothing had told the
+   HAL, and it opened a Bluetooth stream that stayed silent: the right PCM
+   device, the chip even fetching the data, and nothing in the ear.
+   `bt_sco_announce()` sends it first now, the way Android does.
 
-Android configures both. This device carries
-`/android/vendor/lib64/libbt-vendor.so`, and inside it:
+The result, with the controls that make it an answer rather than an impression:
 
-    BT_VND_OP_SCO_CFG
+| | headset connected | headset disconnected |
+|---|---|---|
+| tone to `AUDIO_DEVICE_OUT_BLUETOOTH_SCO` | heard **in the earbud, phone silent**; `BTCVSD Tx Irq` **on** | `Tx Irq` **off**, nothing |
+| capture from `AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET`, speaking | RMS **238**, peaks **+-6158**, `Rx Irq` **on**, HAL holds `pcmC0D55c` | RMS **2.3**, peaks **+-8**, `Rx Irq` **off** - and that while shouting |
 
-That is the vendor operation "configure the SCO audio interface" from Android's
-Bluetooth HAL. Android's own Bluetooth stack loads that library and calls it,
-and MediaTek's code then programs the **controller's** PCM interface so SCO
-audio goes out on the line to the DSP.
+A factor of 750 in peak between connected and disconnected: the audio comes
+through the link, not from the phone's own microphone. The HAL takes both
+8000 Hz mono and 48000 Hz stereo on that device; both were heard.
 
-We only ever configure the other end. `BT_SCO=on` tells the DSP to take the
-voice path from the Bluetooth PCM line - and it does, and says so, and patches
-both directions. Nobody has told the controller to put anything on that line.
-Two ends of one wire, one of them switched.
+**Do not use scratching as a test sound.** The headset's noise suppression
+removes it completely - RMS 2.3 while the built-in microphone measured 5713 on
+the same gesture. It looks exactly like a dead microphone and it is not. Test
+with a voice. And do not let a measuring tool judge on "exactly zero" either: a
+live but quiet link decodes to a few counts of noise, and `probe-bt-sco-in`
+happily called that "real audio" until it was given an RMS threshold.
 
-BlueZ cannot make that call. `libbt-vendor.so` is an Android HAL library driven
-by Android's Bluetooth stack; BlueZ has no concept of it. What BlueZ does
-instead is what the Linux Bluetooth subsystem does: open an SCO socket and
-expect the audio **over HCI, in the host**. Which is exactly why the
-measurement there is digital silence - we are listening somewhere the audio was
-never routed.
+### Still open
 
-The modern Linux answer to this exists and is missing from this kernel.
-PipeWire can do it: `bluez5.hw-offload-datapath`, with the code to match
-("Bluetooth audio offload active", "set offload codec succeeded"). It needs the
-kernel to configure the controller's data path, which means
-`hci_configure_data_path`. On this phone:
+- A route change to or from Bluetooth should **reopen** the HAL stream. The HAL
+  picks the hardware path when the stream is opened; patching the route on an
+  open stream is acknowledged and changes nothing.
+- The route property only reaches our node while the node is running. Suspended,
+  it is lost and the next open uses the old route.
+- **A real call has not been through this yet.** Whether the headset opens its
+  microphone more readily once `AT+CLCC` reports an actual call is untested.
+  PipeWire answers that question out of ModemManager, but only when
+  `bluez5.hfphsp-backend-native-modem` is set - `modemmanager.c` returns early
+  with "No modem allowed" otherwise, and then every `AT+CLCC` is answered "no
+  calls" while the backend has just told the headset a call is active.
 
-    $ grep -c hci_configure_data_path /proc/kallsyms
-    0
-
-Kernel 4.19. That machinery reached mainline years later.
-
-So: same silicon, different stack. Android throws a vendor switch the Linux
-Bluetooth subsystem has no equivalent for on this kernel, and the one modern
-mechanism that would replace it is not there. It is not a configuration
-mistake, and it is not a small patch:
-
-- backporting the kernel offload work to 4.19 **and** a MediaTek BT driver that
-  implements the data-path configuration is a large undertaking;
-- loading `libbt-vendor.so` through libhybris and sending `BT_VND_OP_SCO_CFG`
-  ourselves is conceivable - the audio HAL is loaded exactly that way - but the
-  library expects Android's Bluetooth stack around it, it would contend with
-  BlueZ over the HCI transport, and here the controller belongs to the kernel
-  driver. That is a research project with a fair chance of taking Bluetooth
-  down with it.
-
-None of this is particular to this project. It is a Halium/Droidian boundary,
-and it is why the shipped PulseAudio cannot do it either - which was measured,
-not assumed.
-
-So it stays **off**. The script stays too, because none of it is wrong and
-another device may well behave differently:
+**The automatic hand-over is still off by default.**
 
     wpctl settings -s furios.bluetooth-call-routing true
 
-turns it on, `false` turns it off again. The setting is declared in
-`51-bluez-ofono.conf`; WirePlumber ignores a setting it has no schema entry
-for, silently, which is why the declaration is there and why
+turns it on, `false` turns it off again. It stays off until a real call has
+been through the fixed path - a call without audio is worse than a call on the
+earpiece, and this setting has produced exactly that before. The setting is
+declared in `51-bluez-ofono.conf`; WirePlumber silently ignores a setting it
+has no schema entry for, which is why the declaration is there and why
 `tests/test-wireplumber-conf.sh` checks every name in those files.
 
-**The host-side headset microphone delivers nothing**, and that is not a
-configuration mistake: with the card in `headset-head-unit` and the native
-backend, eight seconds of capture produced 64000 bytes in which every single
-sample is zero. The SCO link does not carry audio to the host on this device -
-the controller keeps it in hardware between the BT chip and the audio DSP. So
-VoIP calls (Signal, SIP) over a headset cannot work here, while mobile calls
-can, because those never needed the host in the first place.
+### The explanation this file used to give, and why it was wrong
+
+It said a Bluetooth call is a hardware path - BT chip -> PCM/I2S -> audio DSP ->
+modem - with two ends to configure; that Android programs the controller end
+through `BT_VND_OP_SCO_CFG` in `/android/vendor/lib64/libbt-vendor.so`; and that
+BlueZ has no way to do the same. Every load-bearing part of that is wrong here:
+
+- `libbt-vendor.so` is a **stub**: 676 bytes of code in `.text`. The operation
+  it names does nothing on this device.
+- The path is not hardware-only. SCO data reaches the application processor
+  through ALSA device 55, and the HAL does the codec in software.
+- `bluebinder` forwards SCO in **both** directions - packet type 0x03 to
+  transaction 4 (`sendScoData`), transaction 4 back to packet type 0x03 into
+  `/dev/vhci`. The bridge was never the bottleneck.
+- The measurement the whole conclusion rested on - "the SCO channel delivers
+  48000 samples with one distinct value" - came from `bluez_input.<address>`, a
+  48 kHz loopback stub, at a time when no SCO link had lived longer than 45 ms.
+  There was never a link to measure.
+
+Worth keeping as a reminder: each of those statements had evidence behind it,
+and the evidence was of the wrong thing. `hciconfig` showing `sco:0` is true and
+means nothing about whether a headset can hear you.
+
+**The host-side headset microphone delivers nothing**, and that part survives -
+for a different reason than it used to give. SCO does not cross HCI on this
+chip, so BlueZ's side of it is silent. The microphone works through the HAL.
+VoIP over a headset therefore has to go the same way a mobile call does, through
+BTCVSD, not through a socket in the host.
 
 **Playback pauses when Bluetooth disconnects.** Earbuds run out of battery, or
 one goes back into its case, and without this the audio moves to the next best
@@ -776,7 +808,12 @@ show microphone for Bluetooth headsets" - so every recorder listed the headset
 as a microphone, picking it appeared to work, and the recording was silence.
 Measured again on 2026-09-10, 3 s at 16 kHz mono: 48000 samples, **one**
 distinct value, RMS 0, in the A2DP profile and in the hands-free profile
-alike. The setting is off in `51-bluez-ofono.conf`; the loopback source now
+alike. Both of those readings were taken with the headset in its charging case,
+so they say less than they looked like they did - but the setting stays off for
+a reason that survived: what that node offers is the **host** side of SCO, and
+SCO does not cross HCI on this chip. A microphone that records nothing is worse
+than no microphone in the list, because picking it looks like it worked. The
+setting is off in `51-bluez-ofono.conf`; the loopback source now
 exists only while the card really is in a hands-free profile, which is where a
 call puts it. `droid-input-follows-output.lua` keeps its Bluetooth guard
 anyway - the node can still appear, and the rule that the microphone must not
