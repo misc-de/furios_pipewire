@@ -28,6 +28,7 @@ run() {
 
 run "audioctl" bash "$HERE/test-audioctl.sh"
 run "wireplumber configuration" bash "$HERE/test-wireplumber-conf.sh"
+run "callaudiod refresh" bash "$HERE/test-callaudio-refresh.sh"
 run "python: config generator, app/audioctl seam, bluetooth watcher" \
     python3 "$HERE/test-python.py"
 

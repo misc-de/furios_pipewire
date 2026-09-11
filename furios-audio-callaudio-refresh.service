@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=Give callaudiod a fresh view of the audio card
+Documentation=https://github.com/misc-de/furios_pipewire
+After=wireplumber.service
+PartOf=wireplumber.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/furios-audio-callaudio-refresh
+
+[Install]
+WantedBy=wireplumber.service

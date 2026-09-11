@@ -1,0 +1,46 @@
+#!/bin/sh
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+# Give callaudiod a fresh view of the audio card after WirePlumber restarted.
+#
+# callaudiod looks the card up once and keeps its index. A WirePlumber restart
+# destroys every device and creates it again with a new one - measured on
+# 2026-09-11: card 161 before, card 248 after. callaudiod notices the new sinks
+# and sources ("new sink 249") but never re-reads the card list, so the next
+# call runs into this and stops there:
+#
+#   Change mode from '0', to '1'
+#   card has voice profile, using it
+#   <nothing - 25 seconds, then the D-Bus timeout>
+#
+# gnome-calls then reports "Failed to select audio mode: Timeout was reached",
+# the card never reaches the voicecall profile, the HAL stays in
+# AUDIO_MODE_NORMAL, and the call has no audio in either direction. Restarting
+# a profile does this already (audioctl); this covers every other way
+# WirePlumber comes back - an upgrade, a crash, someone typing systemctl.
+#
+# Starting callaudiod again is only half of it. If the method that activates it
+# over D-Bus is SelectMode itself, the call arrives while callaudiod is still
+# bringing its PulseAudio connection up and blocks just the same. So it is
+# started here, with a method that asks nothing of it.
+set -u
+
+# Never during a call. Taking callaudiod away mid-call would leave the card in
+# the voicecall profile with nobody to bring it back. A WirePlumber restart at
+# that moment has broken the call anyway; making it worse helps no one.
+profile=$(pactl list cards 2>/dev/null |
+          sed -n '/Name: droid$/,/^Card #/p' |
+          sed -n 's/^[[:space:]]*Active Profile: //p')
+if [ "$profile" = voicecall ]; then
+    echo "a call is running - leaving callaudiod alone"
+    exit 0
+fi
+
+pkill -x callaudiod 2>/dev/null && echo "callaudiod stopped - its card no longer exists"
+
+# Read a property: that activates the service without asking it to do anything.
+busctl --user get-property org.mobian_project.CallAudio \
+    /org/mobian_project/CallAudio org.mobian_project.CallAudio AudioMode \
+    >/dev/null 2>&1 || true
+echo "callaudiod started again, with the card as it is now"
+exit 0

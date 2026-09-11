@@ -11,15 +11,16 @@ set -u
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(dirname "$HERE")
 TARGET=${1:-$ROOT/audioctl}
+TEST=${2:-$HERE/test-audioctl.sh}
 TRACE=$(mktemp)
 trap 'rm -f "$TRACE"' EXIT
 
 # The tests source audioctl and call into it; tracing them traces it.
 export AUDIOCTL_TRACE="$TRACE"
-bash "$HERE/test-audioctl.sh" >/dev/null 2>&1 || true
+bash "$TEST" >/dev/null 2>&1 || true
 
 if [ ! -s "$TRACE" ]; then
-    echo "no trace collected - is test-audioctl.sh writing one?" >&2
+    echo "no trace collected - is $(basename "$TEST") writing one?" >&2
     exit 1
 fi
 
@@ -46,10 +47,16 @@ continued = False
 statement_start = 0
 for n, line in enumerate(open(target, errors="replace"), 1):
     s = line.strip()
-    was_continued, continued = continued, line.rstrip().endswith("\\")
-    # A command broken over several lines with a backslash is one statement.
-    # bash announces it once, but not always at the line it starts on - so the
-    # whole run of lines counts as one, and as reached if any of them was.
+    stripped = line.rstrip()
+    # A backslash continues a command, and so does a trailing pipe or a
+    # trailing && / || - bash announces the whole pipeline once, at its LAST
+    # line, so without this the first lines of one look unreached.
+    was_continued, continued = continued, (
+        stripped.endswith("\\") or stripped.endswith("|")
+        or stripped.endswith("&&") or stripped.endswith("||"))
+    # A command broken over several lines is one statement. bash announces it
+    # once, but not always at the line it starts on - so the whole run of lines
+    # counts as one, and as reached if any of them was.
     if was_continued:
         if n in hit:
             hit.add(statement_start)

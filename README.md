@@ -81,6 +81,24 @@ cost time:
   unavailable on this device as well; there is no jack detection here
   (`/sys/class/extcon` only lists USB).
 
+**callaudiod has to be restarted whenever the card is.** It looks the card up
+once and keeps its index; a WirePlumber restart destroys every device and
+creates it again with a new one - measured: card 161 before, 248 after.
+callaudiod sees the new sinks and sources and never re-reads the card list, so
+the next call stops here:
+
+    Change mode from '0', to '1'
+    card has voice profile, using it
+    <nothing - 25 seconds, then the D-Bus timeout>
+
+and the call has no audio in either direction, because the HAL never left
+`AUDIO_MODE_NORMAL`. A profile switch takes care of this in `audioctl`;
+`furios-audio-callaudio-refresh.service` covers every other way WirePlumber
+comes back - an upgrade, a crash, someone typing `systemctl`. It leaves
+callaudiod alone while a call is running: a restart at that moment has broken
+the call anyway, and taking callaudiod away would leave the card in the
+`voicecall` profile with nobody to bring it back.
+
 **The first call after a profile switch used to have no audio at all**, and
 the reason was not in the sound path. Switching profiles kills callaudiod, so
 the next call starts it again through D-Bus - and when `SelectMode` is the

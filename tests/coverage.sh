@@ -118,5 +118,8 @@ echo "== the Python parts =="
 "$ROOT/tests/coverage-python.sh" 2>/dev/null || echo "  could not be measured"
 
 echo
-echo "== audioctl =="
-"$ROOT/tests/coverage-shell.sh" 2>/dev/null || echo "  could not be measured"
+echo "== the shell parts =="
+"$ROOT/tests/coverage-shell.sh" 2>/dev/null || echo "  audioctl could not be measured"
+"$ROOT/tests/coverage-shell.sh" "$ROOT/tools/furios-audio-callaudio-refresh" \
+    "$ROOT/tests/test-callaudio-refresh.sh" 2>/dev/null \
+    || echo "  furios-audio-callaudio-refresh could not be measured"

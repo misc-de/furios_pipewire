@@ -291,6 +291,20 @@ ensure_pause_on_disconnect() {
     return 0
 }
 
+# callaudiod keeps the card index it looked up once. Every WirePlumber restart
+# gives the card a new one, and the next call then blocks for 25 seconds
+# instead of switching the profile - no audio in either direction. A profile
+# switch takes care of it here; this unit covers every other way WirePlumber
+# comes back. Like the others, only the user can enable their own unit.
+ensure_callaudio_refresh() {
+    uctl is-enabled furios-audio-callaudio-refresh.service >/dev/null 2>&1 && return 0
+    if uctl cat furios-audio-callaudio-refresh.service >/dev/null 2>&1; then
+        run uctl enable furios-audio-callaudio-refresh.service >/dev/null 2>&1 \
+            && info "callaudiod is refreshed when WirePlumber restarts"
+    fi
+    return 0
+}
+
 ensure_safety_net() {
     uctl is-enabled furios-audio-apply.service >/dev/null 2>&1 && return 0
     if uctl cat furios-audio-apply.service >/dev/null 2>&1; then
@@ -305,6 +319,7 @@ switch_to() {
     prev=$(current_profile)
     ensure_safety_net
     ensure_pause_on_disconnect
+    ensure_callaudio_refresh
     preflight "$p"
     printf 'switching: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"

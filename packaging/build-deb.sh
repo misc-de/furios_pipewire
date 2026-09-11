@@ -59,6 +59,8 @@ install -Dm755 experiments/dmnr-handsfree.sh  "$STAGE/usr/bin/furios-audio-dmnr"
 install -Dm755 tools/build-bluez5-aac.sh      "$STAGE/usr/share/furios-audio/build-bluez5-aac.sh"
 install -Dm755 tools/furios-audio-pause-on-disconnect.py \
     "$STAGE/usr/bin/furios-audio-pause-on-disconnect"
+install -Dm755 tools/furios-audio-callaudio-refresh \
+    "$STAGE/usr/bin/furios-audio-callaudio-refresh"
 
 install -Dm644 tunnel.conf                    "$STAGE/usr/share/furios-audio/tunnel.conf"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$STAGE/tmp-hal.conf" >/dev/null
@@ -79,6 +81,8 @@ install -Dm644 furios-pw-tunnel.service       "$STAGE/usr/lib/systemd/user/furio
 install -Dm644 furios-audio-apply.service     "$STAGE/usr/lib/systemd/user/furios-audio-apply.service"
 install -Dm644 furios-audio-pause-on-disconnect.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-pause-on-disconnect.service"
+install -Dm644 furios-audio-callaudio-refresh.service \
+    "$STAGE/usr/lib/systemd/user/furios-audio-callaudio-refresh.service"
 
 install -Dm644 gui/de.furios.audioswitch.desktop \
     "$STAGE/usr/share/applications/de.furios.audioswitch.desktop"
