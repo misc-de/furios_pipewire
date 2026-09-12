@@ -708,6 +708,49 @@ by reasoning:
    HAL, and it opened a Bluetooth stream that stayed silent: the right PCM
    device, the chip even fetching the data, and nothing in the ear.
    `bt_sco_announce()` sends it first now, the way Android does.
+4. **A route that crosses Bluetooth reopens the stream.** The HAL picks the
+   hardware path while *opening*, not when a route is set on an open stream.
+   Measured both ways on the phone: the route set on a running stream left the
+   HAL on `pcmC0D0p` and the sound stayed in the speaker while every log line
+   said "BT SCO"; set before opening, the HAL went to `pcmC0D55p`, the
+   Bluetooth PCM device, and the chip fetched the data. `apply_route()` closes
+   and reopens for that one move - and only that one. Speaker, earpiece and
+   the wired accessories share the primary PCM device and reroute perfectly
+   well on an open stream, which is how a call switches to the earpiece; a
+   reopen there would buy nothing and cost a gap in the audio. If the new
+   route cannot be opened, the node goes back to the one that was working
+   rather than being left without a stream.
+5. **The card was handing the node the wrong name.** There are two ways a
+   route reaches the node: while it runs, PipeWire forwards the active route's
+   props and `droid.route` carries the route name; while it is idle those
+   props are lost and `droid_node_set_route()` is the only way left. That
+   second path passed the HAL's own port name ("Speaker") to a node that
+   resolves names through `pa_droid_output_port_name()`, which only ever
+   yields route names ("output-speaker"). Nothing ever matched, every such
+   call returned `-ENOENT`, and a route chosen while nothing played simply
+   never arrived. It reads as "the route property only works while the node
+   runs" - which is what this repo used to claim, and it was our own bug.
+
+**Both sides have to agree on the codec, and nothing makes them.** The HAL
+encodes narrow-band CVSD unless it is told otherwise, while WirePlumber
+prefers the wide-band `headset-head-unit` profile (mSBC) - and then the
+earbuds decode CVSD bytes as mSBC and nothing intelligible arrives. It is
+invisible from the phone's side: the link stands, `BTCVSD Tx Irq` is on, the
+HAL holds `pcmC0D55p`, every measurement says the audio is on its way.
+Measured with the same tone each time:
+
+| air link | HAL | in the ear |
+|---|---|---|
+| `headset-head-unit` (mSBC, 16 kHz) | default, `BTCVSD Band` = NB | **nothing** |
+| `headset-head-unit-cvsd` (CVSD, 8 kHz) | default, `BTCVSD Band` = NB | **heard** |
+| `headset-head-unit` (mSBC, 16 kHz) | `bt_wbs=on`, `BTCVSD Band` = WB | **heard** |
+
+So the HAL does wide-band, it just has to be told: `bt_wbs=on` flips
+`BTCVSD Band` from NB to WB and `Speech_BT_SCO_WB` to on, both observable in
+the mixer. `probe-bt-sco-out --wbs` sends it. What is missing is the part that
+tells the plugin which codec BlueZ negotiated - see **Still open**. This is
+also why the measurement below once worked and later did not: the profile
+happened to be CVSD that night.
 
 The result, with the controls that make it an answer rather than an impression:
 
@@ -729,11 +772,12 @@ happily called that "real audio" until it was given an RMS threshold.
 
 ### Still open
 
-- A route change to or from Bluetooth should **reopen** the HAL stream. The HAL
-  picks the hardware path when the stream is opened; patching the route on an
-  open stream is acknowledged and changes nothing.
-- The route property only reaches our node while the node is running. Suspended,
-  it is lost and the next open uses the old route.
+- **Nothing tells the plugin which codec BlueZ negotiated.** Until it does,
+  a Bluetooth call over the wide-band profile is silent - see the table above.
+  The plugin cannot ask BlueZ itself; the codec is known on the WirePlumber
+  side, which already switches the Bluetooth card, so it would travel the same
+  way `droid.route` does. Forcing the CVSD profile for calls would also work
+  and costs the wide-band voice quality.
 - **A real call has not been through this yet.** Whether the headset opens its
   microphone more readily once `AT+CLCC` reports an actual call is untested.
   PipeWire answers that question out of ModemManager, but only when

@@ -35,13 +35,18 @@ const struct spa_handle_factory droid_pcm_source_factory = {
 
 /* Same idea: in the daemon this reaches a node that holds a HAL stream. Here
  * it reports that no node is listening, which is what set_route() is written
- * to tolerate. */
+ * to tolerate - and it keeps what it was handed, because WHICH name arrives
+ * is the whole point of test_route_reaches_node(). */
 static int node_route_result = -ENOENT;
+static char node_route_seen[64];
+static char node_mix_port_seen[64];
 
-int droid_node_set_route(const char *mix_port, const char *device_port)
+int droid_node_set_route(const char *mix_port, const char *route)
 {
-	(void) mix_port;
-	(void) device_port;
+	snprintf(node_mix_port_seen, sizeof(node_mix_port_seen), "%s",
+			mix_port ? mix_port : "(null)");
+	snprintf(node_route_seen, sizeof(node_route_seen), "%s",
+			route ? route : "(null)");
 	return node_route_result;
 }
 
@@ -1089,6 +1094,80 @@ static void test_port_without_a_name(void)
 	this->module = NULL;
 }
 
+/* What the card hands the node when a route is chosen.
+ *
+ * There are two ways a route reaches the node, and they have to agree. While
+ * the node runs, PipeWire forwards the active route's props and "droid.route"
+ * carries the route name. While it sits idle those props are lost, and this
+ * direct call is the only way left - it exists for exactly that case.
+ *
+ * It was handing over the HAL's own port name ("Speaker") while the node
+ * resolves the name through pa_droid_output_port_name(), which only ever
+ * yields route names ("output-speaker"). Nothing matched, every such call
+ * returned -ENOENT, and a route chosen while nothing played simply never
+ * arrived. The bug was invisible because the running case worked and because
+ * this stub used to swallow whatever it was given.
+ *
+ * So the check is not against a literal: it asks the same conversion the node
+ * asks. If the names ever change, both sides change together. */
+static void test_route_reaches_node(void)
+{
+	static dm_config_port speaker = {
+		.name = (char *) "Speaker",
+		.type = AUDIO_DEVICE_OUT_SPEAKER,
+		.role = DM_CONFIG_ROLE_SINK,
+	};
+	static dm_config_port bt = {
+		.name = (char *) "BT SCO",
+		.type = AUDIO_DEVICE_OUT_BLUETOOTH_SCO,
+		.role = DM_CONFIG_ROLE_SINK,
+	};
+	static dm_config_port mic = {
+		.name = (char *) "Built-In Mic",
+		.type = AUDIO_DEVICE_IN_BUILTIN_MIC,
+		.role = DM_CONFIG_ROLE_SOURCE,
+	};
+	struct impl *this;
+	const char *expected;
+
+	printf("\nwhich name the card hands the node\n");
+
+	this = fresh_impl();
+	spa_hook_list_init(&this->hooks);
+	add_route(this, "output-speaker", DEV_SINK, 300, SPA_PARAM_AVAILABILITY_yes);
+	add_route(this, "output-bluetooth_sco", DEV_SINK, 50, SPA_PARAM_AVAILABILITY_unknown);
+	add_route(this, "input-builtin_mic", DEV_SOURCE, 200, SPA_PARAM_AVAILABILITY_yes);
+	this->routes[0].port = &speaker;
+	this->routes[1].port = &bt;
+	this->routes[2].port = &mic;
+
+	/* The port name and the route name really are different strings - if they
+	 * were not, the bug could not have existed and this test would prove
+	 * nothing. */
+	check("port name and route name differ",
+			!spa_streq(this->routes[0].port->name, this->routes[0].pa_name));
+
+	node_route_seen[0] = '\0';
+	set_route(this, 0, DEV_SINK);
+	pa_droid_output_port_name(speaker.type, &expected);
+	check_str("the speaker arrives as a route name", expected, node_route_seen);
+	check_str("and on the primary output", "primary output", node_mix_port_seen);
+
+	node_route_seen[0] = '\0';
+	set_route(this, 1, DEV_SINK);
+	pa_droid_output_port_name(bt.type, &expected);
+	check_str("Bluetooth too", expected, node_route_seen);
+
+	/* The input side resolves through the other table, so it gets its own
+	 * check rather than being assumed to follow. */
+	node_route_seen[0] = '\0';
+	node_mix_port_seen[0] = '\0';
+	set_route(this, 2, DEV_SOURCE);
+	pa_droid_input_port_name(mic.type, &expected);
+	check_str("and the microphone", expected, node_route_seen);
+	check_str("on the primary input", "primary input", node_mix_port_seen);
+}
+
 int main(void)
 {
 	test_route_description();
@@ -1100,6 +1179,7 @@ int main(void)
 	test_default_route();
 	test_route_priority();
 	test_route_props();
+	test_route_reaches_node();
 	printf("\n  %d checks, %d failed\n", checks, failures);
 	return failures == 0 ? 0 : 1;
 }

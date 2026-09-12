@@ -817,6 +817,89 @@ static void test_apply_route(void)
 	free_node(this);
 }
 
+/* A route change that crosses Bluetooth has to reopen the stream.
+ *
+ * The HAL picks the hardware path while OPENING, not when a route is set on
+ * an open stream. Measured on the phone: the route set on a running stream
+ * left the HAL on pcmC0D0p and the sound came out of the speaker while every
+ * log line said "BT SCO"; set before opening, the HAL went to pcmC0D55p, the
+ * Bluetooth PCM device. So the crossing is a close and an open, and only the
+ * crossing - speaker, earpiece and the wired accessories share one PCM device
+ * and reroute fine on an open stream, where a reopen would only cost a gap.
+ */
+static void test_bluetooth_reopen(void)
+{
+	struct impl *this;
+	unsigned opens, unrefs;
+
+	section("a route that crosses Bluetooth reopens the stream");
+	reset_all();
+	this = make_node(false, playback_info());
+	if (!check("the node is there", this != NULL))
+		return;
+
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-speaker");
+	check_int("the stream opens", 0, hal_open(this));
+	opens = hal_stub.output_opens;
+	unrefs = hal_stub.stream_unrefs;
+
+	/* Within the phone's own outputs nothing is torn down. */
+	hal_stub.route_calls = 0;
+	check_int("earpiece is accepted", 0, apply_route(this, "output-earpiece"));
+	check_int("without reopening anything", opens, hal_stub.output_opens);
+	check_int("the open stream is simply rerouted", 1, hal_stub.route_calls);
+	check_str("to the earpiece", "Earpiece", hal_stub.last_route);
+
+	/* Onto the headset: this one has to go through a reopen. */
+	check_int("Bluetooth is accepted", 0,
+			apply_route(this, "output-bluetooth_sco"));
+	check_int("the old stream is closed", unrefs + 1, hal_stub.stream_unrefs);
+	check_int("and a new one opened", opens + 1, hal_stub.output_opens);
+	check_str("on the Bluetooth port", "BT SCO", hal_stub.last_route);
+	check("with BT_SCO=on before the open, which is what routes the HAL",
+			strstr(hal_stub.last_parameters, "BT_SCO=on") != NULL);
+
+	/* And back off it again - the crossing counts in both directions. */
+	opens = hal_stub.output_opens;
+	check_int("leaving Bluetooth is accepted", 0,
+			apply_route(this, "output-speaker"));
+	check_int("and reopens as well", opens + 1, hal_stub.output_opens);
+	check_str("back on the speaker", "Speaker", hal_stub.last_route);
+
+	/* Two Bluetooth ports in a row do not cross anything. */
+	apply_route(this, "output-bluetooth_sco");
+	opens = hal_stub.output_opens;
+	hal_stub.route_calls = 0;
+	check_int("staying on Bluetooth is accepted", 0,
+			apply_route(this, "output-bluetooth_sco"));
+	check_int("and does not reopen", opens, hal_stub.output_opens);
+	check_int("it only reroutes", 1, hal_stub.route_calls);
+
+	hal_close(this);
+	free_node(this);
+
+	/* The failure that matters: the new route cannot be opened. The node
+	 * must not be left without a stream - a phone that stays silent until
+	 * the next reboot is worse than a headset that did not take over. */
+	reset_all();
+	this = make_node(false, playback_info());
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-speaker");
+	hal_open(this);
+
+	hal_stub.output_opens_failing = 1;
+	check_int("a crossing that cannot be opened is reported", -EIO,
+			apply_route(this, "output-bluetooth_sco"));
+	check("but the node still has a stream", this->stream != NULL);
+	check_str("on the route that was working", "Speaker", hal_stub.last_route);
+	check_str("and that is the route it remembers", "output-speaker",
+			this->wanted_route);
+
+	hal_close(this);
+	free_node(this);
+}
+
 static void test_registry(void)
 {
 	struct impl *sink, *source;
@@ -2246,6 +2329,7 @@ int main(void)
 	test_hal_open_capture_ports();
 	test_route_names();
 	test_apply_route();
+	test_bluetooth_reopen();
 	test_registry();
 	test_apply_mode();
 	test_apply_mode_details();

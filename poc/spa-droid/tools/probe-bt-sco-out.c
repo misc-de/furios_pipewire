@@ -43,6 +43,7 @@ int main(int argc, char **argv)
 	struct audio_config cfg;
 	audio_devices_t device = AUDIO_DEVICE_OUT_BLUETOOTH_SCO;
 	unsigned rate = 8000, seconds = 10, freq = 440, channels = 1;
+	const char *wbs = NULL;
 	int16_t *tone;
 	size_t frames, i, chunk;
 	int ret, wrote = 0;
@@ -50,10 +51,18 @@ int main(int argc, char **argv)
 	for (i = 1; i < (size_t) argc; i++) {
 		if (!strcmp(argv[i], "--headset")) device = AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET;
 		else if (!strcmp(argv[i], "--wideband")) rate = 16000;
+		/* The codec the HAL encodes with. Without this it always encodes
+		 * narrow-band CVSD - and when PipeWire has negotiated mSBC on the
+		 * air (profile headset-head-unit, 16 kHz) the two do not match and
+		 * nothing intelligible reaches the ear. Measured: same tone, same
+		 * everything, audible on a CVSD link and silent on an mSBC one. */
+		else if (!strcmp(argv[i], "--wbs")) wbs = "on";
+		else if (!strcmp(argv[i], "--no-wbs")) wbs = "off";
 		else if (!strcmp(argv[i], "--rate") && i + 1 < (size_t) argc) rate = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--stereo")) channels = 2;
 		else if (!strcmp(argv[i], "--seconds") && i + 1 < (size_t) argc) seconds = atoi(argv[++i]);
-		else { fprintf(stderr, "usage: %s [--headset] [--wideband] [--seconds N]\n", argv[0]); return 1; }
+		else { fprintf(stderr, "usage: %s [--headset] [--wideband] [--wbs|--no-wbs] "
+				"[--rate N] [--stereo] [--seconds N]\n", argv[0]); return 1; }
 	}
 
 	printf("1) reading the HAL configuration ...\n");
@@ -67,6 +76,14 @@ int main(int argc, char **argv)
 	printf("3) set_parameters(BT_SCO=on)\n");
 	if (pa_droid_set_parameters(hw, "BT_SCO=on") < 0)
 		fprintf(stderr, "   the HAL did not take it\n");
+
+	if (wbs) {
+		char param[32];
+		snprintf(param, sizeof(param), "bt_wbs=%s", wbs);
+		printf("   set_parameters(%s)\n", param);
+		if (pa_droid_set_parameters(hw, param) < 0)
+			fprintf(stderr, "   the HAL did not take %s\n", param);
+	}
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.sample_rate = rate;

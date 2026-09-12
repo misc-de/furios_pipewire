@@ -127,6 +127,7 @@ struct impl {
 	uint32_t pref_channels;
 	char wanted_port[64];       /* route requested by the device */
 	char wanted_route[64];      /* ... under the name the device uses for it */
+	bool open_is_bt;            /* the open stream was opened on a BT SCO port */
 	bool mode_holds_hal;        /* HAL only kept open for call mode */
 	bool in_call;               /* mode is AUDIO_MODE_IN_CALL */
 	uint64_t hal_latency_ns;    /* remembered at open time, see latency_ns() */
@@ -186,6 +187,7 @@ static int apply_voice_volume(struct impl *this, const char *value);
  * That lookup lives further down, next to the route handling. */
 static dm_config_port *port_by_route_name(struct impl *this, const char *route);
 static void bt_sco_announce(struct impl *this, const dm_config_port *dev);
+static bool port_is_bt_sco(const dm_config_port *dev);
 
 /* ------------------------------------------------------------------ HAL */
 
@@ -256,6 +258,10 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 		spa_log_warn(this->log, NAME " routing to \"%s\" failed", dev->name);
 	else
 		DIAG(this, "input device set: %s", dev->name);
+	/* Which side of the Bluetooth divide this stream was opened on. A later
+	 * route change that crosses it needs the stream reopened - see
+	 * apply_route(). */
+	this->open_is_bt = port_is_bt_sco(dev);
 
 	/* For input streams pa_droid_stream_get_latency() returns 0 - upstream
 	 * never computes it. So estimate it ourselves: one HAL period. */
@@ -282,6 +288,19 @@ static pa_droid_hw_module *hw_module_keepalive;
  * the HAL yet, and it opened a Bluetooth stream that stayed silent: the right
  * PCM device (pcmC0D55p), the chip even fetching the data, and nothing in the
  * ear. Android sets the parameter on the device, before opening. So do we. */
+/* Does this port put the audio on the Bluetooth voice link?
+ *
+ * It decides two things that have to agree: the BT_SCO parameter the HAL is
+ * told before opening, and whether a route change needs the stream reopened.
+ * One rule, one place - they drifted apart once already. */
+static bool port_is_bt_sco(const dm_config_port *dev)
+{
+	return dev && (dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO ||
+	               dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET ||
+	               dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT ||
+	               dev->type == AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET);
+}
+
 static void bt_sco_announce(struct impl *this, const dm_config_port *dev)
 {
 	bool bt;
@@ -289,10 +308,7 @@ static void bt_sco_announce(struct impl *this, const dm_config_port *dev)
 	if (!this->hw || !dev)
 		return;
 
-	bt = dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO ||
-	     dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO_HEADSET ||
-	     dev->type == AUDIO_DEVICE_OUT_BLUETOOTH_SCO_CARKIT ||
-	     dev->type == AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET;
+	bt = port_is_bt_sco(dev);
 
 	if (pa_droid_set_parameters(this->hw, bt ? "BT_SCO=on" : "BT_SCO=off") < 0)
 		spa_log_warn(this->log, NAME " the HAL did not take BT_SCO=%s",
@@ -416,6 +432,7 @@ static int hal_open(struct impl *this)
 		pa_channel_map_init_stereo(&map);
 
 	bt_sco_announce(this, dev);
+	this->open_is_bt = port_is_bt_sco(dev);
 
 	this->stream = pa_droid_open_output_stream(this->hw, &spec, &map, mix, dev);
 	if (!this->stream) {
@@ -823,6 +840,44 @@ static void writer_stop(struct impl *this, bool drain)
 				"%u dropped blocks (ring full)",
 				this->n_write_err, this->capture ? "Reads" : "Writes",
 				this->n_overrun);
+}
+
+/* Close the HAL stream and open it again, resuming the graph if it was
+ * running.
+ *
+ * The HAL picks the hardware path when the stream is OPENED, not when a route
+ * is set on an open one. Measured both ways: route set while a stream ran ->
+ * the HAL kept /dev/snd/pcmC0D0p and the sound came out of the speaker, while
+ * every log line said "BT SCO"; route set before opening -> the HAL opened
+ * /dev/snd/pcmC0D55p, the Bluetooth PCM device, and the chip fetched the
+ * data. So crossing into or out of Bluetooth means closing and opening.
+ *
+ * `resume` is passed in rather than read from this->started, because after
+ * the first attempt the writer is stopped and the flag no longer says what
+ * the caller wants - the retry on the old route has to know it too. */
+static int hal_restart(struct impl *this, bool resume)
+{
+	int res;
+
+	timer_stop(this);
+	writer_stop(this, true);
+	hal_close(this);
+
+	if ((res = hal_open(this)) < 0)
+		return res;
+	if (!resume)
+		return 0;
+
+	if ((res = writer_start(this)) < 0) {
+		hal_close(this);
+		return res;
+	}
+	if ((res = timer_start(this)) < 0) {
+		writer_stop(this, false);
+		hal_close(this);
+		return res;
+	}
+	return 0;
 }
 
 /* ------------------------------------------------------------- Node */
@@ -1667,6 +1722,49 @@ static int apply_route(struct impl *this, const char *route)
 	if (!(dev = port_by_route_name(this, route))) {
 		spa_log_warn(this->log, NAME " route \"%s\" is unknown to the HAL", route);
 		return -ENOENT;
+	}
+
+	/* Crossing into or out of Bluetooth SCO changes which PCM device the HAL
+	 * opens, and it only decides that while opening - patching the route on
+	 * the open stream leaves the audio where it was, silently. So that one
+	 * move goes through a reopen.
+	 *
+	 * Only that one: speaker, earpiece and the wired accessories all share
+	 * the primary PCM device and reroute perfectly well on an open stream -
+	 * that is how calls switch to the earpiece today. Tearing the stream
+	 * down for them would buy nothing and cost a gap in the audio. */
+	if (this->stream && port_is_bt_sco(dev) != this->open_is_bt) {
+		char prev_port[sizeof(this->wanted_port)];
+		char prev_route[sizeof(this->wanted_route)];
+		bool resume = this->started;
+
+		memcpy(prev_port, this->wanted_port, sizeof(prev_port));
+		memcpy(prev_route, this->wanted_route, sizeof(prev_route));
+
+		snprintf(this->wanted_port, sizeof(this->wanted_port), "%s", dev->name);
+		snprintf(this->wanted_route, sizeof(this->wanted_route), "%s", route);
+
+		spa_log_info(this->log, NAME " route \"%s\" crosses Bluetooth - "
+				"reopening the HAL stream", route);
+
+		if ((res = hal_restart(this, resume)) >= 0) {
+			DIAG(this, "route changed by reopening: %s -> %s", route, dev->name);
+			return 0;
+		}
+
+		/* Never leave the node without a stream because a route did not
+		 * work: go back to the one that was playing and open that again. A
+		 * phone whose sound is gone until the next reboot is worse than a
+		 * headset that did not take over. */
+		spa_log_warn(this->log, NAME " route \"%s\" could not be opened (%s) - "
+				"going back to \"%s\"", route, spa_strerror(res),
+				prev_route[0] ? prev_route : "the default output");
+		memcpy(this->wanted_port, prev_port, sizeof(prev_port));
+		memcpy(this->wanted_route, prev_route, sizeof(prev_route));
+		if (hal_restart(this, resume) < 0)
+			spa_log_error(this->log, NAME " the way back failed too - "
+					"this node has no stream now");
+		return res;
 	}
 
 	snprintf(this->wanted_port, sizeof(this->wanted_port), "%s", dev->name);

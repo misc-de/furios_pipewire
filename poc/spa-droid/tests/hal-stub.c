@@ -165,6 +165,10 @@ pa_droid_stream *pa_droid_open_output_stream(pa_droid_hw_module *module,
 {
 	(void) module; (void) map; (void) mix_port; (void) device_port;
 	hal_stub.output_opens++;
+	if (hal_stub.output_opens_failing > 0) {
+		hal_stub.output_opens_failing--;
+		return NULL;
+	}
 	if (!hal_stub.open_output_works)
 		return NULL;
 	stub_out.write = stub_write;

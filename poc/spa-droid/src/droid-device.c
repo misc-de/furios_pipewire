@@ -65,8 +65,11 @@
  * the card profiles ("card has voice profile, using it"). */
 #define VOICECALL_NAME  "voicecall"
 
-/* from droid-pcm.c */
-int droid_node_set_route(const char *mix_port, const char *device_port);
+/* from droid-pcm.c. The second argument is the ROUTE name ("output-speaker"),
+ * not the HAL's own port name ("Speaker") - the node resolves it through
+ * pa_droid_output_port_name(), which only ever yields route names. Handing it
+ * a port name looks right and matches nothing. */
+int droid_node_set_route(const char *mix_port, const char *route);
 
 struct route {
 	dm_config_port *port;      /* device port from the HAL configuration */
@@ -833,7 +836,13 @@ static int set_route(struct impl *this, uint32_t index, uint32_t device)
 		return -EINVAL;
 
 	this->active[device] = index;
-	res = droid_node_set_route(mix_port_of(device), r->port->name);
+	/* r->pa_name, NOT r->port->name: the node looks the route up by the name
+	 * pa_droid_output_port_name() gives a device type, and that is the route
+	 * name. The port name from the vendor's XML never matches it, so every
+	 * route set this way was quietly dropped with -ENOENT - which is why a
+	 * route only ever arrived while the node was running, through the props
+	 * on the active route. This path exists precisely for the other case. */
+	res = droid_node_set_route(mix_port_of(device), r->pa_name);
 	if (res < 0 && res != -ENOENT)
 		spa_log_warn(this->log, NAME " route \"%s\" not applied: %s",
 				r->pa_name, spa_strerror(res));
