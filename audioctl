@@ -369,6 +369,9 @@ apply() {
         # pipewire-pulse keeps holding the Pulse socket.
         run uctl stop pipewire-pulse.service pipewire-pulse.socket 2>/dev/null
         run uctl stop wireplumber.service 2>/dev/null
+        # Give the want back too, not just the running service - see the
+        # pw-hal branch below for why it is there at all.
+        run uctl disable wireplumber.service 2>/dev/null
         mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
         unmask pulseaudio.service pulseaudio.socket
         run dropin_remove
@@ -395,6 +398,7 @@ apply() {
         run dropin_remove
         run uctl daemon-reload
         run uctl start pulseaudio.socket pulseaudio.service
+        run uctl enable wireplumber.service
         run uctl restart wireplumber.service
         run uctl enable --now furios-pw-tunnel.service
         ;;
@@ -418,6 +422,17 @@ apply() {
             dropin_write
         fi
         run uctl daemon-reload
+        # Nothing on this system wants WirePlumber. Its [Install] says
+        # WantedBy=pipewire.service, but the want is only written when someone
+        # enables it, and audioctl never did - it started the service by hand
+        # and that was enough for as long as nobody looked past the session.
+        #
+        # Across a reboot it is not enough: pipewire comes back, no session
+        # manager comes with it, no card is ever created and the phone is
+        # silent on a profile that works perfectly when switched to by hand.
+        # "enable" writes the want into ~/.config/systemd/user, where the
+        # first transaction of the next boot can already see it.
+        run uctl enable wireplumber.service
         run uctl restart pipewire.service
         run uctl start wireplumber.service pipewire-pulse.socket pipewire-pulse.service
         ;;

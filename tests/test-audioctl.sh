@@ -387,6 +387,16 @@ check "pw-hal writes the systemd drop-in" "yes" \
 check "pw-tunnel keeps PulseAudio and starts the tunnel" "yes" \
     "$(apply_dry pw-tunnel | grep -q 'furios-pw-tunnel' && echo yes || echo no)"
 
+# WirePlumber is WantedBy=pipewire.service, so it only ever comes up at a boot
+# if the want has been written. Starting it by hand looks identical for as long
+# as the session lasts and leaves the next boot without a session manager.
+check "pw-hal enables WirePlumber and does not only start it" "yes" \
+    "$(apply_dry pw-hal | grep -q 'enable wireplumber.service' && echo yes || echo no)"
+check "the tunnel needs the session manager just as much" "yes" \
+    "$(apply_dry pw-tunnel | grep -q 'enable wireplumber.service' && echo yes || echo no)"
+check "and standard takes the want away again" "yes" \
+    "$(apply_dry standard | grep -q 'disable wireplumber.service' && echo yes || echo no)"
+
 # --- the ports of whichever stack is running -------------------------------
 stub pactl 0 "Sink #1
 	Name: droid-sink
