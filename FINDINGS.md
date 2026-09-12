@@ -588,6 +588,127 @@ A2DP profiles came back and the card picked `a2dp-sink` again on its own.
 
 ---
 
+## Who gets to be the hands-free profile, and why it changes between boots
+
+A voice memo was supposed to be recorded through the earbuds. The recorder
+took the phone's own microphone instead, and the reason turned out to sit two
+layers below the recorder.
+
+The card had no hands-free profile at all:
+
+    a2dp-sink-sbc, a2dp-sink-sbc_xq, a2dp-sink, off
+
+No `headset-head-unit`, so `pactl set-card-profile` answered **No such
+entity** - and without that profile there is no SCO channel, and without SCO
+there is no microphone the HAL can reach. The log said why:
+
+    spa.bluez5: ofono running, but not configured as HFP/HSP backend
+    spa.bluez5.native: RegisterProfile() failed: org.bluez.Error.NotPermitted
+
+BlueZ hands the `hfp_ag` UUID to whoever registers for it first, and exactly
+one process can hold it. On this phone two want it: ofono, which is up early
+because it is the modem stack, and WirePlumber's native backend. **Both lose
+sometimes** - from one day's journal:
+
+    13:52:00  ofonod     RegisterProfile() replied an error: UUID already registered
+    14:17:11  wireplumber  spa.bluez5.native: RegisterProfile() failed: NotPermitted
+
+So whether a Bluetooth headset can carry a call is decided by the order two
+services happen to start in. The day the call was heard end to end,
+WirePlumber had won. The day the memo failed, ofono had. Nothing in between
+changed, and nothing announces which way it went except a line in the journal
+and a profile that is quietly missing from the card.
+
+Stopping ofono, restarting WirePlumber so it registers into the gap, and
+starting ofono again brings the profiles back for that session:
+
+    headset-head-unit-cvsd: Headset Head Unit (HSP/HFP, codec CVSD)
+    headset-head-unit:      Headset Head Unit (HSP/HFP, codec MSBC)
+
+**Restarting ofono leaves the modem switched off.** It comes back `Powered`
+but `Online: false`, so the phone is registered nowhere and no call can reach
+it - and nothing on screen necessarily says so. It has to be put back by hand:
+
+    dbus-send --system --print-reply --dest=org.ofono /ril_0 \
+        org.ofono.Modem.SetProperty string:Online variant:boolean:true
+
+then `org.ofono.NetworkRegistration` reads `registered` again. Found the way
+these things are usually found: by checking the state afterwards rather than
+assuming the restart was free. Anyone reaching for this workaround has to
+check the modem after it, every time.
+
+That is a workaround for one session and not a fix - after the next boot it is
+a coin toss again. **Still open:** either hand HFP to ofono for good
+(`bluez5.hfphsp-backend = "ofono"`; ofono already offers the headset as
+`/card_2`, type `gateway`, through `org.ofono.HandsfreeAudioManager`) or take
+the Bluetooth hands-free plugin away from ofono so the native backend always
+wins. One attempt at the first was made and it did nothing at all: the
+fragment in `~/.config/wireplumber/wireplumber.conf.d/` never took effect - the
+same "not configured as HFP/HSP backend" line came back after the restart -
+so the configuration was not even read the way it was expected to be. That is
+where this stands.
+
+A WirePlumber restart with a headset connected also loses the whole Bluetooth
+card, not just some profiles: the device stays connected in `bluetoothctl`
+while `pactl list cards` no longer has it. Disconnect and connect brings it
+back. Worth knowing before restarting anything with earbuds in.
+
+
+## Recording from the headset outside a call
+
+`audioctl bt-mic on` does what `droid-bluetooth-call.lua` does for a call,
+because a voice memo needs exactly the same three things and is not a call:
+the hands-free profile, the codec announced to the **nodes** before the route
+is set, and `input-bluetooth_sco_headset` on the phone card. The HAL then
+answers:
+
+    set_parameters(bt_wbs=on)
+    set_parameters(BT_SCO=on)
+    Set mix port "primary input" input to AUDIO_DEVICE_IN_BLUETOOTH_SCO_HEADSET
+
+Measured with a soundcore Liberty 4 Pro, 16 kHz mono, speaking into the
+headset for 30 s: **18031 distinct values, RMS 1673, peak 27323**, with the
+pauses between sentences reading RMS 1.0 and the speech RMS 3000-4400. The
+phone's own microphone in the same room reads RMS 49 flat, so the two are not
+easily confused once the level is looked at over time.
+
+**And played back and heard: intelligible speech.** That part is not a
+formality. Levels alone cannot tell a correct codec from a wrong one - a HAL
+encoding CVSD into an mSBC link produces noise with perfectly healthy numbers,
+which is exactly how a day went missing on the call path. Announcing
+`bt_wbs=on` with the wideband profile is therefore confirmed by ear here, not
+only by measurement.
+
+### Two readings that looked like answers and were not
+
+**The hold seemed unnecessary.** `51-bluez-ofono.conf` says the SCO link
+stands while a stream is active on `bluez_output.*`, so a silent stream holds
+it open while recording. A test with the hold stopped still came back at 940
+distinct values, which read as "the profile alone carries it" - and the hold
+was taken out of the code for about ten minutes. It was measured inside the
+link the hold had just put up. Coming at it cold - back to `a2dp-sink`, then
+the whole sequence with no hold - the same recording is **46394 samples, 1
+distinct value, RMS 0**. The hold is needed. A measurement taken in the warmth
+of the thing it is meant to rule out proves nothing.
+
+**A silent recording looked like a broken headset.** After a run that reported
+every step correctly, a 12 s recording came back at 1 distinct value while
+somebody was speaking into the earbuds. `pcm55c` was `RUNNING` the whole time
+- the HAL was reading the Bluetooth line, and the line was empty. The hold had
+died: `paplay` was a child of the `audioctl` that started it and went down
+with the command. `setsid` fixes it, and `bt-mic test` now says so out loud
+when no hold is running, because that failure is indistinguishable from a dead
+microphone at the level of the numbers.
+
+### The one reading that settles it
+
+`/proc/asound/card0/pcm55c/sub0/status` - the BTCVSD capture device. `RUNNING`
+means the bytes are coming off the Bluetooth link; `closed` means they are
+coming from somewhere else, whatever the route says and whatever the HAL
+answered. It has to be read **while** the recording runs: checked afterwards
+it is always `closed` again. `audioctl bt-mic status` shows it.
+
+
 ## Only one road reaches a node
 
 The card runs inside WirePlumber's process, the nodes inside PipeWire's. Two

@@ -619,6 +619,177 @@ chmod +x "$STUBDIR/pactl"
 check "setting a port that will not take is reported too" "yes" \
     "$(with_audioctl 'bt_set_ports output-bluetooth_sco input-x 2>&1 | grep -q "ERROR" && echo yes || echo no')"
 
+# --- bt-mic: the headset's microphone outside a call -----------------------
+#
+# The sequence has three steps that all have to land, and the order matters:
+# the codec goes to the NODES (the card cannot carry it) and it has to be
+# there before the route, because the route is what makes the HAL open the
+# stream and read it.
+
+cat > "$STUBDIR/pw-cli" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"ls Node"*) printf '	id 60, type PipeWire:Interface:Node/3
+ 		node.name = "droid-sink"
+	id 61, type PipeWire:Interface:Node/3
+ 		node.name = "droid-source"
+	id 62, type PipeWire:Interface:Node/3
+ 		node.name = "bluez_output.AA_BB.1"
+' ;;
+*"set-param"*) printf '%s\n' "$*" >> "$STUBDIR/setparam.log" ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pw-cli"
+
+check "a node is found by name, not by position" "61" \
+    "$(with_audioctl 'bt_node_id droid-source')"
+check "and a name that is not there comes back empty" "" \
+    "$(with_audioctl 'bt_node_id droid-nothing')"
+
+rm -f "$STUBDIR/setparam.log"
+check "the wideband profile tells the HAL bt_wbs=on" "yes" \
+    "$(with_audioctl 'bt_tell_codec headset-head-unit 2>&1 | grep -q "bt_wbs=on" && echo yes || echo no')"
+check "and it tells both nodes, because either may open the stream" "2" \
+    "$(grep -c 'droid.bt-wbs' "$STUBDIR/setparam.log" 2>/dev/null || echo 0)"
+check "the narrowband profile tells it off instead" "yes" \
+    "$(with_audioctl 'bt_tell_codec headset-head-unit-cvsd 2>&1 | grep -q "bt_wbs=off" && echo yes || echo no')"
+
+# A guess here is a coin toss between working audio and silence, so an unknown
+# profile says nothing at all and lets the HAL keep its default.
+rm -f "$STUBDIR/setparam.log"
+check "an unknown profile is not guessed at" "yes" \
+    "$(with_audioctl 'bt_tell_codec a2dp-sink 2>&1 | grep -q "keeps its default" && echo yes || echo no')"
+check "and nothing is sent when it is unknown" "0" \
+    "$(grep -c 'droid.bt-wbs' "$STUBDIR/setparam.log" 2>/dev/null || echo 0)"
+
+# The hold has to outlive the audioctl that starts it - without setsid it dies
+# with the command and the recording comes back silent.
+check "the hold is started detached from this shell" "yes" \
+    "$(grep -q 'setsid timeout' "$HERE/../audioctl" && echo yes || echo no)"
+
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"list short cards"*) printf '1	bluez_card.AA_BB	module-bluez5-device.c
+' ;;
+*"list short sinks"*) printf '1	bluez_output.AA_BB.1	PipeWire	s16le 2ch 48000Hz	SUSPENDED
+' ;;
+*"list cards"*) printf 'Card #1
+	Name: bluez_card.AA_BB
+	Active Profile: headset-head-unit
+' ;;
+*"list sinks"*)   printf 'Sink #1
+	Name: droid-sink
+	Active Port: output-speaker
+' ;;
+*"list sources"*) printf 'Source #2
+	Name: droid-source
+	Active Port: input-bluetooth_sco_headset
+' ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+stub paplay 0 ""
+
+check "the active profile is read off the card" "headset-head-unit" \
+    "$(with_audioctl 'bt_active_profile bluez_card.AA_BB')"
+
+check "the hold writes down the pid it started" "yes" \
+    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; bt_sco_hold_start 1 >/dev/null 2>&1; [ -s "$STUBDIR/furios-audio-sco-hold.pid" ] && echo yes || echo no')"
+check "and stopping it takes the file away again" "no" \
+    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; bt_sco_hold_start 1 >/dev/null 2>&1; bt_sco_hold_stop >/dev/null 2>&1; [ -e "$STUBDIR/furios-audio-sco-hold.pid" ] && echo yes || echo no')"
+check "a hold with nowhere to write its pid says so" "yes" \
+    "$(with_audioctl 'unset XDG_RUNTIME_DIR; bt_sco_hold_start 1 2>&1 | grep -q "XDG_RUNTIME_DIR" && echo yes || echo no')"
+
+# No Bluetooth sink means nothing can hold the link open, and the recording
+# would be silence - better said out loud than found in the numbers.
+cat > "$STUBDIR/pactl.nosink" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"list short sinks"*) exit 0 ;;
+esac
+exit 0
+STUB
+check "a hold with no Bluetooth sink to play into says so" "yes" \
+    "$(cp "$STUBDIR/pactl.nosink" "$STUBDIR/pactl"; chmod +x "$STUBDIR/pactl"
+       with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; bt_sco_hold_start 1 2>&1 | grep -q "no Bluetooth sink" && echo yes || echo no')"
+
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"list short cards"*) printf '1	bluez_card.AA_BB	module-bluez5-device.c
+' ;;
+*"list short sinks"*) printf '1	bluez_output.AA_BB.1	PipeWire	s16le 2ch 48000Hz	SUSPENDED
+' ;;
+*"list cards"*) printf 'Card #1
+	Name: bluez_card.AA_BB
+	Active Profile: headset-head-unit
+' ;;
+*"list sinks"*)   printf 'Sink #1
+	Name: droid-sink
+	Active Port: output-speaker
+' ;;
+*"list sources"*) printf 'Source #2
+	Name: droid-source
+	Active Port: input-bluetooth_sco_headset
+' ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+
+check "bt-mic on routes the phone's input to the headset" "yes" \
+    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; bt_mic on 2>&1 | grep -q "input-bluetooth_sco_headset set" && echo yes || echo no')"
+check "and says how to get back" "yes" \
+    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; bt_mic on 2>&1 | grep -q "bt-mic off" && echo yes || echo no')"
+check "bt-mic off gives the phone its own microphone again" "yes" \
+    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; bt_mic off 2>&1 | grep -q "input-builtin_mic set" && echo yes || echo no')"
+check "its log lines name bt-mic, not the call path they share" "yes" \
+    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; bt_mic on 2>&1 | grep -q "bt-mic: headset profile" && echo yes || echo no')"
+check "and bt-call still names itself in the same helpers" "yes" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB headset 2>&1 | grep -q "bt-call: headset profile" && echo yes || echo no')"
+
+stub pactl 0 ""
+check "bt-mic on without a headset connected says so" "yes" \
+    "$(with_audioctl 'bt_mic on 2>&1 | grep -q "no Bluetooth device" && echo yes || echo no')"
+check "and a word it does not know is refused" "yes" \
+    "$(with_audioctl 'bt_mic nonsense 2>&1 | grep -q "needs" && echo yes || echo no')"
+
+# --- the measurement, which is the only thing that settles it --------------
+#
+# A route can land on the wrong device and the recording still runs, over
+# silence, looking like success. So the number that decides is how many
+# distinct sample values came back.
+cat > "$STUBDIR/pw-record" <<'STUB'
+#!/bin/sh
+# Write to the last argument whatever MIC_FIXTURE says: silence or speech.
+out=""
+for a in "$@"; do out=$a; done
+if [ "${MIC_FIXTURE:-silence}" = silence ]; then
+    head -c 3200 /dev/zero > "$out"
+else
+    head -c 3200 /dev/urandom > "$out"
+fi
+exit 0
+STUB
+chmod +x "$STUBDIR/pw-record"
+
+check "digital silence is called what it is" "yes" \
+    "$(with_audioctl 'MIC_FIXTURE=silence bt_mic_measure 1 2>&1 | grep -q "digital silence" && echo yes || echo no')"
+check "and it fails, so a script cannot mistake it for a recording" "2" \
+    "$(with_audioctl 'MIC_FIXTURE=silence bt_mic_measure 1 >/dev/null 2>&1; echo $?')"
+check "a real signal is reported with its level" "yes" \
+    "$(with_audioctl 'MIC_FIXTURE=speech bt_mic_measure 1 2>&1 | grep -q "distinct values" && echo yes || echo no')"
+check "and a real signal succeeds" "0" \
+    "$(with_audioctl 'MIC_FIXTURE=speech bt_mic_measure 1 >/dev/null 2>&1; echo $?')"
+
+# A test taken with no hold is silence whatever the microphone does, and it
+# looks exactly like a broken headset. Say so before the number appears.
+check "a test with no hold warns before it measures" "yes" \
+    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; rm -f "$STUBDIR/furios-audio-sco-hold.pid"; MIC_FIXTURE=silence bt_mic test 1 2>&1 | grep -q "nothing is holding the link open" && echo yes || echo no')"
+
 # --- preflight, when something is missing ----------------------------------
 check "pw-tunnel without its module is refused" "yes" \
     "$(with_audioctl 'LOCAL=/nowhere; preflight pw-tunnel 2>&1 | grep -q "missing" && echo yes || echo no')"
@@ -700,6 +871,10 @@ check "revert goes straight back to standard" "yes" \
     "$(run_audioctl --dry-run revert | grep -q -- '-> standard (sticky)' && echo yes || echo no)"
 check "and bt-call reaches the handler from the command line" "yes" \
     "$(run_audioctl bt-call off | grep -q "bt-call" && echo yes || echo no)"
+check "bt-mic without a word is refused" "yes" \
+    "$(run_audioctl bt-mic | grep -q "needs" && echo yes || echo no)"
+check "and bt-mic reaches the handler from the command line" "yes" \
+    "$(run_audioctl bt-mic status | grep -q "Bluetooth card" && echo yes || echo no)"
 
 
 stub_systemctl pipewire-pulse.service furios-audio-apply.service

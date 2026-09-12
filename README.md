@@ -51,7 +51,11 @@ demand.
 
 Playback, capture and telephony through PipeWire -> `libspa-droid` -> Android
 HAL all work, including a real phone call (confirmed on the device 2026-09-09)
-and Bluetooth calls over a headset (2026-09-12, heard end to end).
+and Bluetooth calls over a headset (2026-09-12, heard end to end). Recording
+through a headset works too (2026-09-12, 30 s of speech measured and played
+back intelligibly), when
+the hands-free profile exists - which is not something this phone guarantees
+from one boot to the next.
 
 | | |
 |---|---|
@@ -59,6 +63,8 @@ and Bluetooth calls over a headset (2026-09-12, heard end to end).
 | phone call: ringtone, both directions, speaker button | works |
 | Bluetooth music (A2DP, AAC/SBC-XQ) | works |
 | Bluetooth call (HFP) | works - needs the codec announced, see FINDINGS |
+| Bluetooth microphone outside a call | works - `audioctl bt-mic`, measured and heard |
+| which process gets the HFP profile | **decided by start order**, see FINDINGS |
 | echo during a call | **open** |
 | `deep_buffer` / `compress_offload` for lower power | **unused** |
 | `droid-sink.monitor` | **broken** - reads silence whatever plays |
@@ -262,6 +268,30 @@ tells the nodes which codec was negotiated, and routes the card to
 `output-bluetooth_sco` - in that order, because the HAL reads the codec when it
 opens the stream. It gives up and hands the call back to the phone rather than
 fight callaudiod for the route.
+
+**Recording from the headset outside a call** - a voice memo, a dictation app,
+anything that is not a phone call:
+
+    audioctl bt-mic on       # headset to hands-free, codec announced, input routed
+    audioctl bt-mic test     # 3 s, and what actually arrived
+    audioctl bt-mic off      # A2DP back
+
+A2DP is gone while this is on, so music plays narrow-band and mono until it is
+switched back. `bt-mic on` also starts a silent stream that holds the SCO link
+up and ends by itself after ten minutes; without it the HAL opens its
+Bluetooth capture onto a link that is not there and records digital silence.
+
+What `bt-mic status` calls *HAL Bluetooth PCM* is the only reading that settles
+whether the samples really come off the Bluetooth link - and it has to be read
+while a recording runs.
+
+**A headset may have no hands-free profile at all.** If `bt-mic on` says the
+profile could not be set and the card lists only A2DP, ofono won the race for
+BlueZ's `hfp_ag` registration during this boot and WirePlumber lost it. Calls
+over the headset are gone the same way. It is decided by service start order,
+it changes between boots, and the way out for one session is to restart
+WirePlumber while ofono is stopped - which switches the modem off as a side
+effect and needs it put back online by hand afterwards. See FINDINGS.
 
 **When a headset disconnects, playback pauses** instead of moving to the
 loudspeaker (`furios-audio-pause-on-disconnect`). Only players with MPRIS can

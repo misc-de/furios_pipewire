@@ -660,15 +660,20 @@ btlog() {
     return 0
 }
 
+# Which of the two Bluetooth paths is speaking. The shared helpers below are
+# used by both "bt-call" and "bt-mic", and a log line that names the wrong one
+# sends the next reader to the wrong place.
+BTTAG=bt-call
+
 # Force the headset into its hands-free profile so an SCO channel is up.
 bt_headset_profile() {
     local card=$1 want=$2 prof
     [ -n "$card" ] || return 1
     if [ "$want" = headset ]; then
-        pactl set-card-profile "$card" headset-head-unit 2>/dev/null && { btlog "bt-call: headset profile headset-head-unit"; return 0; }
-        pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null && { btlog "bt-call: headset profile headset-head-unit-cvsd (narrowband)"; return 0; }
+        pactl set-card-profile "$card" headset-head-unit 2>/dev/null && { btlog "$BTTAG: headset profile headset-head-unit"; return 0; }
+        pactl set-card-profile "$card" headset-head-unit-cvsd 2>/dev/null && { btlog "$BTTAG: headset profile headset-head-unit-cvsd (narrowband)"; return 0; }
         prof=$(pactl list cards 2>/dev/null | sed -n "/$card/,/^$/p" | sed -n 's/.*Active Profile: //p')
-        btlog "bt-call: WARNING hands-free profile could not be set (active: ${prof:-unknown})"
+        btlog "$BTTAG: WARNING hands-free profile could not be set (active: ${prof:-unknown})"
         return 1
     fi
     pactl set-card-profile "$card" a2dp-sink 2>/dev/null
@@ -679,12 +684,12 @@ bt_headset_profile() {
 bt_set_ports() {
     local sink_port=$1 src_port=$2
     pactl set-sink-port   droid-sink   "$sink_port" 2>/dev/null \
-        && btlog "bt-call: output $sink_port set" \
-        || btlog "bt-call: ERROR - could not set output $sink_port"
+        && btlog "$BTTAG: output $sink_port set" \
+        || btlog "$BTTAG: ERROR - could not set output $sink_port"
     pactl set-source-port droid-source "$src_port" 2>/dev/null \
-        && btlog "bt-call: input $src_port set" \
-        || btlog "bt-call: ERROR - could not set input $src_port"
-    btlog "bt-call: actually active $(active_ports)"
+        && btlog "$BTTAG: input $src_port set" \
+        || btlog "$BTTAG: ERROR - could not set input $src_port"
+    btlog "$BTTAG: actually active $(active_ports)"
 }
 
 # Defend the route against callaudiod for as long as the call runs.
@@ -697,7 +702,7 @@ bt_hold() {
         [ "$interval" = 0 ] || sleep "$interval"
         now=$(pactl list sinks 2>/dev/null | sed -n '/Name: droid-sink/,/^$/p' | sed -n 's/.*Active Port: //p')
         if [ "$now" != "$sink_port" ]; then
-            btlog "bt-call: output was on \"$now\" - setting it again"
+            btlog "$BTTAG: output was on \"$now\" - setting it again"
             pactl set-sink-port   droid-sink   "$sink_port" 2>/dev/null
             pactl set-source-port droid-source "$src_port"  2>/dev/null
         fi
@@ -730,7 +735,7 @@ rescue() {
 }
 
 bt_call() {
-    local mode=$1 card waited
+    local mode=$1 card waited BTTAG=bt-call
     card=$(pactl list short cards 2>/dev/null | awk '/bluez_card/ {print $2; exit}')
 
     # An aborted test must not leave the phone silent: Ctrl-C or an error
@@ -779,6 +784,276 @@ bt_call() {
     return 0
 }
 
+# --- the headset's microphone, without a call ------------------------------
+#
+# Music comes back from the earbuds over A2DP, and in that profile the headset
+# offers no microphone at all. That is deliberate - see 51-bluez-ofono.conf:
+# the node BlueZ would offer is the HOST side of SCO, and SCO does not cross
+# HCI on this chip. It looks like a working microphone in every recorder and
+# it records digital silence.
+#
+# The microphone that does work is the one the HAL reaches, and getting there
+# takes the same three steps a call takes:
+#
+#   1. the headset into a hands-free profile, so an SCO channel exists at all
+#   2. the codec told to the HAL, which otherwise encodes narrow-band CVSD
+#      while the profile above negotiates wide-band mSBC - and mismatched,
+#      nothing intelligible arrives
+#   3. the phone card's input on input-bluetooth_sco_headset, which is what
+#      makes the HAL send BT_SCO=on
+#
+# droid-bluetooth-call.lua does all of this already, but only when the card
+# enters the voicecall profile. A voice memo is not a call, so nothing
+# happened - which is exactly what this is for.
+#
+# It also needs a stream on bluez_output.* for as long as it records, and
+# that is not obvious: 51-bluez-ofono.conf says the SCO link exists while such
+# a stream is active, and a hold was built for it, and then a test seemed to
+# show it was pointless - recording with the hold stopped still came back at
+# 940 distinct values. It was measured inside the link the hold had just put
+# up: profile, codec and route were already in place and the link was still
+# standing. Coming at it cold instead - a2dp-sink, then the whole sequence
+# with no hold - the same recording is 46394 samples, 1 distinct value, RMS 0.
+#
+# So the profile alone does not carry it, and the reading that told us
+# otherwise was taken in the warmth of the thing it was meant to rule out.
+#
+# The price is that A2DP is gone while it lasts: the hands-free profile has no
+# high-fidelity sink, so whatever plays goes out narrow-band and mono. That is
+# why this is a command rather than an automatism, and why every path back
+# through here puts the headset on a2dp-sink again.
+
+# Where the hold's pid lives. The runtime directory and nowhere else: a
+# predictable name in /tmp is how the last two sloppy files in this tree were
+# found, and this one gets a kill sent to whatever pid it names.
+sco_hold_pid_file() {
+    [ -n "${XDG_RUNTIME_DIR:-}" ] || return 1
+    printf '%s/furios-audio-sco-hold.pid' "$XDG_RUNTIME_DIR"
+}
+
+# The id of a PipeWire node by name.
+#
+# Needed because the codec below cannot go through the card: the card lives in
+# WirePlumber's process and the nodes in PipeWire's, and nothing carries a card
+# parameter across that on its own - measured, the node receives droid.route,
+# which droid.lua sends to the node, and nothing else the card publishes.
+bt_node_id() {
+    pw-cli ls Node 2>/dev/null | awk -v want="$1" '
+        /^[[:space:]]*id [0-9]+,/ { id = $2; sub(",", "", id); next }
+        index($0, "node.name = \"" want "\"") { print id; exit }'
+}
+
+# Tell both phone nodes which codec the Bluetooth link runs.
+#
+# The HAL reads bt_wbs when it opens a stream, and it is the route that makes
+# it open - so this has to happen BEFORE the route is set. Both nodes are told
+# because bt_wbs belongs to the HAL module rather than to one stream, and
+# either of them may be the next to open one. droid-bluetooth-call.lua says
+# the same thing to the same two nodes; this is the path for everything that
+# is not a call.
+bt_tell_codec() {
+    local profile=$1 wbs name id told=0
+    case "$profile" in
+    headset-head-unit)      wbs=on ;;
+    headset-head-unit-cvsd) wbs=off ;;
+    # Anything else and we do not know. Guessing here is a coin toss between
+    # working audio and silence, so say nothing and let the HAL keep its
+    # default - the node writes a line when it opens Bluetooth without a
+    # codec, which is better than a wrong guess nobody can see.
+    *) btlog "$BTTAG: unknown profile \"${profile:-none}\" - the HAL keeps its default codec"; return 1 ;;
+    esac
+    for name in droid-sink droid-source; do
+        id=$(bt_node_id "$name")
+        [ -n "$id" ] || continue
+        pw-cli set-param "$id" Props "{ params = [ \"droid.bt-wbs\", \"$wbs\" ] }" >/dev/null 2>&1 \
+            && told=$((told+1))
+    done
+    [ "$told" -gt 0 ] || { btlog "$BTTAG: WARNING no node took the codec - the HAL stays on narrow-band"; return 1; }
+    btlog "$BTTAG: codec bt_wbs=$wbs (told $told nodes)"
+    return 0
+}
+
+# What profile the Bluetooth card is actually in right now.
+bt_active_profile() {
+    local card=$1
+    [ -n "$card" ] || return 1
+    pactl list cards 2>/dev/null | sed -n "/Name: $card\$/,/^\$/p" \
+        | sed -n 's/.*Active Profile: //p' | head -1
+}
+
+# Hold the SCO link up for as long as the microphone is wanted.
+#
+# A silent stream, and nothing of it is heard: what gets recorded comes off
+# the Bluetooth link through the HAL, not through this. It is here because
+# without it the HAL opens its Bluetooth capture onto a link that is not
+# there and records digital silence - measured, see above.
+#
+# It ends by itself. A hold that outlives the recording leaves the earbuds in
+# a hands-free profile, where music is narrow-band and mono, and that is the
+# kind of state somebody finds hours later and blames on the headset.
+bt_sco_hold_start() {
+    local seconds=$1 sink pidfile pid
+    pidfile=$(sco_hold_pid_file) || { btlog "$BTTAG: no XDG_RUNTIME_DIR - not holding SCO open"; return 1; }
+    sink=$(pactl list short sinks 2>/dev/null | awk '/bluez_output/ {print $2; exit}')
+    [ -n "$sink" ] || { btlog "$BTTAG: no Bluetooth sink - nothing to hold the link open with"; return 1; }
+    bt_sco_hold_stop
+    # setsid, because the hold has to outlive the audioctl that started it.
+    # Without it the stream is a child of this shell and in its process group,
+    # and it goes down with the command - which produced exactly one silent
+    # recording here on 2026-09-12: "audioctl bt-mic on" reported the hold,
+    # the recording a few minutes later came back at 1 distinct value, and the
+    # status line said "not running" with the link already gone.
+    #
+    # timeout passes on the signal it is sent, so stopping it stops paplay.
+    setsid timeout "$seconds" paplay --raw --format=s16le --rate=16000 --channels=1 \
+        --device="$sink" /dev/zero >/dev/null 2>&1 </dev/null &
+    pid=$!
+    ( umask 077; printf '%s\n' "$pid" > "$pidfile" )
+    btlog "$BTTAG: holding the link on $sink, at most ${seconds}s (pid $pid)"
+    return 0
+}
+
+bt_sco_hold_stop() {
+    local pidfile pid
+    pidfile=$(sco_hold_pid_file) || return 0
+    [ -r "$pidfile" ] || return 0
+    pid=$(cat "$pidfile" 2>/dev/null)
+    rm -f "$pidfile"
+    case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+    kill "$pid" 2>/dev/null && btlog "$BTTAG: link hold stopped"
+    return 0
+}
+
+# Whether the HAL really has the Bluetooth line open.
+#
+# This is the one reading that cannot be talked around. The route can say
+# input-bluetooth_sco_headset and the HAL can answer BT_SCO=on while the
+# samples still come from the built-in microphone - measured here on
+# 2026-09-12, and it reads as success all the way down to the recording. The
+# BTCVSD capture device does not lie: RUNNING means the bytes are coming off
+# the Bluetooth link, closed means they are coming from somewhere else.
+bt_pcm_state() {
+    local st
+    st=$(head -1 /proc/asound/card0/pcm55c/sub0/status 2>/dev/null)
+    printf '%s' "${st:-unknown}"
+}
+
+# Measure what actually arrives.
+#
+# "The microphone is selected" and "the microphone records something" have
+# been two different things on this device more than once - a route can land
+# on the wrong device and the recording still runs, perfectly, over silence.
+# So the answer here is a number, and the number that matters is how many
+# distinct sample values came back: one means digital silence, whatever the
+# level meters say.
+bt_mic_measure() {
+    local seconds=${1:-3} src=${2:-droid-source} raw
+    raw=$(mktemp "${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/audioctl-mic.XXXXXX") || return 1
+    # pw-record and not parecord: on this stack parecord comes back with an
+    # empty file and no error at all - measured, 0 bytes raw and a bare 44-byte
+    # header as WAV, while pw-record on the same source in the same second
+    # returned 62112 bytes. A measuring instrument that silently reads zero is
+    # worse than none, because zero is exactly the answer this is looking for.
+    #
+    # The recording is ended by the clock, so its WAV header carries a length
+    # that was never filled in. The samples are read past the header instead of
+    # through it - the bytes are all there, it is only the header that is not.
+    timeout "$seconds" pw-record --target "$src" --rate 16000 --channels 1 \
+        --format s16 "$raw" >/dev/null 2>&1
+    python3 - "$raw" <<'PY_END'
+import array, os, sys
+path = sys.argv[1]
+try:
+    with open(path, "rb") as f:
+        blob = f.read()
+finally:
+    try: os.unlink(path)
+    except OSError: pass
+at = blob.find(b"data")
+body = blob[at + 8:] if at >= 0 else blob[44:]
+a = array.array("h")
+a.frombytes(body[:len(body) // 2 * 2])
+if not a:
+    print("nothing was recorded at all")
+    raise SystemExit(1)
+peak = max(max(a), -min(a))
+rms = (sum(x * x for x in a) / len(a)) ** 0.5
+distinct = len(set(a))
+print("%d samples, %d distinct value%s, RMS %.1f, peak %d"
+      % (len(a), distinct, "" if distinct == 1 else "s", rms, peak))
+if distinct <= 1:
+    print("digital silence - nothing is arriving from this source")
+    raise SystemExit(2)
+PY_END
+}
+
+bt_mic() {
+    local mode=$1 arg=${2:-} card prof BTTAG=bt-mic
+
+    card=$(pactl list short cards 2>/dev/null | awk '/bluez_card/ {print $2; exit}')
+
+    # An aborted run must not leave the earbuds hands-free and the phone
+    # recording from nowhere. Ctrl-C puts everything back.
+    trap 'printf "\naborted - putting the headset back.\n" >&2; bt_sco_hold_stop; bt_headset_profile "$card" a2dp; pactl set-source-port droid-source input-builtin_mic 2>/dev/null; trap - INT TERM EXIT; exit 130' INT TERM
+
+    case "$mode" in
+    on)
+        [ -n "$card" ] || { btlog "bt-mic: no Bluetooth device connected"; trap - INT TERM; return 1; }
+        btlog "bt-mic: card $card"
+        bt_headset_profile "$card" headset || { trap - INT TERM; return 1; }
+        prof=$(bt_active_profile "$card")
+        # Before the route: the route is what makes the HAL open a stream, and
+        # the codec has to be in place by then.
+        bt_tell_codec "$prof"
+        bt_sco_hold_start "${arg:-600}"
+        pactl set-source-port droid-source input-bluetooth_sco_headset 2>/dev/null \
+            && btlog "bt-mic: input input-bluetooth_sco_headset set" \
+            || btlog "bt-mic: ERROR - could not set input input-bluetooth_sco_headset"
+        btlog "bt-mic: active $(active_ports)"
+        printf 'Recording now uses the headset. Check with: audioctl bt-mic test\n'
+        printf 'Back with: audioctl bt-mic off\n'
+        ;;
+    off)
+        bt_sco_hold_stop
+        pactl set-source-port droid-source input-builtin_mic 2>/dev/null \
+            && btlog "bt-mic: input input-builtin_mic set" \
+            || btlog "bt-mic: ERROR - could not set input input-builtin_mic"
+        bt_headset_profile "$card" a2dp
+        btlog "bt-mic: active $(active_ports)"
+        ;;
+    test)
+        # Three seconds by default: long enough to say something into the
+        # headset, short enough that nobody stops reading.
+        # A recording taken with no hold is silence no matter what the
+        # microphone does, and it looks exactly like a broken headset.
+        local pidfile pid
+        pidfile=$(sco_hold_pid_file 2>/dev/null) && pid=$(cat "$pidfile" 2>/dev/null)
+        if ! { [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; }; then
+            printf 'WARNING: nothing is holding the link open - expect silence.\n' >&2
+            printf '         Switch it on again with: audioctl bt-mic on\n' >&2
+        fi
+        printf 'Recording %s s - say something.\n' "${arg:-3}"
+        bt_mic_measure "${arg:-3}" || { trap - INT TERM; return $?; }
+        ;;
+    status)
+        printf 'Bluetooth card:     %s\n' "${card:-none connected}"
+        printf 'Headset profile:    %s\n' "$(bt_active_profile "$card" 2>/dev/null || echo -)"
+        printf 'Phone ports:        %s\n' "$(active_ports)"
+        local pidfile pid
+        pidfile=$(sco_hold_pid_file 2>/dev/null) && pid=$(cat "$pidfile" 2>/dev/null)
+        if [ -n "${pid:-}" ] && kill -0 "$pid" 2>/dev/null; then
+            printf 'Link hold:          running (pid %s)\n' "$pid"
+        else
+            printf 'Link hold:          not running\n'
+        fi
+        printf 'HAL Bluetooth PCM:  %s\n' "$(bt_pcm_state)"
+        ;;
+    *) trap - INT TERM; die "bt-mic needs 'on', 'off', 'test' or 'status'." ;;
+    esac
+    trap - INT TERM
+    return 0
+}
+
 usage() {
     cat <<EOF
 audioctl - switch the audio stack
@@ -794,6 +1069,13 @@ audioctl - switch the audio stack
   audioctl bt-call watch       start before the call: puts the call on the
                                Bluetooth headset itself and holds it there
   audioctl bt-call on|off      move a running call by hand
+  audioctl bt-mic on|off       record from the Bluetooth headset outside a
+                               call (a voice memo); music turns narrow-band
+                               while it is on, so put it back afterwards
+  audioctl bt-mic test [s]     record a few seconds and say what arrived
+  audioctl bt-mic on [s]       hold the link for s seconds (default 600)
+  audioctl bt-mic status       headset profile, phone ports, link hold, and
+                               whether the HAL has the Bluetooth line open
   audioctl revert              back to standard immediately
   audioctl boot                write the stored profile's configuration
                                without starting anything (used at boot)
@@ -889,6 +1171,7 @@ case "${1:-status}" in
                     || printf 'WARNING: no sink after the restart.\n' >&2 ;;
     rescue) rescue ;;
     bt-call) [ $# -ge 2 ] || die "bt-call needs 'on', 'off' or 'watch'."; bt_call "$2" ;;
+    bt-mic) [ $# -ge 2 ] || die "bt-mic needs 'on', 'off', 'test' or 'status'."; bt_mic "$2" "${3:-}" ;;
     revert) switch_to standard sticky ;;
     migrate) migrate_legacy ;;
     verify) verify && echo "OK - sink present." || { echo "no sink." >&2; exit 1; } ;;
