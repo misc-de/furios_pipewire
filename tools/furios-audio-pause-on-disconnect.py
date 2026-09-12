@@ -7,10 +7,16 @@ Earbuds run out of battery, or you put one back in its case, and without this
 the audio simply moves to the next best output - which on a phone is the
 loudspeaker, in whatever room you happen to be standing in.
 
-So this pauses instead of rerouting. It watches BlueZ for a device losing its
-connection and asks every MPRIS player that is currently playing to pause. That
-is the same thing Android does, and it leaves nothing behind: no muted sink, no
-changed default, nothing to undo later. The next press of play works normally.
+So this pauses instead of rerouting. It watches BlueZ for an AUDIO device
+losing its connection and asks every MPRIS player that is currently playing to
+pause. That is the same thing Android does, and it leaves nothing behind: no
+muted sink, no changed default, nothing to undo later. The next press of play
+works normally.
+
+"Audio device" is asked of BlueZ, not assumed: a watch, a keyboard or a car's
+data link going out of range must not stop a podcast, and on a phone those drop
+off far more often than earbuds run flat. Where the answer cannot be had, the
+device counts as audio - see carries_audio().
 
 A player without MPRIS cannot be paused this way. That is a real limit and not
 worth papering over with a mute, which would be a trap of its own - a phone
@@ -35,12 +41,52 @@ from gi.repository import Gio, GLib  # noqa: E402
 
 MPRIS_PREFIX = "org.mpris.MediaPlayer2."
 
+# The Bluetooth profiles that actually carry sound: A2DP source and sink, the
+# headset profiles, hands-free and its gateway. A device that has none of them
+# cannot have been playing anything - a watch, a keyboard, a fitness tracker,
+# a car's data link. Pausing a podcast because a smartwatch went out of range
+# is its own kind of haunted phone, and it happens far more often than earbuds
+# running out of battery.
+AUDIO_UUID_PREFIXES = (
+    "0000110a",   # AudioSource   (A2DP)
+    "0000110b",   # AudioSink     (A2DP)
+    "00001108",   # Headset
+    "00001112",   # Headset AG
+    "0000111e",   # Handsfree
+    "0000111f",   # Handsfree AG
+)
+
 # When to look again after a device is gone, in milliseconds from the signal.
 # The first look happens immediately; these are the ones that catch a player
 # which was between states, or too slow to answer, when the first one asked.
 # It ends well before a podcast could become a nuisance, and long before
 # anyone would reconnect their earbuds and press play again on purpose.
 RETRY_DELAYS_MS = (400, 900, 1800, 3000, 5000, 8000, 12000)
+
+
+def carries_audio(system, path):
+    """Is this BlueZ device one that could have been playing?
+
+    Deliberately generous: it answers True whenever the question cannot be
+    settled - the device is already gone from the bus, BlueZ does not answer,
+    the property is not what it should be. Pausing something that was not on
+    those earbuds costs a press of play; NOT pausing costs a podcast on the
+    loudspeaker of a phone nobody is holding, which is the failure this whole
+    service exists for. So doubt resolves towards pausing, every time.
+    """
+    try:
+        uuids = system.call_sync(
+            "org.bluez", path, "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", ("org.bluez.Device1", "UUIDs")),
+            GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 1000, None,
+        ).unpack()[0]
+    except GLib.Error as err:
+        print("could not read what %s is: %s - treating it as audio"
+              % (path.rsplit("/", 1)[-1], err), flush=True)
+        return True
+    if not isinstance(uuids, (list, tuple)) or not uuids:
+        return True
+    return any(str(u)[:8].lower() in AUDIO_UUID_PREFIXES for u in uuids)
 
 
 def playing_players(session):
@@ -150,7 +196,12 @@ def main():
             return
         connected = changed.get("Connected")
         if connected is False:
-            print("device %s disconnected" % path.rsplit("/", 1)[-1], flush=True)
+            name = path.rsplit("/", 1)[-1]
+            if not carries_audio(system, path):
+                print("device %s disconnected - carries no audio, "
+                      "playback is left alone" % name, flush=True)
+                return
+            print("device %s disconnected" % name, flush=True)
             for old_retry in pending:
                 old_retry.cancel()
             pending.clear()

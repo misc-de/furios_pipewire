@@ -864,10 +864,31 @@ Two things fall away with them, and both should:
 - **`verify()`** - there is no sink to find, and fifteen seconds later it would
   have "fallen back to standard" over a stack that had simply not been started.
 
-That last point is worth stating plainly: **the boot run no longer checks
-whether the profile produces sound.** It never could - the check ran before
-anything was up. A stored profile that comes up silent needs a second unit
-ordered `After=` the stack to catch it, and that does not exist yet.
+That last point needed a second unit. **The boot run cannot check whether the
+profile produces sound** - it never could, the check ran before anything was
+up - so `furios-audio-verify.service` runs `After=` the stack and asks there:
+
+    ExecStart=... audioctl boot-check     # After= pipewire, pulseaudio, wireplumber
+
+Ordering only, nothing wanted or required: which of those units runs is what
+the profile decides, and a masked one must not keep the check waiting. It
+allows the stack thirty seconds rather than the fifteen an interactive switch
+gives it - a boot is slower than a switch on a warm system, and a fallback
+that fires because the HAL was merely slow is worse than what it guards
+against.
+
+When there is no sink it applies `standard` and drops the test marker, and it
+**leaves the stored profile alone**. That is deliberate and matches the
+interactive fallback: a silent boot is a reason to make sound work now, not to
+quietly discard a choice somebody made. `audioctl status` shows the mismatch,
+and the next boot tries the profile again. If `standard` is silent too, the
+unit is left failing - that is the one state nobody can hear their way out of,
+and `systemctl --user --failed` is where it belongs.
+
+**Both units now carry a `TimeoutStartSec`,** and that is the part worth
+copying. The deadlock did not last because systemd had no opinion about it; it
+lasted because nothing anywhere was going to end it. A unit that waits on the
+audio stack needs a number that says how long, whatever else is right about it.
 
 The tests read the calls audioctl makes to systemctl and fail if any of those
 four verbs appears in a boot run, or if `--now` survives it - with a
@@ -976,3 +997,89 @@ volume silencing the right channel of the microphone; renaming an `audioctl`
 label and quietly breaking the app that reads it; a route published without
 volume props, which makes every PulseAudio client see 0 % and drop what it
 sets.
+
+## A second pass over the whole of our own code
+
+Read end to end on 2026-09-12, looking for what breaks rather than for what is
+missing: the SPA plugin, `audioctl`, the two installers, the packaging and the
+Bluetooth watcher. Nine things came out of it. None of them was visible from
+the outside, which is why they were still there.
+
+**A failed `init` left the timer behind.** SPA does not call `clear()` on a
+handle whose `init` returned an error - the loader frees the memory and is
+done. `droid-pcm.c` created its timerfd and registered it with the data loop
+early, and then had three plain `return`s below that: unreadable HAL
+configuration, no "primary" module, no memory for the ring. Each one leaked the
+fd and, worse, left the data loop polling a `spa_source` that points into
+memory about to be freed. It needs a broken `audio_policy` XML to reach, which
+is exactly the day nobody wants a second failure on top. There is one error
+path now, and it undoes what was done.
+
+**Capture overrun threw the ring away instead of the excess.** When nothing
+picks the recorded audio up, the reader thread drops the oldest data. The new
+read index was computed as `write + filled + r - RING_SIZE`, but `filled` is
+already the distance between the two indices - adding it a second time pushed
+the read index *past* the write index. Measured in the test: 28 kB left of a
+256 kB ring, and in the window before the write index caught up, `process()`
+saw a negative fill, padded the buffer with silence and counted an underrun for
+audio that was there. It is `write + r - RING_SIZE`, and the test now insists
+the ring stays full.
+
+**Two ways the graph could have handed us memory we cannot use.**
+`port_use_buffers` took any buffer, including one with no block or with
+`datas[0].data` still NULL, and `process()` copies into that pointer on the
+data thread - a crash in the middle of playback, a long way from its cause.
+`port_set_io` took the io area without checking its size, where `impl_set_io`
+next to it had always checked. Both are refused now, at negotiation time, which
+is where a wrong answer is still an error message.
+
+**A clock that cannot be rearmed said nothing.** `on_timeout()` ignored the
+result of arming the next tick. If that ever fails the node stops producing and
+looks perfectly healthy doing it - the same class of silence the timer checks
+at startup were added for. It says so once now.
+
+**What comes out of a state file is not a profile until it is checked.**
+`current_profile()` passed the contents of `profile`/`profile.try` straight on.
+A truncated, half-written or older-format file therefore reached `preflight()`,
+which exits on a name it does not know - and the command that reads it is
+`audioctl boot`, the one that runs at every single boot and whose only job is
+to leave the phone able to make a sound. It falls back to `standard` and says
+so, `apply()` refuses anything that is not a profile, and `audioctl restart`
+now runs the preconditions it used to skip (restarting into `pw-hal` with no
+plugin present was a silent phone with a cheerful message).
+
+**The boot check could have been killed in the middle of its own rescue.**
+`furios-audio-verify.service` allowed 90 s. Its worst case is 30 s waiting for
+a sink, then applying `standard` - stopping, masking and restarting units -
+then waiting again. On a slow boot systemd could have sent SIGTERM halfway
+through that switch, with PulseAudio already masked and PipeWire not yet up:
+the exact silent phone the unit exists to prevent, caused by the unit. The
+budget is the whole fallback plus room now (240 s), and it is only ever spent
+when there is no sound anyway - the unit runs after the stack and holds nothing
+that makes noise.
+
+**`install.sh` threw away a profile somebody had set.** It wrote `standard`
+into the state file unconditionally, so re-running the installer - after a
+`git pull`, say - quietly moved the phone back to the shipped stack at the next
+boot. The package's `postinst` had always written it only when there was
+nothing there; the script does the same now. Its state directory handling was
+wrong in the other direction as well: `mkdir -p` succeeds on a directory that
+exists and belongs to root, so the fallback that fixes the ownership never ran
+and the write below it took the whole install down.
+
+**`chown -R` in `postinst`.** The directory belongs to an unprivileged user who
+can put anything in it, a hard link to a file elsewhere included, and the
+recursive chown that an upgrade runs as root would hand them that file. Only
+the directory and the two state files we write there are chowned now, symlinks
+skipped. Hardlink protection in the kernel makes this hard to exploit today;
+that is a reason not to rely on it.
+
+**Any Bluetooth device disconnecting paused the music.** The watcher reacted to
+`Connected = false` on `org.bluez.Device1` without asking what the device was,
+so a watch, a keyboard or a car's data link going out of range stopped a
+podcast - and on a phone those drop off far more often than earbuds run flat.
+It asks BlueZ for the device's UUIDs now and only acts on the audio profiles
+(A2DP, headset, hands-free). Where the answer cannot be had - the device is
+already gone from the bus, BlueZ does not answer, the property is not what it
+should be - it counts as audio and pauses. Doubt resolves towards pausing,
+because that costs a press of play and the other way costs a morning.

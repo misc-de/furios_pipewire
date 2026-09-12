@@ -206,10 +206,32 @@ migrate_legacy() {
     return 0
 }
 
+# Is this one of ours? Everything that comes out of a state file goes through
+# here first.
+known_profile() {
+    case " $PROFILES " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+# What the state files say - but never something that is not a profile.
+#
+# The content used to be passed on unread. A file that had been truncated, or
+# written by an older version, or simply damaged, then reached preflight() and
+# killed "audioctl boot" with "unknown profile" - the one command that runs at
+# every boot and whose whole job is to leave the phone in a state that makes
+# sound. Falling back to standard is what the rest of this file does whenever
+# it does not know better; do it here too, and say so.
 current_profile() {
-    [ -r "$TRY" ]    && { printf '%s' "$(cat "$TRY")";    return; }
-    [ -r "$STICKY" ] && { printf '%s' "$(cat "$STICKY")"; return; }
-    printf 'standard'
+    local p=""
+    [ -r "$TRY" ]    && p=$(cat "$TRY"    2>/dev/null)
+    [ -n "$p" ] || { [ -r "$STICKY" ] && p=$(cat "$STICKY" 2>/dev/null); }
+    [ -n "$p" ] || { printf 'standard'; return; }
+    if known_profile "$p"; then
+        printf '%s' "$p"
+    else
+        warn "stored profile \"$p\" is not one of ours - using standard"
+        printf 'standard'
+    fi
 }
 
 # What is REALLY running? The state file can go stale - which is exactly what
@@ -337,6 +359,7 @@ preflight() {
 # --- apply profiles ---------------------------------------------------------
 apply() {
     local p=$1
+    known_profile "$p" || { warn "refusing to apply \"$p\" - not a profile"; return 1; }
     case "$p" in
     standard)
         droid_monitor on
@@ -405,7 +428,10 @@ apply() {
 verify() {
     # Fifteen seconds is what a real switch needs; the tests set it to one, so
     # a suite that exercises this path does not spend minutes asleep.
-    local i=0 tries=${VERIFY_TRIES:-15}
+    # The boot check passes its own number here: a boot is slower than a
+    # switch on a warm system. Through the environment the larger value would
+    # have stayed in force for every later call in the same run.
+    local i=0 tries=${1:-${VERIFY_TRIES:-15}}
     while [ $i -lt "$tries" ]; do
         # auto_null is PipeWire's fallback sink: it exists precisely when no
         # real device came up. Accepting it would let the safety net pass on a
@@ -419,6 +445,44 @@ verify() {
         fi
         i=$((i+1)); sleep 1
     done
+    return 1
+}
+
+# --- after the stack: did the stored profile actually produce sound? --------
+#
+# "audioctl boot" writes the configuration before the stack starts and so
+# cannot judge it - there is nothing up yet to ask. This runs afterwards, from
+# furios-audio-verify.service, and is the only place where a profile that comes
+# up silent is caught. Without it a stored pw-hal that breaks - a plugin no
+# longer matching a new PipeWire, say - leaves the phone mute with no way back
+# except a command line.
+#
+# It allows the stack twice as long as an interactive switch. A boot is slower
+# than a switch on a warm system, and a fallback that fires because the HAL was
+# merely slow would be worse than what it guards against.
+boot_check() {
+    local p sinks
+    p=$(current_profile)
+    if verify "${BOOT_VERIFY_TRIES:-30}"; then
+        sinks=$(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, -)
+        printf 'boot check: profile %s has a sink (%s)\n' "$p" "$sinks"
+        return 0
+    fi
+    printf 'boot check: profile %s produced no sink. Falling back to standard.\n' "$p" >&2
+    # The stored profile is deliberately NOT rewritten, exactly as in the
+    # interactive fallback. A silent boot is a reason to make sound work now,
+    # not to quietly drop a choice somebody made: "audioctl status" shows the
+    # mismatch, and the next boot tries the profile again instead of pretending
+    # nothing happened. A test profile does go, because that is what try means.
+    apply standard
+    rm -f "$TRY"
+    if verify; then
+        printf 'boot check: standard restored.\n'
+        return 0
+    fi
+    # Left failed on purpose: this is the one state nobody can hear their way
+    # out of, and "systemctl --user --failed" is where it belongs.
+    printf 'boot check: standard delivers no sink either.\n' >&2
     return 1
 }
 
@@ -489,6 +553,18 @@ ensure_callaudio_refresh() {
     return 0
 }
 
+# The other half of the safety net: furios-audio-apply.service writes the
+# configuration before the stack, this one checks after it. Enabled the same
+# way - only the user can enable their own unit.
+ensure_boot_check() {
+    uctl is-enabled furios-audio-verify.service >/dev/null 2>&1 && return 0
+    if uctl cat furios-audio-verify.service >/dev/null 2>&1; then
+        run uctl enable furios-audio-verify.service >/dev/null 2>&1 \
+            && info "a boot that comes up silent now falls back to standard"
+    fi
+    return 0
+}
+
 ensure_safety_net() {
     uctl is-enabled furios-audio-apply.service >/dev/null 2>&1 && return 0
     if uctl cat furios-audio-apply.service >/dev/null 2>&1; then
@@ -503,6 +579,7 @@ switch_to() {
     warn_about_legacy
     prev=$(current_profile)
     ensure_safety_net
+    ensure_boot_check
     ensure_pause_on_disconnect
     ensure_callaudio_refresh
     preflight "$p"
@@ -720,6 +797,8 @@ audioctl - switch the audio stack
   audioctl revert              back to standard immediately
   audioctl boot                write the stored profile's configuration
                                without starting anything (used at boot)
+  audioctl boot-check          after the stack: fall back to standard if the
+                               profile came up without a sink (used at boot)
   sudo audioctl migrate        once, if an older version left system-wide
                                state behind (it says so when it matters)
   audioctl verify              check whether a sink is there
@@ -785,13 +864,25 @@ case "${1:-status}" in
     # What furios-audio-apply.service runs before the stack starts: drop the
     # test-mode marker, so a test profile never survives a reboot, and write
     # the configuration for the stored profile. Starts nothing - see uctl().
+    # The test marker goes first, so current_profile() reads the STORED
+    # profile below and not the one that must not survive a reboot.
     boot)   BOOT=1
             rm -f "$TRY"
-            switch_to "$(cat "$STICKY" 2>/dev/null || echo standard)" boot ;;
+            switch_to "$(current_profile)" boot ;;
+    # And the other half, from furios-audio-verify.service: run after the
+    # stack, when there is finally something to ask.
+    boot-check) boot_check ;;
     # Restart without changing the profile - for instance so the HAL re-reads a
     # modified tuning file.
     restart) p=$(effective_profile)
              [ "$p" = unclear ] && p=$(current_profile)
+             # apply() knows three profiles and silently does nothing for
+             # anything else, so a stack that could not be identified used to
+             # end in "no sink after the restart" with no hint as to why. And
+             # the preconditions belong here as much as in a switch: restarting
+             # into pw-hal without the plugin present is the same silent phone.
+             known_profile "$p" || die "cannot tell which profile is running - try \"audioctl set standard\"."
+             preflight "$p"
              printf 'restarting the audio stack (profile %s)\n' "$p"
              apply "$p"
              verify && info "OK - sink present: $(pactl list sinks short 2>/dev/null | awk '{print $2}' | paste -sd, -)" \

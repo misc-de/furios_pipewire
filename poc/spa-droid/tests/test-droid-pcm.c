@@ -1509,6 +1509,28 @@ static void test_use_buffers(void)
 	check_int("more than the node has room for is taken as far as it goes", 0,
 			spa_node_port_use_buffers(&this->node, this->dir, 0, 0, ptrs, 40));
 	check_int("up to the limit", 32, this->port.n_buffers);
+
+	/* process() copies into datas[0].data on the data thread. A buffer whose
+	 * memory the graph never mapped would be a memcpy against NULL there -
+	 * in the middle of playback, far from anything that could explain it.
+	 * Refuse it here instead, where it is still a negotiation error. */
+	{
+		static struct testbuf empty;
+		struct spa_buffer *bad[1];
+
+		testbuf_init(&empty, 4096);
+		empty.data.data = NULL;
+		bad[0] = &empty.buf;
+		check_int("a buffer without mapped memory is refused", -EINVAL,
+				spa_node_port_use_buffers(&this->node, this->dir, 0, 0, bad, 1));
+		check_int("and none is left behind for process() to find", 0,
+				this->port.n_buffers);
+
+		empty.data.data = empty.mem;
+		empty.buf.n_datas = 0;
+		check_int("a buffer without any block at all likewise", -EINVAL,
+				spa_node_port_use_buffers(&this->node, this->dir, 0, 0, bad, 1));
+	}
 	free_node(this);
 }
 
@@ -1838,6 +1860,18 @@ static void test_reader_failures(void)
 	check("the ring fills up and the oldest audio is dropped",
 			wait_until(overran));
 	pause_node(this);
+	{
+		uint32_t idx;
+		int32_t avail = spa_ringbuffer_get_read_index(&this->ring, &idx);
+		/* Only the excess goes, not the ring. The read index used to be
+		 * advanced by the fill level on top of that, which pushed it PAST
+		 * the write index: the fill went briefly negative, process() padded
+		 * with silence and counted an underrun, and what was left was a
+		 * couple of kilobytes instead of the buffer. */
+		check_int("and what is left is the full ring, not a remnant",
+				RING_SIZE, avail);
+		check("the read index never overtakes the write index", avail >= 0);
+	}
 	free_node(this);
 }
 

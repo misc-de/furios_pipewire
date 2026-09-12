@@ -184,6 +184,23 @@ check "a persistent profile is read back" "pw-hal" \
 check "and a test profile wins over it" "pw-tunnel" \
     "$(with_audioctl 'echo pw-hal > "$STICKY"; echo pw-tunnel > "$TRY"; current_profile')"
 
+# What comes out of a state file is not trusted. It used to be passed straight
+# on to preflight(), which dies on a name it does not know - and the command
+# that reads it is "audioctl boot", the one that runs at every single boot.
+# A file that was truncated, half-written or left by an older version would
+# have taken the safety net down with it.
+check "a damaged state file falls back to standard" "standard" \
+    "$(with_audioctl 'rm -f "$TRY"; echo "pw-h" > "$STICKY"; current_profile 2>/dev/null')"
+check "and it says so rather than failing quietly" "yes" \
+    "$(with_audioctl 'rm -f "$TRY"; echo "; rm -rf /" > "$STICKY"
+                      current_profile 2>&1 >/dev/null | grep -q "not one of ours" && echo yes')"
+check "an empty state file is standard, not the empty string" "standard" \
+    "$(with_audioctl 'rm -f "$TRY"; : > "$STICKY"; current_profile')"
+check "an empty test marker falls through to the stored profile" "pw-hal" \
+    "$(with_audioctl 'echo pw-hal > "$STICKY"; : > "$TRY"; current_profile')"
+check "apply() refuses anything that is not a profile" "yes" \
+    "$(with_audioctl 'apply "nonsense" 2>&1 >/dev/null | grep -q "not a profile" && echo yes')"
+
 # --- who holds the Pulse socket --------------------------------------------
 stub pactl 0 "Server Name: PulseAudio (on PipeWire 1.6.6)"
 check "the server names itself" "PulseAudio (on PipeWire 1.6.6)" \
@@ -782,6 +799,90 @@ check "a switch from the command line does restart the stack" "yes" \
     "$(grep -qx -- '--user restart pipewire.service' "$STUBDIR/systemctl.log" \
         && echo yes || echo no)"
 
+# --- "boot-check": the half that runs after the stack ------------------------
+#
+# The boot run above writes configuration and cannot judge it - nothing is up
+# yet to ask. So a stored profile that comes up silent needs catching from the
+# other side, ordered After= the stack, and that is this. Without it a pw-hal
+# that breaks under a new PipeWire leaves the phone mute with no way back but
+# a shell.
+
+# A pactl with no sink for the first N calls, and a real one after that - so
+# the fallback can be watched changing the answer.
+stub_pactl_silent_for() {
+    # stub_pactl_silent_for <how many calls answer nothing>
+    rm -f "$STUBDIR/pactl.calls"
+    cat > "$STUBDIR/pactl" <<STUB
+#!/bin/sh
+n=\$(cat "$STUBDIR/pactl.calls" 2>/dev/null || echo 0)
+n=\$((n+1)); printf '%s' "\$n" > "$STUBDIR/pactl.calls"
+[ "\$n" -le "$1" ] && exit 0
+printf '60\tdroid-sink\tPipeWire\ts16le 2ch 48000Hz\tSUSPENDED\n'
+STUB
+    chmod +x "$STUBDIR/pactl"
+}
+
+run_boot_check() {
+    AUDIOCTL_STATE_DIR="$STUBDIR/state" AUDIOCTL_ETCU="$STUBDIR/etc" \
+        AUDIOCTL_WPCONF_DIR="$STUBDIR/wp" \
+        VERIFY_TRIES=1 BOOT_VERIFY_TRIES=1 \
+        bash ${AUDIOCTL_TRACE:+-x} "$HERE/../audioctl" boot-check 2>&1
+}
+
+# A sink is there: it says so and leaves the stack alone. Restarting a working
+# stack at every boot is the other way to get this wrong.
+stub_logging_systemctl
+echo pw-hal > "$STUBDIR/state/profile"
+stub pactl 0 "60	droid-sink	PipeWire	s16le 2ch 48000Hz	SUSPENDED"
+check "boot-check passes a profile that has a sink" "yes" \
+    "$(run_boot_check | grep -q "profile pw-hal has a sink" && echo yes || echo no)"
+check "and leaves a working stack alone" "" \
+    "$(grep -E '^--user (restart|stop) ' "$STUBDIR/systemctl.log")"
+
+# No sink: this is what the unit exists for.
+stub_logging_systemctl
+stub_pactl_silent_for 1
+echo pw-hal > "$STUBDIR/state/profile"
+echo pw-hal > "$STUBDIR/state/profile.try"
+out=$(run_boot_check)
+check "a silent boot falls back to standard" "yes" \
+    "$(printf '%s' "$out" | grep -q "produced no sink" && echo yes || echo no)"
+check "and says so once it has sound again" "yes" \
+    "$(printf '%s' "$out" | grep -q "standard restored" && echo yes || echo no)"
+check "the fallback really restarts the stack" "yes" \
+    "$(grep -qx -- '--user restart pipewire.service' "$STUBDIR/systemctl.log" \
+        && echo yes || echo no)"
+check "it discards the test profile" "gone" \
+    "$([ -e "$STUBDIR/state/profile.try" ] && echo there || echo gone)"
+
+# The stored profile stays. A boot that came up silent is a reason to make
+# sound work now, not to drop somebody's choice without telling them - the
+# interactive fallback does not rewrite it either, and status shows the
+# mismatch.
+check "but it does not rewrite the stored profile" "pw-hal" \
+    "$(cat "$STUBDIR/state/profile")"
+
+# Nothing worked. Left failing on purpose: no sound is the one state nobody
+# can hear their way out of, so it belongs in "systemctl --user --failed".
+stub_logging_systemctl
+stub pactl 0 ""
+check "with no sound at all it reports failure" "1" \
+    "$(run_boot_check >/dev/null 2>&1; echo $?)"
+check "and names the profile that did not help either" "yes" \
+    "$(run_boot_check 2>&1 | grep -q "standard delivers no sink either" && echo yes || echo no)"
+
+# The boot check waits longer than an interactive switch, and does it through
+# an argument: as an environment variable the larger value would have stayed in
+# force for the verify() after the fallback as well.
+# The count goes through a file: verify() runs pactl inside a pipeline, so a
+# shell function counting in a variable would be counting in a subshell.
+: > "$STUBDIR/tries.txt"
+( AUDIOCTL_LIB=1 . "$HERE/../audioctl"
+  pactl() { echo x >> "$STUBDIR/tries.txt"; return 0; }
+  sleep() { :; }
+  verify 4 >/dev/null 2>&1 ) 2>/dev/null
+check "verify tries as often as it is told to" "4" "$(wc -l < "$STUBDIR/tries.txt" | tr -d ' ')"
+
 # --- what it refuses, and how it leaves the state directory ------------------
 #
 # The profile written into the state directory decides what
@@ -824,8 +925,13 @@ check "the package does not open the state directory to everyone" "no" \
     "$(grep -qE 'chmod +(1777|777|0777|666|0666) +/var/lib/furios-audio' \
         "$HERE/../packaging/build-deb.sh" && echo yes || echo no)"
 check "and it gives the directory an owner" "yes" \
-    "$(grep -q 'chown -R "\$owner" /var/lib/furios-audio' \
+    "$(grep -q 'chown "\$owner" /var/lib/furios-audio' \
         "$HERE/../packaging/build-deb.sh" && echo yes || echo no)"
+# ... but never recursively. The directory belongs to an unprivileged user who
+# can put anything in it, a hard link to a file elsewhere included - and a
+# recursive chown run by root as part of an upgrade would hand them that file.
+check "and it does not chown whatever it finds in there" "no" \
+    "$(grep -qE '^[[:space:]]*chown -R' "$HERE/../packaging/build-deb.sh" && echo yes || echo no)"
 
 check "a directory anyone could write to is narrowed" "no" \
     "$(case "$(tail -1 "$STUBDIR/wide.txt")" in *[2367]) echo yes ;; *) echo no ;; esac)"

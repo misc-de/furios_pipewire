@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+Description=FuriOS Audio: nach dem Start pruefen, ob das Profil Ton liefert
+Documentation=https://github.com/misc-de/furios_pipewire
+# The other half of furios-audio-apply.service. That one runs Before= the
+# stack, because a test profile must not outlive a reboot - and therefore
+# cannot check anything: at that point nothing is up to ask. This one runs
+# After= the stack and asks the only question that matters, whether there is
+# a sink. Without it a stored profile that breaks - a plugin no longer matching
+# a new PipeWire, say - leaves the phone mute with no way back but a shell.
+#
+# Ordering only. None of these are wanted or required: which of them runs is
+# what the profile decides, and a masked unit must not keep this one waiting.
+After=pipewire.service pipewire-pulse.service pulseaudio.service wireplumber.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'a=/usr/local/bin/audioctl; test -x "$$a" || a=/usr/bin/audioctl; "$$a" boot-check'
+# A timeout there has to be - waiting on the audio stack from a unit ordered
+# against it is exactly how the session deadlocked once. But it must not be so
+# short that it can fire DURING the fallback: boot-check waits up to 30 s for a
+# sink, then applies "standard" (stopping, masking and restarting units, which
+# is not instant), then waits again. At 90 s a slow boot could be killed
+# half-way through that switch - with PulseAudio already masked and PipeWire not
+# yet up, which is the silent phone this unit exists to prevent, caused by the
+# unit itself. So the budget is the whole fallback plus room, and the cost is
+# only ever paid when there is no sound anyway: this unit runs AFTER the stack,
+# holds nothing that makes sound, and returns in a second or two when the
+# profile works.
+TimeoutStartSec=240
+
+[Install]
+WantedBy=default.target

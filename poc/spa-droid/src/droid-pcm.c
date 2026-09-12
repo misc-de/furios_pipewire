@@ -150,6 +150,7 @@ struct impl {
 	struct spa_system *data_system;
 	struct spa_source timer_source;
 	bool timer_added;
+	bool timer_broken;       /* the timerfd could not be rearmed */
 	struct spa_io_clock *clock;
 	struct spa_io_position *position;
 	uint64_t next_time;
@@ -658,7 +659,16 @@ static void on_timeout(struct spa_source *source)
 	spa_node_call_ready(&this->callbacks, SPA_STATUS_HAVE_DATA);
 
 	this->next_time += this->period_ns;
-	set_timeout(this, this->next_time);
+	/* Rearming is what keeps the graph turning. If it ever fails the node
+	 * simply stops producing - no error anywhere, a sink that looks healthy
+	 * and plays nothing. Say it once, so the journal has the reason. */
+	if (set_timeout(this, this->next_time) < 0) {
+		if (!this->timer_broken) {
+			this->timer_broken = true;
+			spa_log_error(this->log, NAME " the clock could not be rearmed - "
+					"this node produces nothing until it is restarted");
+		}
+	}
 }
 
 static int timer_start(struct impl *this)
@@ -682,6 +692,7 @@ static int timer_start(struct impl *this)
 
 	spa_system_clock_gettime(this->data_system, CLOCK_MONOTONIC, &now);
 	this->next_time = SPA_TIMESPEC_TO_NSEC(&now) + this->period_ns;
+	this->timer_broken = false;
 	/* A timer that cannot be armed means no graph cycles at all - the node
 	 * would sit there looking healthy and play nothing. */
 	if ((res = set_timeout(this, this->next_time)) < 0)
@@ -824,12 +835,20 @@ static void *reader_thread(void *arg)
 		filled = spa_ringbuffer_get_write_index(&this->ring, &idx);
 		if (filled + r > (int32_t) RING_SIZE) {
 			/* Nobody is picking the data up - drop the oldest rather than the
-			 * newest, otherwise capture falls further and further behind. */
+			 * newest, otherwise capture falls further and further behind.
+			 *
+			 * Free exactly the excess, no more: the new read index is where
+			 * the ring is full again once these r bytes are in, and idx is
+			 * already the WRITE index, so `filled` must not be added to it a
+			 * second time. It used to be, which pushed the read index PAST
+			 * the write index - process() then saw a negative fill, padded
+			 * the buffer with silence and counted an underrun, and the whole
+			 * ring was thrown away instead of the few bytes too many. */
 			if (this->n_overrun++ == 0)
 				spa_log_warn(this->log, NAME " ring buffer full, capture drops "
 						"oldest data (further ones are only counted)");
 			spa_ringbuffer_read_update(&this->ring,
-					idx + filled + (int32_t) r - (int32_t) RING_SIZE);
+					idx + (int32_t) r - (int32_t) RING_SIZE);
 		}
 		spa_ringbuffer_write_data(&this->ring, this->ring_data, RING_SIZE,
 				idx & (RING_SIZE - 1), buf, (uint32_t) r);
@@ -1266,7 +1285,19 @@ static int impl_port_use_buffers(void *object,
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
 	for (i = 0; i < n_buffers && i < SPA_N_ELEMENTS(port->buffers); i++) {
-		port->buffers[i].outbuf = buffers[i];
+		struct spa_buffer *b = buffers[i];
+
+		/* process() reads and writes datas[0].data directly. A buffer
+		 * without a block, or one whose memory the graph did not map, would
+		 * be a memcpy against NULL on the data thread - refuse it here,
+		 * where the failure is still a negotiation error and not a crash in
+		 * the middle of playback. */
+		if (b == NULL || b->n_datas < 1 || b->datas[0].data == NULL) {
+			spa_log_error(this->log, NAME " buffer %u has no usable memory", i);
+			port->n_buffers = 0;
+			return -EINVAL;
+		}
+		port->buffers[i].outbuf = b;
 		port->buffers[i].queued = false;
 	}
 	port->n_buffers = i;
@@ -1281,10 +1312,19 @@ static int impl_port_set_io(void *object,
 
 	spa_return_val_if_fail(this != NULL, -EINVAL);
 
-	if (id == SPA_IO_Buffers)
-		this->port.io = data;
-	else
+	if (id != SPA_IO_Buffers)
 		return -ENOENT;
+	/* Same check impl_set_io already makes for clock and position: the area
+	 * belongs to somebody else, and process() writes status and buffer_id
+	 * into it on every cycle. Too small an area would be written past its
+	 * end. */
+	if (data != NULL && size < sizeof(struct spa_io_buffers)) {
+		spa_log_error(this->log, NAME " io area is %zu bytes, %zu are needed",
+				size, sizeof(struct spa_io_buffers));
+		this->port.io = NULL;
+		return -EINVAL;
+	}
+	this->port.io = data;
 	return 0;
 }
 
@@ -1523,6 +1563,7 @@ static int impl_init(const struct spa_handle_factory *factory,
 	struct impl *this;
 	struct port *port;
 	const char *str;
+	int res;
 
 	spa_return_val_if_fail(factory != NULL && handle != NULL, -EINVAL);
 
@@ -1632,12 +1673,12 @@ static int impl_init(const struct spa_handle_factory *factory,
 	this->config = pa_parse_droid_audio_config(this->config_file);
 	if (!this->config) {
 		spa_log_error(this->log, NAME " HAL configuration not readable");
-		return -EIO;
+		res = -EIO;
+		goto error;
 	}
 	if (!(this->module = dm_config_find_module(this->config, "primary"))) {
-		dm_config_free(this->config);
-		this->config = NULL;
-		return -ENOENT;
+		res = -ENOENT;
+		goto error;
 	}
 
 	/* Load the HAL module now, while the process is still young.
@@ -1673,9 +1714,8 @@ static int impl_init(const struct spa_handle_factory *factory,
 
 	this->ring_data = malloc(RING_SIZE);
 	if (!this->ring_data) {
-		dm_config_free(this->config);
-		this->config = NULL;
-		return -ENOMEM;
+		res = -ENOMEM;
+		goto error;
 	}
 	spa_ringbuffer_init(&this->ring);
 	pthread_mutex_init(&this->lock, NULL);
@@ -1684,6 +1724,29 @@ static int impl_init(const struct spa_handle_factory *factory,
 	registry_add(this);
 	spa_log_info(this->log, NAME " ready for mix port \"%s\"", this->mix_port_name);
 	return 0;
+
+	/* A failed init is NOT followed by impl_clear() - the loader frees the
+	 * handle and is done with it. So everything acquired above has to go
+	 * here, and the timer above all: it is registered with the data loop,
+	 * which would keep polling an fd whose spa_source points into memory
+	 * that is about to be freed. Every early return below the timerfd used
+	 * to leak exactly that. */
+error:
+	if (this->timer_added) {
+		spa_loop_remove_source(this->data_loop, &this->timer_source);
+		this->timer_added = false;
+	}
+	if (this->timer_source.fd >= 0) {
+		spa_system_close(this->data_system, this->timer_source.fd);
+		this->timer_source.fd = -1;
+	}
+	if (this->config) {
+		dm_config_free(this->config);
+		this->config = NULL;
+	}
+	free(this->ring_data);
+	this->ring_data = NULL;
+	return res;
 }
 
 /* Finds the device port for a PulseAudio route name ("output-earpiece"). The
@@ -2068,15 +2131,25 @@ int droid_node_set_route(const char *mix_port, const char *route)
 static void registry_add(struct impl *this)
 {
 	unsigned i;
+	bool room = false;
+
 	pthread_mutex_lock(&registry.lock);
 	for (i = 0; i < MAX_REG; i++) {
 		if (!registry.e[i].node) {
 			registry.e[i].mix_port = this->mix_port_name;
 			registry.e[i].node = this;
+			room = true;
 			break;
 		}
 	}
 	pthread_mutex_unlock(&registry.lock);
+	/* Full means this node cannot be reached by a route change from the
+	 * device any more. It would keep playing, on whatever route it opened with,
+	 * and every attempt to move it would be answered with -ENOENT by a
+	 * lookup that simply does not know it. Not silently. */
+	if (!room)
+		spa_log_warn(this->log, NAME " more than %d nodes - \"%s\" cannot be "
+				"reached by route changes", MAX_REG, this->mix_port_name);
 }
 
 static void registry_remove(struct impl *this)

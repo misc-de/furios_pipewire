@@ -21,6 +21,10 @@ RemainAfterExit=yes
 # every boot, with default.target never reached. The stack starts right after
 # this, from the configuration written here.
 ExecStart=/bin/sh -c 'a=/usr/local/bin/audioctl; test -x "$$a" || a=/usr/bin/audioctl; "$$a" boot'
+# The same guard, for the same reason: this unit is the one that deadlocked.
+# It writes files and starts nothing, so a minute is generous - and whatever
+# goes wrong here, the boot continues.
+TimeoutStartSec=60
 
 [Install]
 WantedBy=default.target

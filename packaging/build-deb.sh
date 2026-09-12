@@ -79,6 +79,7 @@ install -Dm644 wireplumber/51-bluez-ofono.conf "$STAGE/usr/share/wireplumber/wir
 
 install -Dm644 furios-pw-tunnel.service       "$STAGE/usr/lib/systemd/user/furios-pw-tunnel.service"
 install -Dm644 furios-audio-apply.service     "$STAGE/usr/lib/systemd/user/furios-audio-apply.service"
+install -Dm644 furios-audio-verify.service    "$STAGE/usr/lib/systemd/user/furios-audio-verify.service"
 install -Dm644 furios-audio-pause-on-disconnect.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-pause-on-disconnect.service"
 install -Dm644 furios-audio-callaudio-refresh.service \
@@ -205,7 +206,16 @@ owner=${SUDO_USER:-}
 [ -z "$owner" ] && [ -n "$existing" ] && [ "$existing" != root ] && owner=$existing
 [ -z "$owner" ] && owner=$(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $3; exit}')
 if [ -n "$owner" ] && [ "$owner" != root ] && getent passwd "$owner" >/dev/null 2>&1; then
-    chown -R "$owner" /var/lib/furios-audio || true
+    # NOT "chown -R". This directory belongs to an unprivileged user and that
+    # user can create anything in it, including a hard link to a file
+    # elsewhere - a recursive chown run by root would then hand them that
+    # file. Only the directory and the two state files we put there ourselves
+    # are touched, and no symlink is followed.
+    chown "$owner" /var/lib/furios-audio || true
+    for f in profile profile.try; do
+        [ -f "/var/lib/furios-audio/$f" ] && [ ! -L "/var/lib/furios-audio/$f" ] \
+            && chown "$owner" "/var/lib/furios-audio/$f" || true
+    done
 fi
 gtk-update-icon-cache -qtf /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database -q /usr/share/applications 2>/dev/null || true

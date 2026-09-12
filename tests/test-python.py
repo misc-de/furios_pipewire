@@ -202,6 +202,31 @@ class FakeBus:
         return 1
 
 
+class BluezBus:
+    """A system bus that answers what a Bluetooth device is.
+
+    The watcher asks BlueZ for the device's UUIDs before it pauses anything,
+    so that a watch or a keyboard dropping off does not stop the music.
+    """
+
+    def __init__(self, uuids=None, fail=False):
+        self.uuids = uuids
+        self.fail = fail
+        self.subscriptions = []
+
+    def call_sync(self, dest, path, iface, method, args, reply, flags,
+                  timeout, cancellable):
+        if method != "Get":
+            raise AssertionError("unexpected call: %s" % method)
+        if self.fail:
+            raise watcher.GLib.Error("no such device")
+        return FakeVariant([self.uuids])
+
+    def signal_subscribe(self, *args):
+        self.subscriptions.append(args)
+        return 1
+
+
 class FakeVariant:
     def __init__(self, value):
         self.value = value
@@ -891,6 +916,61 @@ class PauseOnDisconnect(unittest.TestCase):
                         FakeVariant(["org.bluez.Adapter1", {"Powered": False},
                                      []]))
             self.assertEqual(session.paused, [])
+        finally:
+            watcher.Gio.bus_get_sync = original_get
+            watcher.GLib.MainLoop = original_loop
+            watcher.GLib.timeout_add = original_timeout
+
+    # --- which devices are worth pausing for ------------------------------
+
+    def test_earbuds_count_as_audio(self):
+        bus = BluezBus(["0000110b-0000-1000-8000-00805f9b34fb",
+                        "0000111e-0000-1000-8000-00805f9b34fb"])
+        self.assertTrue(watcher.carries_audio(bus, "/org/bluez/hci0/dev_AA"))
+
+    def test_a_watch_does_not(self):
+        """A smartwatch going out of range must not pause a podcast. It has no
+        audio profile at all - battery service and device information only."""
+        bus = BluezBus(["0000180f-0000-1000-8000-00805f9b34fb",
+                        "0000180a-0000-1000-8000-00805f9b34fb"])
+        self.assertFalse(watcher.carries_audio(bus, "/org/bluez/hci0/dev_BB"))
+
+    def test_a_device_that_cannot_be_asked_counts_as_audio(self):
+        """Doubt resolves towards pausing: an unpaired device is gone from the
+        bus the moment it drops, and that one may well have been the earbuds."""
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertTrue(watcher.carries_audio(BluezBus(fail=True), "/x/dev_CC"))
+        self.assertIn("treating it as audio", out.getvalue())
+
+    def test_an_answer_that_makes_no_sense_counts_as_audio(self):
+        for answer in ([], None, "not a list", 7):
+            self.assertTrue(watcher.carries_audio(BluezBus(answer), "/x/dev_DD"),
+                            "%r must not silence the safety net" % (answer,))
+
+    def test_a_non_audio_device_leaves_playback_alone(self):
+        """The whole handler, not just the predicate."""
+        session = FakeBus(names=["org.mpris.MediaPlayer2.emilia"],
+                          status={"org.mpris.MediaPlayer2.emilia": "Playing"})
+        system = BluezBus(["0000180f-0000-1000-8000-00805f9b34fb"])
+        buses = [system, session]
+
+        original_get, original_loop = watcher.Gio.bus_get_sync, watcher.GLib.MainLoop
+        original_timeout = watcher.GLib.timeout_add
+        scheduled = []
+        watcher.Gio.bus_get_sync = lambda kind, _c: buses.pop(0)
+        watcher.GLib.MainLoop = lambda: type("Loop", (), {"run": lambda self: None})()
+        watcher.GLib.timeout_add = lambda _ms, fn: scheduled.append(fn)
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                watcher.main()
+                handler = system.subscriptions[0][-1]
+                handler(None, None, "/org/bluez/hci0/dev_BB", None, None,
+                        FakeVariant(["org.bluez.Device1", {"Connected": False}, []]))
+            self.assertEqual(session.paused, [])
+            self.assertEqual(scheduled, [], "and no retries either")
+            self.assertIn("carries no audio", out.getvalue())
         finally:
             watcher.Gio.bus_get_sync = original_get
             watcher.GLib.MainLoop = original_loop
