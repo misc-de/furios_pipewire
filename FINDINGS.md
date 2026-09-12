@@ -827,6 +827,55 @@ unconditionally is what discards it.
 
 ---
 
+## The boot that never finished, and a phone with no sound
+
+Applying the stored profile unconditionally was right, and it made a deadlock
+that had been sitting there all along fire at **every** boot instead of only
+when the stored profile was not `standard`.
+
+`furios-audio-apply.service` runs `Before=pulseaudio.service pipewire.service`,
+because a test profile must never outlive a reboot and the masks therefore have
+to be in place before the stack reads them. It ran `audioctl set <profile>`,
+and a switch restarts exactly those units:
+
+    ExecStart=... "$a" set "$p" || "$a" revert     # inside: systemctl --user restart pipewire.service
+
+systemd queues that restart behind the ordering it was given: pipewire may not
+start until apply.service has finished. apply.service is waiting for the
+restart. Neither moves again.
+
+**What that looks like on the device** is not "the safety net did not work".
+It is the whole session stuck: `systemctl --user list-jobs` showing
+`pipewire.service start waiting` next to `furios-audio-apply.service start
+running`, `default.target` never reached, no sound at all - and the deadlock
+outlives the boot, so every switch attempted afterwards queues behind the same
+job. The one found here had got as far as masking PulseAudio before it stopped,
+which is why the phone had neither the new stack nor the old one.
+
+**The fix is that there is nothing to start there.** The stack has not been
+started yet; it starts from the configuration this unit writes, moments later.
+So `audioctl boot` writes configuration and nothing else - `uctl()` drops
+`start`, `stop`, `restart` and `reset-failed` while `BOOT=1`, and strips the
+`--now` from `enable` (enabling is configuration, starting it is not).
+
+Two things fall away with them, and both should:
+
+- **`restart_audio_clients`** - callaudiod and feedbackd are not running yet.
+- **`verify()`** - there is no sink to find, and fifteen seconds later it would
+  have "fallen back to standard" over a stack that had simply not been started.
+
+That last point is worth stating plainly: **the boot run no longer checks
+whether the profile produces sound.** It never could - the check ran before
+anything was up. A stored profile that comes up silent needs a second unit
+ordered `After=` the stack to catch it, and that does not exist yet.
+
+The tests read the calls audioctl makes to systemctl and fail if any of those
+four verbs appears in a boot run, or if `--now` survives it - with a
+counter-check that a switch from the command line still restarts things, so a
+suppression that caught the interactive path too would not pass quietly.
+
+---
+
 ## The sink monitor reads silence, whatever is playing
 
 `droid-sink.monitor` returns digital silence while audio is demonstrably

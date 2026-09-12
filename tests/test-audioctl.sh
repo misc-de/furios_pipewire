@@ -689,6 +689,99 @@ stub_systemctl pipewire-pulse.service furios-audio-apply.service
 check "toggle from pw-hal goes back to standard, and stays" "yes" \
     "$(run_audioctl --dry-run toggle | grep -q -- '-> standard (sticky)' && echo yes || echo no)"
 
+# --- "boot": the one run that must not start anything ------------------------
+#
+# furios-audio-apply.service runs Before= pipewire and pulseaudio, and it runs
+# audioctl. When audioctl asked systemd to restart those units from there, the
+# restart queued behind a job that was waiting for this very unit to finish -
+# a deadlock that reached the whole session: pipewire never started, and the
+# phone came up with no sound at all. Seen on the device, twice over, because
+# a switch attempted afterwards queued behind the same job and got half-way
+# through: PulseAudio masked, PipeWire not running.
+#
+# So the boot run writes configuration and nothing else. These checks read the
+# calls it makes to systemctl.
+
+# A systemctl that writes down every call it gets. is-enabled fails, so the
+# ensure_* helpers take their enabling path rather than returning early.
+stub_logging_systemctl() {
+    : > "$STUBDIR/systemctl.log"
+    cat > "$STUBDIR/systemctl" <<STUB
+#!/bin/sh
+printf '%s\n' "\$*" >> "$STUBDIR/systemctl.log"
+case "\$2" in
+is-active)  exit 3 ;;
+is-enabled) exit 1 ;;
+cat)        exit 0 ;;
+esac
+exit 0
+STUB
+    chmod +x "$STUBDIR/systemctl"
+}
+
+run_boot() {
+    AUDIOCTL_STATE_DIR="$STUBDIR/state" AUDIOCTL_ETCU="$STUBDIR/etc" \
+        AUDIOCTL_WPCONF_DIR="$STUBDIR/wp" \
+        VERIFY_TRIES=1 bash ${AUDIOCTL_TRACE:+-x} "$HERE/../audioctl" boot 2>&1
+}
+
+stub_logging_systemctl
+stub pactl 0 ""
+echo standard > "$STUBDIR/state/profile"
+run_boot >/dev/null 2>&1
+
+# The deadlock itself: not one of these verbs may be asked for at boot. Every
+# logged line begins with the --user that uctl puts there, so the verb is the
+# second word - matching it at the start of the line would pass on anything.
+check "boot asks systemd to start, stop or restart nothing" "" \
+    "$(grep -E '^--user (start|stop|restart|reset-failed)([[:space:]]|$)' \
+        "$STUBDIR/systemctl.log")"
+
+# enable is configuration and has to stay; --now is the starting half of it.
+check "enable survives the boot run" "yes" \
+    "$(grep -q -E '(^|[[:space:]])enable[[:space:]]' "$STUBDIR/systemctl.log" && echo yes || echo no)"
+check "but --now is stripped from it" "" \
+    "$(grep -- '--now' "$STUBDIR/systemctl.log")"
+
+# Waiting for a sink is just as wrong there: the stack has not been started
+# yet, so fifteen seconds later it would "fall back to standard" over a stack
+# nobody had started. pactl prints no sink here and it still comes out happy.
+check "boot does not judge the profile by a sink that cannot be up yet" "yes" \
+    "$(run_boot | grep -q "systemd starts the stack from it" && echo yes || echo no)"
+
+# What it does have to do: discard a test profile, and apply the stored one.
+echo pw-hal > "$STUBDIR/state/profile.try"
+run_boot >/dev/null 2>&1
+check "boot discards the test-mode marker" "gone" \
+    "$([ -e "$STUBDIR/state/profile.try" ] && echo there || echo gone)"
+
+# standard is applied like any other profile - a test profile leaves its masks
+# behind, and applying standard is what clears them.
+mkdir -p "$STUBDIR/etc/pipewire.service.d"
+: > "$STUBDIR/etc/pipewire.service.d/50-furios-audio.conf"
+ln -sf /dev/null "$STUBDIR/etc/pulseaudio.service"
+run_boot >/dev/null 2>&1
+check "and it clears what a test profile left behind" "gone" \
+    "$([ -e "$STUBDIR/etc/pipewire.service.d/50-furios-audio.conf" ] && echo there || echo gone)"
+check "including the mask over PulseAudio" "gone" \
+    "$([ -e "$STUBDIR/etc/pulseaudio.service" ] && echo there || echo gone)"
+
+check "with no stored profile it falls back to standard" "yes" \
+    "$(rm -f "$STUBDIR/state/profile"; run_boot | grep -q -- '-> standard (boot)' && echo yes || echo no)"
+
+# And the counter-check: a switch from the command line still restarts things.
+# A suppression that caught the interactive path too would leave every switch
+# writing configuration nobody acts on.
+echo standard > "$STUBDIR/state/profile"
+stub_logging_systemctl
+stub pactl 0 "60	droid-sink	PipeWire	s16le 2ch 48000Hz	SUSPENDED"
+AUDIOCTL_STATE_DIR="$STUBDIR/state" AUDIOCTL_ETCU="$STUBDIR/etc" \
+    AUDIOCTL_WPCONF_DIR="$STUBDIR/wp" VERIFY_TRIES=1 \
+    bash ${AUDIOCTL_TRACE:+-x} "$HERE/../audioctl" set standard >/dev/null 2>&1
+check "a switch from the command line does restart the stack" "yes" \
+    "$(grep -qx -- '--user restart pipewire.service' "$STUBDIR/systemctl.log" \
+        && echo yes || echo no)"
+
 # --- what it refuses, and how it leaves the state directory ------------------
 #
 # The profile written into the state directory decides what

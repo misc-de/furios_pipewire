@@ -62,6 +62,8 @@ LOCAL=$(dirname "$(first_existing /usr/local/share/furios-audio/pipewire-hal.con
 
 PROFILES="standard pw-tunnel pw-hal"
 DRY=0
+# Set by the "boot" command: write the configuration, start nothing. See uctl().
+BOOT=0
 
 die()  { printf 'audioctl: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*"; }
@@ -69,7 +71,27 @@ warn() { printf 'audioctl: %s\n' "$*" >&2; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
 
 
-uctl() { systemctl --user "$@"; }
+# At boot furios-audio-apply.service runs Before= the very units a profile
+# switch restarts - so asking systemd for that restart there waits for a job
+# that is waiting for us. The deadlock held the entire session: pipewire never
+# started, default.target never finished, and the phone came up silent with a
+# masked PulseAudio, because a switch had got half-way through.
+#
+# Nothing needs starting at that point anyway. Only the configuration is
+# written, and systemd starts the stack from it moments later. "--now" goes the
+# same way: "enable" is configuration and stays, starting it here is not.
+uctl() {
+    if [ "$BOOT" = 1 ]; then
+        case "$1" in
+        start|stop|restart|reset-failed) return 0 ;;
+        enable|disable)
+            local verb=$1; shift
+            [ "${1:-}" = --now ] && shift
+            set -- "$verb" "$@" ;;
+        esac
+    fi
+    systemctl --user "$@"
+}
 
 # --- the three things a profile switch changes ------------------------------
 #
@@ -488,6 +510,15 @@ switch_to() {
     apply "$p"
     [ "$DRY" = 1 ] && { echo "dry run finished, nothing changed."; return 0; }
 
+    # At boot there is nothing yet to restart and nothing yet to verify: the
+    # stack starts after this, from the configuration just written. Asking
+    # pactl for a sink here would time out fifteen seconds and then "fall back
+    # to standard" over a stack that had simply not been started.
+    if [ "$mode" = boot ]; then
+        info "configuration written - systemd starts the stack from it"
+        return 0
+    fi
+
     restart_audio_clients
 
     if verify; then
@@ -687,6 +718,8 @@ audioctl - switch the audio stack
                                Bluetooth headset itself and holds it there
   audioctl bt-call on|off      move a running call by hand
   audioctl revert              back to standard immediately
+  audioctl boot                write the stored profile's configuration
+                               without starting anything (used at boot)
   sudo audioctl migrate        once, if an older version left system-wide
                                state behind (it says so when it matters)
   audioctl verify              check whether a sink is there
@@ -749,6 +782,12 @@ case "${1:-status}" in
     list)   printf '%s\n' $PROFILES ;;
     try)    [ $# -ge 2 ] || die "profile missing."; switch_to "$2" try ;;
     set)    [ $# -ge 2 ] || die "profile missing."; switch_to "$2" sticky ;;
+    # What furios-audio-apply.service runs before the stack starts: drop the
+    # test-mode marker, so a test profile never survives a reboot, and write
+    # the configuration for the stored profile. Starts nothing - see uctl().
+    boot)   BOOT=1
+            rm -f "$TRY"
+            switch_to "$(cat "$STICKY" 2>/dev/null || echo standard)" boot ;;
     # Restart without changing the profile - for instance so the HAL re-reads a
     # modified tuning file.
     restart) p=$(effective_profile)

@@ -7,17 +7,20 @@ DefaultDependencies=no
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Drop the test-mode marker: after a reboot the persistent profile always wins.
-ExecStart=/bin/sh -c 'rm -f /var/lib/furios-audio/profile.try'
 # From the package audioctl is in /usr/bin, from the source tree in
 # /usr/local/bin. Naming only one of them made this do nothing at all.
-# The stored profile is applied unconditionally, "standard" included. It used
-# to skip that case - and since a try profile leaves its masks and drop-in
-# behind in the configuration, "audioctl try pw-hal" then survived the reboot
-# it was supposed to be discarded by. Applying standard is what discards it.
-ExecStart=/bin/sh -c 'a=/usr/local/bin/audioctl; test -x "$$a" || a=/usr/bin/audioctl; \
-    p=$$(cat /var/lib/furios-audio/profile 2>/dev/null || echo standard); \
-    "$$a" set "$$p" || "$$a" revert'
+#
+# "audioctl boot" drops the test-mode marker and writes the configuration for
+# the stored profile - masks, drop-in, droid monitor - for "standard" as much
+# as for the others: a test profile leaves its masks behind, and applying the
+# stored one is what discards them.
+#
+# It deliberately starts nothing. This unit runs Before= the units a profile
+# switch would restart, so a restart asked for here waits for a job that is
+# waiting for this unit to finish. That deadlock left the phone silent at
+# every boot, with default.target never reached. The stack starts right after
+# this, from the configuration written here.
+ExecStart=/bin/sh -c 'a=/usr/local/bin/audioctl; test -x "$$a" || a=/usr/bin/audioctl; "$$a" boot'
 
 [Install]
 WantedBy=default.target
