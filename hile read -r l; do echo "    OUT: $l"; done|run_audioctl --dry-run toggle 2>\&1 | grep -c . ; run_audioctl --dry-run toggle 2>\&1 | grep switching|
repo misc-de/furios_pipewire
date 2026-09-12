@@ -1,3 +1,0 @@
-    "$( head -4 | grep -q 'standard -> pw-hal' && echo yes || echo no)"
- head -4 | head -4 | while read -r l; do echo "    OUT: $l"; done
-    "$( head -4 | grep -q "pw-hal -> standard (sticky)" && echo yes || echo no)"
