@@ -69,6 +69,10 @@
  * not the HAL's own port name ("Speaker") - the node resolves it through
  * pa_droid_output_port_name(), which only ever yields route names. Handing it
  * a port name looks right and matches nothing. */
+/* Only reaches a node that lives in THIS process. WirePlumber loads the card
+ * into its own, so in the normal setup this finds nothing and returns -ENOENT
+ * - which is why every route that matters travels as props on the route
+ * instead. Kept for a host that does load both together. */
 int droid_node_set_route(const char *mix_port, const char *route);
 
 struct route {
@@ -472,10 +476,14 @@ static void build_route_body(struct impl *this, struct spa_pod_builder *b,
 
 		spa_pod_builder_add(b, SPA_PARAM_ROUTE_device, SPA_POD_Int(r->device), 0);
 
-		/* The route carries its name along as a prop. PipeWire forwards the
-		 * props of an active route to the device's node - and only the node
-		 * holds the HAL stream that has to be rerouted. Device and node run
-		 * in different processes. */
+		/* The route carries its name along as a prop, for anything that
+		 * reads the card's parameters. It is NOT how the name reaches the
+		 * node, though - measured: the node receives droid.route and nothing
+		 * else from this struct. droid.lua reads the active route and sends
+		 * the name on itself (setNodeProp), which is the only road across:
+		 * the card lives in WirePlumber's process and the nodes in
+		 * PipeWire's. Anything else that has to reach a node goes the same
+		 * way, through droid.lua. */
 		spa_pod_builder_prop(b, SPA_PARAM_ROUTE_props, 0);
 		spa_pod_builder_push_object(b, &pf, SPA_TYPE_OBJECT_Props, SPA_PARAM_Route);
 

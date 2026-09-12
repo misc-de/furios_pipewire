@@ -51,19 +51,78 @@ local function route_names_set()
   local names = {}
   for _, c in ipairs(wp.calls_of("set_params")) do
     local body = c.args[3] and c.args[3].body
-    if body then table.insert(names, tostring(body.index)) end
+    -- Only what carries an index: profiles and routes. The codec travels as
+    -- Props and has none, and counting it here once made this look like a
+    -- third route.
+    if body and body.index ~= nil then table.insert(names, tostring(body.index)) end
   end
   return names
+end
+
+-- What the script told the phone's NODES about the Bluetooth codec. It goes to
+-- them directly, the way droid.lua sends the route: the card lives in
+-- WirePlumber's process and the nodes in PipeWire's, and nothing carries a
+-- card parameter across that by itself.
+local function codecs_told()
+  local out = {}
+  for _, c in ipairs(wp.calls_of("set_param")) do
+    local body = c.args[3] and c.args[3].body
+    if c.args[2] == "Props" and body and body.params and body.params.body then
+      local kv = body.params.body
+      if kv[1] == "droid.bt-wbs" then table.insert(out, kv[2]) end
+    end
+  end
+  return out
+end
+
+-- The phone's two nodes. The codec goes to them directly - the card cannot
+-- carry it, it lives in another process - so they have to be there to be told.
+local function droid_nodes(dev)
+  for _, d in ipairs { 0, 1 } do
+    wp.add("node", wp.object({
+      ["device.id"] = tostring(dev["bound-id"]),
+      ["card.profile.device"] = tostring(d),
+      ["node.name"] = d == 0 and "droid-sink" or "droid-source",
+    }))
+  end
 end
 
 -- A call starts with a headset connected: profile, both routes.
 setup()
 local dev = wp.add("device", droid_card("voicecall"))
 wp.add("device", bt_card())
+droid_nodes(dev)
 fire(dev)
 T.check("the call sets something on both cards", #wp.calls_of("set_params") >= 3)
 T.check_equal("the phone card is routed twice - output and input", 2,
               #route_names_set() - 1)
+
+-- The codec has to be told, and told before the routes: setting a route is
+-- what makes the HAL open a stream, and the HAL reads the codec while
+-- opening. Told too late, the headset decodes CVSD bytes as mSBC and plays
+-- nothing at all - while the link, the interrupt counters and the PCM device
+-- all say the audio is on its way.
+local told = codecs_told()
+T.check_equal("both nodes are told the codec", 2, #told)
+T.check_equal("and the wide-band profile is reported as wide-band", "on", told[1])
+T.check_equal("for the input side too", "on", told[2])
+-- Order across the two objects: every codec call has to come before the first
+-- route, because the route is what makes the HAL open a stream and the HAL
+-- reads the codec while opening.
+local last_codec, first_route = 0, nil
+for i, c in ipairs(wp.calls) do
+  if c.what == "set_param" and c.args[2] == "Props" then
+    local body = c.args[3] and c.args[3].body
+    if body and body.params and body.params.body
+       and body.params.body[1] == "droid.bt-wbs" then
+      last_codec = i
+    end
+  elseif c.what == "set_params" and c.args[2] == "Route" then
+    first_route = first_route or i
+  end
+end
+T.check("the codec is told before the first route",
+        first_route ~= nil and last_codec > 0 and last_codec < first_route)
 
 -- The same event again while the call runs, with the card now reporting the
 -- Bluetooth route: there is nothing to defend, so nothing is set.

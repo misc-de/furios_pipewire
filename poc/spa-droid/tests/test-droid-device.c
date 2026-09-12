@@ -50,6 +50,8 @@ int droid_node_set_route(const char *mix_port, const char *route)
 	return node_route_result;
 }
 
+
+
 static int failures;
 static int checks;
 

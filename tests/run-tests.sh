@@ -45,14 +45,21 @@ run_c_test() {
         printf '  \033[33mskipped\033[0m - no build tree, see "Building" in README.md\n'
         return
     fi
-    if ninja -C "$BUILD" "$1" >/dev/null 2>&1; then
-        if "$BUILD/$1"; then
-            :
-        else
-            FAILED=$((FAILED + 1))
-        fi
-    else
-        printf '  \033[33mskipped\033[0m - %s did not build\n' "$1"
+    # A build tree that is there and a test that will not compile is a
+    # failure, not something to skip: the suite said "all suites passed" while
+    # a test binary was missing entirely, which is the same lie as running a
+    # stale one. Only a MISSING build tree is a skip, and that is handled
+    # above.
+    # NOT "ninja | tail": a pipeline reports the status of its LAST command,
+    # so the failure would be tail's success. Capture, then decide.
+    if ! build_log=$(ninja -C "$BUILD" "$1" 2>&1); then
+        printf '%s\n' "$build_log" | tail -20
+        printf '  \033[31mFAIL\033[0m   %s does not build\n' "$1"
+        FAILED=$((FAILED + 1))
+        return
+    fi
+    if ! "$BUILD/$1"; then
+        FAILED=$((FAILED + 1))
     fi
 }
 

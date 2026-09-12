@@ -142,9 +142,12 @@ end
 
 -- The headset has to be in a hands-free profile, otherwise there is no SCO
 -- channel for the HAL to put the voice path on.
+--
+-- Returns the profile name on success, so the caller knows which codec was
+-- agreed - see tellCodec below, which needs exactly that.
 function setBtProfile (card, name)
   if card == nil then
-    return false
+    return nil
   end
   for p in card:iterate_params ("EnumProfile") do
     local profile = cutils.parseParam (p, "EnumProfile")
@@ -154,23 +157,88 @@ function setBtProfile (card, name)
         index = profile.index,
         save = false,
       })
-      return true
+      return name
     end
   end
-  return false
+  return nil
+end
+
+-- Tell the phone's nodes which codec the Bluetooth link runs, because nothing
+-- else can.
+--
+-- The HAL encodes narrow-band CVSD unless it is told otherwise, and the
+-- profile above prefers wide-band mSBC. Mismatched, the earbuds decode CVSD
+-- bytes as mSBC and play nothing - while everything measurable says the audio
+-- is on its way: the link stands, BTCVSD Tx Irq is on, the HAL holds the
+-- Bluetooth PCM device. Only the ear notices. Measured, same tone each time:
+-- mSBC air + HAL default, nothing; CVSD air + HAL default, heard; mSBC air +
+-- bt_wbs=on, heard.
+--
+-- It goes straight to the nodes, the way droid.lua sends the route. The card
+-- is not a road: it lives in WirePlumber's process and the nodes in
+-- PipeWire's, and nothing carries a card parameter across that on its own -
+-- measured, the node receives droid.route (which droid.lua sends) and nothing
+-- else the card publishes.
+--
+-- Both directions are told: bt_wbs belongs to the HAL module rather than to
+-- one stream, and either node may be the next to open one.
+--
+-- And it has to happen BEFORE the routes are set. The HAL reads the parameter
+-- when it opens a stream, and it is the route that makes it open.
+function nodeOf (dev, card_profile_device)
+  return cutils.get_object_manager ("node"):lookup {
+    Constraint { "device.id", "=", tostring (dev["bound-id"]) },
+    Constraint { "card.profile.device", "=", tostring (card_profile_device),
+                 type = "pw" },
+  }
+end
+
+function tellCodec (dev, profile)
+  -- headset-head-unit is mSBC (wide-band); headset-head-unit-cvsd is CVSD.
+  -- Anything else and we do not know - and guessing is a coin toss between
+  -- working audio and silence, so say nothing and let the HAL keep its
+  -- default. The node says so in the log when it opens Bluetooth without a
+  -- codec, which is better than a wrong guess nobody can see.
+  local wbs
+  if profile == "headset-head-unit" then
+    wbs = "on"
+  elseif profile == "headset-head-unit-cvsd" then
+    wbs = "off"
+  else
+    return nil
+  end
+
+  local told = 0
+  for _, d in ipairs { 0, 1 } do
+    local node = nodeOf (dev, d)
+    if node then
+      node:set_param ("Props", Pod.Object {
+        "Spa:Pod:Object:Param:Props", "Props",
+        params = Pod.Struct { "droid.bt-wbs", wbs },
+      })
+      told = told + 1
+    end
+  end
+  if told == 0 then
+    return nil
+  end
+  return wbs
 end
 
 function takeOver (dev, card)
   took_over = true
   local prof = setBtProfile (card, "headset-head-unit")
              or setBtProfile (card, "headset-head-unit-cvsd")
+  -- Before the routes: setting a route is what makes the HAL open a stream,
+  -- and the codec has to be in place by then.
+  local wbs = tellCodec (dev, prof)
   local sink = setRouteByName (dev, BT_SINK_ROUTE)
   local src  = setRouteByName (dev, BT_SOURCE_ROUTE)
 
   log:info (string.format (
-      "bluetooth call: headset profile %s, output %s, input %s",
-      prof and "set" or "NOT set", sink and "set" or "NOT set",
-      src and "set" or "NOT set"))
+      "bluetooth call: headset profile %s, codec %s, output %s, input %s",
+      prof or "NOT set", wbs and ("bt_wbs=" .. wbs) or "unknown",
+      sink and "set" or "NOT set", src and "set" or "NOT set"))
 
   if not sink then
     -- Without the output route the HAL never sends BT_SCO=on, and holding a

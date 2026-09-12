@@ -128,6 +128,8 @@ struct impl {
 	char wanted_port[64];       /* route requested by the device */
 	char wanted_route[64];      /* ... under the name the device uses for it */
 	bool open_is_bt;            /* the open stream was opened on a BT SCO port */
+	char bt_wbs[4];             /* "on"/"off" - the codec BlueZ negotiated, "" = unknown */
+	char open_bt_wbs[4];        /* ... as it was when the stream was opened */
 	bool mode_holds_hal;        /* HAL only kept open for call mode */
 	bool in_call;               /* mode is AUDIO_MODE_IN_CALL */
 	uint64_t hal_latency_ns;    /* remembered at open time, see latency_ns() */
@@ -182,6 +184,7 @@ struct port;
 static void emit_port_info(struct impl *this, struct port *port, bool full);
 static void latency_changed(struct impl *this);
 static int apply_voice_volume(struct impl *this, const char *value);
+static int apply_bt_wbs(struct impl *this, const char *value);
 /* Bluetooth is commented out of this device's audio_policy XML, so the port
  * for it does not exist in the parsed configuration and has to be built.
  * That lookup lives further down, next to the route handling. */
@@ -262,6 +265,7 @@ static int hal_open_input(struct impl *this, const pa_sample_spec *spec,
 	 * route change that crosses it needs the stream reopened - see
 	 * apply_route(). */
 	this->open_is_bt = port_is_bt_sco(dev);
+	memcpy(this->open_bt_wbs, this->bt_wbs, sizeof(this->open_bt_wbs));
 
 	/* For input streams pa_droid_stream_get_latency() returns 0 - upstream
 	 * never computes it. So estimate it ourselves: one HAL period. */
@@ -309,6 +313,30 @@ static void bt_sco_announce(struct impl *this, const dm_config_port *dev)
 		return;
 
 	bt = port_is_bt_sco(dev);
+
+	/* And which codec, because the HAL encodes narrow-band CVSD unless told
+	 * otherwise while WirePlumber prefers the wide-band profile (mSBC). Get
+	 * that wrong and the earbuds decode CVSD bytes as mSBC: the link stands,
+	 * BTCVSD Tx Irq is on, the HAL holds pcmC0D55p - and nothing intelligible
+	 * arrives. Measured, same tone each time: mSBC air + HAL default, nothing;
+	 * CVSD air + HAL default, heard; mSBC air + bt_wbs=on, heard. The
+	 * parameter is visible in the mixer, BTCVSD Band goes NB -> WB.
+	 *
+	 * It goes before BT_SCO=on, so the HAL has the whole picture at once, and
+	 * only when somebody told us - guessing here would be a coin toss between
+	 * silence and working audio. */
+	if (bt && this->bt_wbs[0]) {
+		char param[16];
+		snprintf(param, sizeof(param), "bt_wbs=%s", this->bt_wbs);
+		if (pa_droid_set_parameters(this->hw, param) < 0)
+			spa_log_warn(this->log, NAME " the HAL did not take %s", param);
+		else
+			DIAG(this, "%s sent before opening", param);
+	} else if (bt) {
+		spa_log_warn(this->log, NAME " no codec known for the Bluetooth link - "
+				"the HAL stays on narrow-band CVSD, and a wide-band "
+				"headset will hear nothing");
+	}
 
 	if (pa_droid_set_parameters(this->hw, bt ? "BT_SCO=on" : "BT_SCO=off") < 0)
 		spa_log_warn(this->log, NAME " the HAL did not take BT_SCO=%s",
@@ -433,6 +461,7 @@ static int hal_open(struct impl *this)
 
 	bt_sco_announce(this, dev);
 	this->open_is_bt = port_is_bt_sco(dev);
+	memcpy(this->open_bt_wbs, this->bt_wbs, sizeof(this->open_bt_wbs));
 
 	this->stream = pa_droid_open_output_stream(this->hw, &spec, &map, mix, dev);
 	if (!this->stream) {
@@ -1397,6 +1426,8 @@ static int impl_node_set_param(void *object, uint32_t id, uint32_t flags,
 				apply_mode(this, val);
 			else if (spa_streq(key, "droid.voice-volume"))
 				apply_voice_volume(this, val);
+			else if (spa_streq(key, "droid.bt-wbs"))
+				apply_bt_wbs(this, val);
 		}
 		spa_pod_parser_pop(&prs, &f);
 	}
@@ -1789,6 +1820,43 @@ static int apply_route(struct impl *this, const char *route)
 	return res;
 }
 
+/* Which codec BlueZ negotiated on the Bluetooth link.
+ *
+ * The plugin cannot ask BlueZ - it has no connection to it. The WirePlumber
+ * side knows, because it picks the headset's profile in the first place, and
+ * it travels the same way a route does.
+ *
+ * The HAL takes it as a module parameter, so it has to be right BEFORE the
+ * stream is opened. Changing it under an open Bluetooth stream therefore
+ * reopens, exactly as a route change across Bluetooth does; outside Bluetooth
+ * it is only remembered for the next open.
+ */
+static int apply_bt_wbs(struct impl *this, const char *value)
+{
+	bool on;
+
+	if (spa_streq(value, "on") || spa_streq(value, "true") || spa_streq(value, "1"))
+		on = true;
+	else if (spa_streq(value, "off") || spa_streq(value, "false") || spa_streq(value, "0"))
+		on = false;
+	else {
+		spa_log_warn(this->log, NAME " bt_wbs \"%s\" is neither on nor off", value);
+		return -EINVAL;
+	}
+
+	snprintf(this->bt_wbs, sizeof(this->bt_wbs), "%s", on ? "on" : "off");
+	DIAG(this, "Bluetooth codec: %s", on ? "wide-band (mSBC)" : "narrow-band (CVSD)");
+
+	/* Only an open Bluetooth stream is actually encoding right now. */
+	if (!this->stream || !this->open_is_bt ||
+	    spa_streq(this->open_bt_wbs, this->bt_wbs))
+		return 0;
+
+	spa_log_info(this->log, NAME " the Bluetooth codec changed - "
+			"reopening the HAL stream");
+	return hal_restart(this, this->started);
+}
+
 /* Volume during a call. No PCM flows through the graph while a call is up, so
  * the adapter's software gain has nothing to act on. The voice path's level
  * lives in the HAL and is set through set_voice_volume; PulseAudio's
@@ -1951,12 +2019,11 @@ static int apply_mode(struct impl *this, const char *mode)
 /* Called by the device: switch the route to a named device port. While the
  * HAL is not open yet the request is only remembered and applied at the next
  * hal_open(). */
-int droid_node_set_route(const char *mix_port, const char *device_port);
+int droid_node_set_route(const char *mix_port, const char *route);
 
-int droid_node_set_route(const char *mix_port, const char *device_port)
+static struct impl *node_by_mix_port(const char *mix_port)
 {
 	struct impl *this = NULL;
-	int res = -ENOENT;
 	unsigned i;
 
 	pthread_mutex_lock(&registry.lock);
@@ -1967,13 +2034,18 @@ int droid_node_set_route(const char *mix_port, const char *device_port)
 		}
 	}
 	pthread_mutex_unlock(&registry.lock);
+	return this;
+}
+
+int droid_node_set_route(const char *mix_port, const char *route)
+{
+	struct impl *this = node_by_mix_port(mix_port);
 
 	if (!this)
 		return -ENOENT;
-
-	res = apply_route(this, device_port);
-	return res;
+	return apply_route(this, route);
 }
+
 
 static void registry_add(struct impl *this)
 {

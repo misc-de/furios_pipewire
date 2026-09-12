@@ -57,6 +57,17 @@ void hal_stub_reset(void)
 
 /* --- the stream ----------------------------------------------------------- */
 
+/* Append to the running list, keeping the order the HAL saw them in. */
+static void note_parameters(const char *kv)
+{
+	size_t len = strlen(hal_stub.all_parameters);
+
+	if (!kv)
+		return;
+	snprintf(hal_stub.all_parameters + len, sizeof(hal_stub.all_parameters) - len,
+			"%s%s", len ? ";" : "", kv);
+}
+
 static ssize_t stub_write(struct audio_stream_out *stream, const void *buffer,
 		size_t bytes)
 {
@@ -106,6 +117,7 @@ static int stub_set_parameters(struct audio_hw_device *dev, const char *kv)
 {
 	(void) dev;
 	snprintf(hal_stub.last_parameters, sizeof(hal_stub.last_parameters), "%s", kv);
+	note_parameters(kv);
 	hal_stub.parameter_calls++;
 	return hal_stub.set_parameters_result;
 }
@@ -272,6 +284,7 @@ int pa_droid_set_parameters(pa_droid_hw_module *hw, const char *parameters)
 	(void) hw;
 	snprintf(hal_stub.last_parameters, sizeof(hal_stub.last_parameters), "%s",
 			parameters ? parameters : "");
+	note_parameters(parameters);
 	hal_stub.parameter_calls++;
 	return hal_stub.set_parameters_result;
 }

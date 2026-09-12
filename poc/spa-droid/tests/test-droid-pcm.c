@@ -900,6 +900,88 @@ static void test_bluetooth_reopen(void)
 	free_node(this);
 }
 
+/* The codec on the Bluetooth link.
+ *
+ * bt_wbs is a module parameter and the HAL reads it when the stream is
+ * opened, so it has to be right beforehand - and changing it under an open
+ * Bluetooth stream means reopening, exactly as crossing into Bluetooth does.
+ * Getting it wrong is silence that measures perfectly: on the phone the link
+ * stood, BTCVSD Tx Irq was on, the HAL held pcmC0D55p, and the earbuds - busy
+ * decoding CVSD bytes as mSBC - played nothing at all.
+ */
+static void test_bt_codec(void)
+{
+	struct impl *this;
+	unsigned opens;
+
+	section("the codec the Bluetooth link was negotiated with");
+	reset_all();
+	this = make_node(false, playback_info());
+	if (!check("the node is there", this != NULL))
+		return;
+
+	check_int("a codec is accepted before anything is open", 0,
+			apply_bt_wbs(this, "on"));
+	check_int("nonsense is refused", -EINVAL, apply_bt_wbs(this, "sometimes"));
+	check_str("and the refusal changes nothing", "on", this->bt_wbs);
+
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-bluetooth_sco");
+	hal_stub.all_parameters[0] = '\0';
+	check_int("the stream opens", 0, hal_open(this));
+	check("the codec reached the HAL", strstr(hal_stub.all_parameters, "bt_wbs=on") != NULL);
+	check("and BT_SCO=on did too", strstr(hal_stub.all_parameters, "BT_SCO=on") != NULL);
+	/* The order matters: the HAL reads both while opening, and a codec that
+	 * arrives after BT_SCO=on is a codec the stream did not get. */
+	check("the codec came first",
+			strstr(hal_stub.all_parameters, "bt_wbs=on") <
+			strstr(hal_stub.all_parameters, "BT_SCO=on"));
+
+	/* Changing it under an open Bluetooth stream has to reopen: the HAL read
+	 * the old value when it opened. */
+	opens = hal_stub.output_opens;
+	check_int("switching to narrow-band is accepted", 0, apply_bt_wbs(this, "off"));
+	check_int("and reopens the stream", opens + 1, hal_stub.output_opens);
+
+	/* The same value twice is not a change. */
+	opens = hal_stub.output_opens;
+	check_int("the same codec again is accepted", 0, apply_bt_wbs(this, "off"));
+	check_int("and does not reopen", opens, hal_stub.output_opens);
+
+	hal_close(this);
+	free_node(this);
+
+	/* Away from Bluetooth the codec is only remembered - there is nothing to
+	 * reopen for, and tearing down a speaker stream would be a gap in the
+	 * audio for nothing. */
+	reset_all();
+	this = make_node(false, playback_info());
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-speaker");
+	hal_open(this);
+	opens = hal_stub.output_opens;
+	check_int("a codec change off Bluetooth is accepted", 0,
+			apply_bt_wbs(this, "on"));
+	check_int("and reopens nothing", opens, hal_stub.output_opens);
+	check_str("but is remembered for the next open", "on", this->bt_wbs);
+	hal_close(this);
+	free_node(this);
+
+	/* And when nobody ever said which codec: the HAL stays on its narrow-band
+	 * default, which is a working link that the headset cannot decode. Open
+	 * it, but do not pretend it is fine. */
+	reset_all();
+	this = make_node(false, playback_info());
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-bluetooth_sco");
+	hal_stub.all_parameters[0] = '\0';
+	check_int("Bluetooth opens even with no codec named", 0, hal_open(this));
+	check("and nothing about a codec was invented",
+			strstr(hal_stub.all_parameters, "bt_wbs") == NULL);
+	hal_close(this);
+	free_node(this);
+}
+
 static void test_registry(void)
 {
 	struct impl *sink, *source;
@@ -2330,6 +2412,7 @@ int main(void)
 	test_route_names();
 	test_apply_route();
 	test_bluetooth_reopen();
+	test_bt_codec();
 	test_registry();
 	test_apply_mode();
 	test_apply_mode_details();

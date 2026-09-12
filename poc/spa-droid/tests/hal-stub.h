@@ -24,6 +24,10 @@ struct hal_stub {
 	float volume_left, volume_right, voice_volume;
 	int mode;
 	char last_route[64], last_parameters[128], last_audio_source[64];
+	/* Every parameter sent since the last reset, joined by ";". The last one
+	 * alone cannot answer "did it send bt_wbs before BT_SCO", and that order
+	 * is the whole point of the codec handling. */
+	char all_parameters[512];
 	char last_input_device[64];
 
 	/* what it should answer */

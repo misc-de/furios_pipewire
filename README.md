@@ -720,16 +720,20 @@ by reasoning:
    reopen there would buy nothing and cost a gap in the audio. If the new
    route cannot be opened, the node goes back to the one that was working
    rather than being left without a stream.
-5. **The card was handing the node the wrong name.** There are two ways a
-   route reaches the node: while it runs, PipeWire forwards the active route's
-   props and `droid.route` carries the route name; while it is idle those
-   props are lost and `droid_node_set_route()` is the only way left. That
-   second path passed the HAL's own port name ("Speaker") to a node that
-   resolves names through `pa_droid_output_port_name()`, which only ever
-   yields route names ("output-speaker"). Nothing ever matched, every such
-   call returned `-ENOENT`, and a route chosen while nothing played simply
-   never arrived. It reads as "the route property only works while the node
-   runs" - which is what this repo used to claim, and it was our own bug.
+5. **Only one road actually reaches a node, and it is `droid.lua`.** The card
+   runs inside WirePlumber's process and the nodes inside PipeWire's. A
+   function call between them - `droid_node_set_route()` - therefore looks up
+   an empty registry and returns `-ENOENT` every time, whatever name it is
+   given. And the props the card publishes on its routes do not travel either:
+   measured with the card publishing `droid.bt-wbs` and `droid.route` in one
+   struct, the node received `droid.route` and nothing else. That one arrives
+   because `droid.lua` reads the active route and sends the name on itself
+   (`setNodeProp`). **So anything that has to reach a node goes through
+   `droid.lua`.** The direct call was also passing the HAL's port name
+   ("Speaker") where a route name ("output-speaker") was expected, which is
+   fixed too - but the process boundary is the reason that path never worked,
+   and "the route property only reaches the node while it runs" was never the
+   whole story.
 
 **Both sides have to agree on the codec, and nothing makes them.** The HAL
 encodes narrow-band CVSD unless it is told otherwise, while WirePlumber
@@ -747,10 +751,25 @@ Measured with the same tone each time:
 
 So the HAL does wide-band, it just has to be told: `bt_wbs=on` flips
 `BTCVSD Band` from NB to WB and `Speech_BT_SCO_WB` to on, both observable in
-the mixer. `probe-bt-sco-out --wbs` sends it. What is missing is the part that
-tells the plugin which codec BlueZ negotiated - see **Still open**. This is
-also why the measurement below once worked and later did not: the profile
-happened to be CVSD that night.
+the mixer. `probe-bt-sco-out --wbs` sends it by hand.
+
+**Who tells the plugin:** `droid-bluetooth-call.lua` picks the headset's
+profile, so it is the one place that knows the codec - `headset-head-unit` is
+mSBC, `headset-head-unit-cvsd` is CVSD - and it sends `droid.bt-wbs` straight
+to both nodes before it sets the routes. Both, because `bt_wbs` belongs to the
+HAL module rather than to one stream and either node may open the next one;
+before the routes, because setting a route is what makes the HAL open a stream
+and the HAL reads the parameter while opening. A profile it does not recognise
+tells the nodes nothing at all: the HAL then keeps its narrow-band default and
+says so in the log, which beats a guess that is a coin toss between working
+audio and silence.
+
+Verified on the phone, end to end: codec announced, `bt_wbs=on` and
+`BT_SCO=on` sent before the open, HAL on `pcmC0D55p`, `BTCVSD Band` on WB -
+and the tone heard in the earbuds.
+
+This is also why the measurement below once worked and later did not: the
+profile happened to be CVSD that night.
 
 The result, with the controls that make it an answer rather than an impression:
 
@@ -772,12 +791,6 @@ happily called that "real audio" until it was given an RMS threshold.
 
 ### Still open
 
-- **Nothing tells the plugin which codec BlueZ negotiated.** Until it does,
-  a Bluetooth call over the wide-band profile is silent - see the table above.
-  The plugin cannot ask BlueZ itself; the codec is known on the WirePlumber
-  side, which already switches the Bluetooth card, so it would travel the same
-  way `droid.route` does. Forcing the CVSD profile for calls would also work
-  and costs the wide-band voice quality.
 - **A real call has not been through this yet.** Whether the headset opens its
   microphone more readily once `AT+CLCC` reports an actual call is untested.
   PipeWire answers that question out of ModemManager, but only when
