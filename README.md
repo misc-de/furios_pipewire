@@ -65,7 +65,7 @@ from one boot to the next.
 | Bluetooth call (HFP) | works - needs the codec announced *and* the link held, see FINDINGS |
 | Bluetooth microphone outside a call | works - `audioctl bt-mic`, measured and heard |
 | which process gets the HFP profile | settled - ofono no longer registers it |
-| holding the SCO link for the length of a call | **open** - the last piece of an automatic BT call |
+| holding the SCO link during a call | works - `furios-audio-sco-hold`, heard end to end |
 | echo during a call | **open** |
 | `deep_buffer` / `compress_offload` for lower power | **unused** |
 | `droid-sink.monitor` | **broken** - reads silence whatever plays |
@@ -165,10 +165,11 @@ Everything reachable without hardware is at **100 %**:
 | `wireplumber/droid-bluetooth-call.lua` | 100 % of 172 |
 | `wireplumber/droid-default-sink-policy.lua` | 100 % of 61 |
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
-| `audioctl` | 100 % of 333 |
+| `audioctl` | 100 % of 463 |
 | `tools/furios-audio-callaudio-refresh` | 100 % of 9 |
 | `gui/furios-audio-switch.py` | 100 % of 273 |
-| `tools/furios-audio-pause-on-disconnect.py` | 100 % of 95 |
+| `tools/furios-audio-pause-on-disconnect.py` | 100 % of 115 |
+| `tools/furios-audio-sco-hold.py` | 100 % of 184 |
 | `gen-pipewire-hal-conf.py` | 100 % of 28 |
 
 How the stubs work and why each suite is built the way it is:
@@ -270,15 +271,26 @@ tells the nodes which codec was negotiated, and routes the card to
 opens the stream. It gives up and hands the call back to the phone rather than
 fight callaudiod for the route.
 
-**It is off because it is not finished, and this is what is missing.** All of
-that was measured working in a real call on 2026-09-12 - and the call was still
-silent both ways. A hands-free profile means the card *can* carry a link; it
-does not make one exist. The link exists only while a stream is active on
-`bluez_output.*`, and in a call nobody opens one, because the voice path runs
-modem <-> DSP and never reaches the host. The same call with
-`audioctl bt-mic on` holding a stream of zeroes underneath it was heard in both
-directions. Until something holds that link for the length of a call, leave the
-setting off: a call on the earpiece beats a call with no audio.
+**Routing alone is not enough, and that is what `furios-audio-sco-hold` is
+for.** All of the above was measured working in a real call on 2026-09-12 - and
+the call was still silent both ways. A hands-free profile means the card *can*
+carry a link; it does not make one exist. The link exists only while a stream
+is active on `bluez_output.*`, and in a call nobody opens one, because the
+voice path runs modem <-> DSP and never reaches the host.
+
+So the service does: it watches ofono for calls, waits for the hands-free
+profile to appear, and holds a stream of zeroes on the Bluetooth output until
+the call ends. With the setting on and the service running, a call went to the
+headset by itself and was heard in both directions (15:33, two seconds from
+ringing to held link). It holds nothing unless the card is already in a
+hands-free profile, so it costs nothing while the setting is off - in the A2DP
+profile a hold would keep music Bluetooth open rather than build an SCO link,
+which is a trap it is written to avoid.
+
+    systemctl --user status furios-audio-sco-hold    # enabled on the first switch
+
+The setting is still off by default. One call is one call; turn it on, live
+with it for a while, and if it earns its keep the default can follow.
 
 **Recording from the headset outside a call** - a voice memo, a dictation app,
 anything that is not a phone call:

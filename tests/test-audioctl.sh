@@ -787,8 +787,19 @@ check "and a real signal succeeds" "0" \
 
 # A test taken with no hold is silence whatever the microphone does, and it
 # looks exactly like a broken headset. Say so before the number appears.
+# Collected whole and then searched, rather than piped into grep -q: -q closes
+# the pipe on its first match, bt_mic dies of SIGPIPE right after the warning,
+# and the measurement below it never runs - so the warning would be all this
+# test ever proved.
+mic_out=$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; rm -f "$STUBDIR/furios-audio-sco-hold.pid"; MIC_FIXTURE=silence bt_mic test 1 2>&1')
 check "a test with no hold warns before it measures" "yes" \
-    "$(with_audioctl 'XDG_RUNTIME_DIR="$STUBDIR"; rm -f "$STUBDIR/furios-audio-sco-hold.pid"; MIC_FIXTURE=silence bt_mic test 1 2>&1 | grep -q "nothing is holding the link open" && echo yes || echo no')"
+    "$(printf '%s' "$mic_out" | grep -q "nothing is holding the link open" && echo yes || echo no)"
+# And it measures anyway. The warning explains a silent recording; refusing to
+# record would leave nothing to explain.
+check "and it measures all the same" "yes" \
+    "$(printf '%s' "$mic_out" | grep -q "Recording 1 s" && echo yes || echo no)"
+check "the number arrives after the warning" "yes" \
+    "$(printf '%s' "$mic_out" | grep -qE "digital silence|distinct value" && echo yes || echo no)"
 
 # --- preflight, when something is missing ----------------------------------
 check "pw-tunnel without its module is refused" "yes" \
@@ -873,8 +884,29 @@ check "and bt-call reaches the handler from the command line" "yes" \
     "$(run_audioctl bt-call off | grep -q "bt-call" && echo yes || echo no)"
 check "bt-mic without a word is refused" "yes" \
     "$(run_audioctl bt-mic | grep -q "needs" && echo yes || echo no)"
+# Read the whole thing into a variable rather than piping it into grep -q:
+# grep -q closes the pipe the moment it matches, audioctl dies of SIGPIPE after
+# its first line, and every line below that looks untested because it never
+# ran. The status block is five lines and each one is a thing somebody needs.
+bt_status=$(run_audioctl bt-mic status 2>/dev/null)
 check "and bt-mic reaches the handler from the command line" "yes" \
-    "$(run_audioctl bt-mic status | grep -q "Bluetooth card" && echo yes || echo no)"
+    "$(printf '%s' "$bt_status" | grep -q "Bluetooth card" && echo yes || echo no)"
+check "bt-mic status names the phone ports" "yes" \
+    "$(printf '%s' "$bt_status" | grep -q "Phone ports:" && echo yes || echo no)"
+# The hold is the difference between a working headset microphone and silence
+# that measures like a broken one, so status has to say which it is.
+check "bt-mic status says whether the link is held" "yes" \
+    "$(printf '%s' "$bt_status" | grep -qE "Link hold: +(running|not running)" && echo yes || echo no)"
+check "bt-mic status reports the HAL Bluetooth PCM" "yes" \
+    "$(printf '%s' "$bt_status" | grep -q "HAL Bluetooth PCM:" && echo yes || echo no)"
+# With a pid file naming a process that is alive, the same line has to read
+# "running" - the branch that says so is the one nobody sees until it is wrong.
+check "a live hold is reported as running" "yes" \
+    "$(mkdir -p "$STUBDIR/run"
+       XDG_RUNTIME_DIR="$STUBDIR/run" AUDIOCTL_HOLD_PID=$$ \
+       sh -c 'printf "%s\n" "$AUDIOCTL_HOLD_PID" > "$XDG_RUNTIME_DIR/furios-audio-sco-hold.pid"' 2>/dev/null
+       XDG_RUNTIME_DIR="$STUBDIR/run" run_audioctl bt-mic status 2>/dev/null |
+           grep -q "Link hold:          running" && echo yes || echo no)"
 
 
 stub_systemctl pipewire-pulse.service furios-audio-apply.service

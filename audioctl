@@ -553,6 +553,24 @@ ensure_callaudio_refresh() {
     return 0
 }
 
+# A call routed to a headset is still silent without a link to carry it: the
+# profile says the card CAN carry SCO, and only a stream on bluez_output makes
+# one exist. Nothing opens one during a call - the voice path runs modem <->
+# DSP and never reaches the host - so this service does. Measured 2026-09-12:
+# same call, same routing, silent without it and heard with it.
+#
+# Harmless while the routing is off, because it holds nothing unless the card
+# is already in a hands-free profile. Like the others, only the user can
+# enable their own unit.
+ensure_sco_hold() {
+    uctl is-enabled furios-audio-sco-hold.service >/dev/null 2>&1 && return 0
+    if uctl cat furios-audio-sco-hold.service >/dev/null 2>&1; then
+        run uctl enable --now furios-audio-sco-hold.service >/dev/null 2>&1 \
+            && info "the Bluetooth link is now held open during a call"
+    fi
+    return 0
+}
+
 # The other half of the safety net: furios-audio-apply.service writes the
 # configuration before the stack, this one checks after it. Enabled the same
 # way - only the user can enable their own unit.
@@ -582,6 +600,7 @@ switch_to() {
     ensure_boot_check
     ensure_pause_on_disconnect
     ensure_callaudio_refresh
+    ensure_sco_hold
     preflight "$p"
     printf 'switching: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"

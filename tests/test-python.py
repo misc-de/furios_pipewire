@@ -12,7 +12,9 @@ import importlib.util
 import os
 import io
 import re
+import subprocess as subprocess_real
 import sys
+import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -40,6 +42,8 @@ def load(path, name):
 gen = load(ROOT / "gen-pipewire-hal-conf.py", "gen_hal_conf")
 watcher = load(ROOT / "tools" / "furios-audio-pause-on-disconnect.py", "watcher")
 switcher = load(ROOT / "gui" / "furios-audio-switch.py", "switcher")
+sco = load(ROOT / "tools" / "furios-audio-sco-hold.py", "sco_hold")
+hands_free_sink_real = sco.hands_free_sink
 
 
 class ConfigGenerator(unittest.TestCase):
@@ -983,6 +987,430 @@ class PauseOnDisconnect(unittest.TestCase):
         self.assertIn('"Pause"', src)
         self.assertNotIn("set-sink-mute", src)
         self.assertNotIn("set_mute", src)
+
+
+class FakePactl:
+    """Stands in for the two pactl calls hands_free_sink() makes."""
+
+    def __init__(self, cards, sinks):
+        self.cards, self.sinks = cards, sinks
+
+    def run(self, argv, **_kwargs):
+        which = "cards" if argv[-1] == "cards" else "sinks"
+        return types.SimpleNamespace(stdout=self.cards if which == "cards" else self.sinks)
+
+
+CARDS_HANDS_FREE = """Card #144
+\tName: bluez_card.F4_9D_8A_7C_5C_66
+\tActive Profile: headset-head-unit
+"""
+CARDS_A2DP = """Card #144
+\tName: bluez_card.F4_9D_8A_7C_5C_66
+\tActive Profile: a2dp-sink
+"""
+SINKS = "119\tdroid-sink\tPipeWire\n170\tbluez_output.F4_9D_8A_7C_5C_66.1\tPipeWire\n"
+
+
+class ScoHoldFindsTheRightSink(unittest.TestCase):
+    """Which sink may be held, and - far more important - which may not.
+
+    In the A2DP profile bluez_output exists too, under the same name. A hold
+    placed on THAT is not an SCO link at all: it holds music Bluetooth open for
+    the length of a call, and the call stays silent while everything looks
+    busy.
+    """
+
+    def use(self, cards, sinks=SINKS):
+        sco.subprocess = FakePactl(cards, sinks)
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+
+    def test_the_hands_free_profile_gives_the_sink(self):
+        self.use(CARDS_HANDS_FREE)
+        self.assertEqual(sco.hands_free_sink(), "bluez_output.F4_9D_8A_7C_5C_66.1")
+
+    def test_a2dp_gives_nothing(self):
+        self.use(CARDS_A2DP)
+        self.assertIsNone(sco.hands_free_sink())
+
+    def test_the_narrow_band_profile_counts_too(self):
+        self.use(CARDS_HANDS_FREE.replace("headset-head-unit", "headset-head-unit-cvsd"))
+        self.assertEqual(sco.hands_free_sink(), "bluez_output.F4_9D_8A_7C_5C_66.1")
+
+    def test_no_bluetooth_card_gives_nothing(self):
+        self.use("Card #118\n\tName: droid\n\tActive Profile: default\n")
+        self.assertIsNone(sco.hands_free_sink())
+
+    def test_a_profile_but_no_bluetooth_sink_gives_nothing(self):
+        self.use(CARDS_HANDS_FREE, sinks="119\tdroid-sink\tPipeWire\n")
+        self.assertIsNone(sco.hands_free_sink())
+
+    def test_the_droid_cards_profile_is_not_mistaken_for_the_headsets(self):
+        # The phone card is listed first and has an Active Profile of its own.
+        # Reading the wrong one would hold a link in the A2DP profile, which is
+        # the failure this whole function exists to avoid.
+        self.use("Card #118\n\tName: droid\n\tActive Profile: headset-head-unit\n"
+                 "Card #144\n\tName: bluez_card.X\n\tActive Profile: a2dp-sink\n")
+        self.assertIsNone(sco.hands_free_sink())
+
+
+class FakePopen:
+    """A process that is alive until somebody says otherwise."""
+
+    started = []
+
+    def __init__(self, argv, **_kwargs):
+        self.argv, self.pid, self._rc = argv, 4242, None
+        FakePopen.started.append(argv)
+
+    def poll(self):
+        return self._rc
+
+    def terminate(self):
+        self._rc = -15
+
+
+class ScoHoldBehaviour(unittest.TestCase):
+    """When it holds, when it refuses, and that it always lets go."""
+
+    def setUp(self):
+        FakePopen.started = []
+        self.fake = types.SimpleNamespace(Popen=FakePopen, DEVNULL=-3,
+                                          SubprocessError=Exception)
+        sco.subprocess = self.fake
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+
+    def hold_with(self, sink):
+        hold = sco.Hold()
+        sco.hands_free_sink = lambda: sink
+        self.addCleanup(setattr, sco, "hands_free_sink", hands_free_sink_real)
+        with redirect_stdout(io.StringIO()):
+            hold.begin()
+        return hold
+
+    def test_it_holds_when_the_profile_is_there(self):
+        self.hold_with("bluez_output.X")
+        self.assertEqual(len(FakePopen.started), 1)
+        argv = FakePopen.started[0]
+        self.assertEqual(argv[0], "paplay")
+        self.assertIn("--device=bluez_output.X", argv)
+        # 16 kHz mono silence: the rate SCO runs at. Anything else is resampled
+        # into a link that has no room for it.
+        self.assertIn("--rate=16000", argv)
+        self.assertIn("--channels=1", argv)
+        self.assertEqual(argv[-1], "/dev/zero")
+
+    def test_it_holds_nothing_without_a_hands_free_profile(self):
+        self.hold_with(None)
+        self.assertEqual(FakePopen.started, [])
+
+    def test_it_gives_up_rather_than_wait_forever(self):
+        hold = sco.Hold()
+        sco.hands_free_sink = lambda: None
+        self.addCleanup(setattr, sco, "hands_free_sink", hands_free_sink_real)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            hold.begin(waited=sco.MAX_WAIT_MS)
+        self.assertEqual(FakePopen.started, [])
+        # And it says why, naming the setting - a call that is silently not
+        # held looks exactly like a headset that is broken.
+        self.assertIn("furios.bluetooth-call-routing", out.getvalue())
+
+    def test_stopping_ends_the_stream(self):
+        hold = self.hold_with("bluez_output.X")
+        proc = hold.proc
+        with redirect_stdout(io.StringIO()):
+            hold.stop()
+        self.assertIsNone(hold.proc)
+        self.assertIsNotNone(proc.poll())
+
+    def test_stopping_twice_is_harmless(self):
+        hold = self.hold_with("bluez_output.X")
+        with redirect_stdout(io.StringIO()):
+            hold.stop()
+            hold.stop()
+
+    def test_a_second_call_does_not_start_a_second_stream(self):
+        hold = self.hold_with("bluez_output.X")
+        with redirect_stdout(io.StringIO()):
+            hold.begin()
+        self.assertEqual(len(FakePopen.started), 1)
+
+    def test_a_stream_that_keeps_dying_is_not_restarted_forever(self):
+        hold = self.hold_with("bluez_output.X")
+        with redirect_stdout(io.StringIO()):
+            for _ in range(sco.MAX_RESTARTS + 3):
+                hold._died(4242, 1)
+        # The first stream plus exactly MAX_RESTARTS replacements, and then it
+        # stops - not "at most", or a version that never restarts at all would
+        # pass this too.
+        self.assertEqual(len(FakePopen.started), sco.MAX_RESTARTS + 1)
+
+    def test_a_deliberate_stop_is_not_treated_as_a_death(self):
+        # stop() clears proc first; the child watch then fires. Restarting
+        # there would put the stream back up seconds after the call ended and
+        # leave the earbuds in hands-free.
+        hold = self.hold_with("bluez_output.X")
+        with redirect_stdout(io.StringIO()):
+            hold.stop()
+            hold._died(4242, 0)
+        self.assertEqual(len(FakePopen.started), 1)
+
+
+class OfonoBus:
+    """A system bus that answers ofono's two questions and records subscriptions."""
+
+    def __init__(self, modems=(), calls=None, fail=None):
+        self.modems = list(modems)
+        self.calls = calls or {}
+        self.fail = fail or set()
+        self.subscriptions = []
+
+    def call_sync(self, dest, path, iface, method, args, reply, flags,
+                  timeout, cancellable):
+        if method in self.fail:
+            raise sco.GLib.Error("ofono is not answering")
+        if method == "GetModems":
+            return FakeVariant([[(m, {}) for m in self.modems]])
+        if method == "GetCalls":
+            if path in self.fail:
+                raise sco.GLib.Error("modem went away")
+            return FakeVariant([[(c, {}) for c in self.calls.get(path, [])]])
+        raise AssertionError("unexpected call: %s" % method)
+
+    def signal_subscribe(self, *args):
+        self.subscriptions.append(args)
+        return 1
+
+
+class ScoHoldTalksToOfono(unittest.TestCase):
+    """Which calls it thinks are up - including the ones already up when it starts."""
+
+    def test_calls_already_up_are_found(self):
+        bus = OfonoBus(modems=["/ril_0"], calls={"/ril_0": ["/ril_0/voicecall01"]})
+        self.assertEqual(sco.existing_calls(bus), {"/ril_0/voicecall01"})
+
+    def test_no_calls_is_an_empty_set_not_an_error(self):
+        self.assertEqual(sco.existing_calls(OfonoBus(modems=["/ril_0"])), set())
+
+    def test_an_ofono_that_does_not_answer_is_survived(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            found = sco.existing_calls(OfonoBus(fail={"GetModems"}))
+        self.assertEqual(found, set())
+        self.assertIn("could not ask ofono", out.getvalue())
+
+    def test_one_modem_failing_does_not_lose_the_others(self):
+        bus = OfonoBus(modems=["/ril_0", "/ril_1"],
+                       calls={"/ril_1": ["/ril_1/voicecall01"]},
+                       fail={"/ril_0"})
+        self.assertEqual(sco.existing_calls(bus), {"/ril_1/voicecall01"})
+
+
+class ScoHoldMain(unittest.TestCase):
+    """main() only wires things up; the handlers are what decide."""
+
+    def setUp(self):
+        FakePopen.started = []
+        sco.subprocess = types.SimpleNamespace(Popen=FakePopen, DEVNULL=-3,
+                                               SubprocessError=Exception)
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        sco.hands_free_sink = lambda: "bluez_output.X"
+        self.addCleanup(setattr, sco, "hands_free_sink", hands_free_sink_real)
+        self.bus = OfonoBus()
+        self.ran = []
+        originals = (sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which)
+        self.addCleanup(self.restore, originals)
+        sco.Gio.bus_get_sync = lambda _kind, _c: self.bus
+        sco.GLib.MainLoop = lambda: type(
+            "Loop", (), {"run": lambda _self: self.ran.append(True),
+                         "quit": lambda _self: None})()
+        sco.shutil.which = lambda _tool: "/usr/bin/" + _tool
+
+    def restore(self, originals):
+        sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which = originals
+
+    def run_main(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            sco.main()
+        return out.getvalue()
+
+    def handlers(self):
+        # CallAdded was subscribed first, CallRemoved second.
+        return self.bus.subscriptions[0][-1], self.bus.subscriptions[1][-1]
+
+    def test_it_subscribes_to_both_ends_of_a_call(self):
+        text = self.run_main()
+        self.assertIn("watching ofono", text)
+        self.assertTrue(self.ran, "it has to keep running, not return at once")
+        members = [args[2] for args in self.bus.subscriptions]
+        self.assertEqual(members, ["CallAdded", "CallRemoved"])
+
+    def test_a_call_starts_a_hold_and_its_end_stops_it(self):
+        self.run_main()
+        added, removed = self.handlers()
+        with redirect_stdout(io.StringIO()):
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+            self.assertEqual(len(FakePopen.started), 1)
+            removed(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+        self.assertEqual(FakePopen.started[0][0], "paplay")
+
+    def test_a_second_call_does_not_start_a_second_hold(self):
+        # Call waiting: a second call arrives while the first is up. One link
+        # is one link; starting another stream would not make a second one.
+        self.run_main()
+        added, _removed = self.handlers()
+        with redirect_stdout(io.StringIO()):
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall02"]))
+        self.assertEqual(len(FakePopen.started), 1)
+
+    def test_the_hold_survives_one_of_two_calls_ending(self):
+        self.run_main()
+        added, removed = self.handlers()
+        with redirect_stdout(io.StringIO()):
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall02"]))
+            hung_up = FakeVariant(["/ril_0/voicecall02"])
+            removed(None, None, None, None, None, hung_up)
+        # One call is still up, so the link must still be held - the other
+        # party is still on it.
+        self.assertEqual(len(FakePopen.started), 1)
+
+    def test_starting_during_a_call_holds_straight_away(self):
+        self.bus = OfonoBus(modems=["/ril_0"], calls={"/ril_0": ["/ril_0/voicecall01"]})
+        text = self.run_main()
+        self.assertIn("started during a call", text)
+        self.assertEqual(len(FakePopen.started), 1)
+
+    def test_without_paplay_it_says_so_and_stops(self):
+        sco.shutil.which = lambda tool: None if tool == "paplay" else "/usr/bin/pactl"
+        text = self.run_main()
+        self.assertIn("paplay is not installed", text)
+        self.assertFalse(self.ran, "there is nothing to watch for")
+
+
+class ScoHoldSurvivesBadDays(unittest.TestCase):
+    """The failures that must not take the phone's audio with them."""
+
+    def test_a_pactl_that_does_not_answer_holds_nothing(self):
+        class Broken:
+            SubprocessError = Exception
+
+            def run(self, *_a, **_k):
+                raise OSError("pactl is not there")
+
+        sco.subprocess = Broken()
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertIsNone(sco.hands_free_sink())
+        self.assertIn("could not ask pactl", out.getvalue())
+
+    def test_a_pactl_that_answers_about_cards_but_not_sinks(self):
+        class HalfBroken:
+            SubprocessError = Exception
+
+            def run(self, argv, **_k):
+                if argv[-1] == "cards":
+                    return types.SimpleNamespace(stdout=CARDS_HANDS_FREE)
+                raise OSError("gone between the two questions")
+
+        sco.subprocess = HalfBroken()
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        with redirect_stdout(io.StringIO()):
+            self.assertIsNone(sco.hands_free_sink())
+
+    def test_a_paplay_that_will_not_start_is_not_a_crash(self):
+        class NoPopen:
+            DEVNULL = -3
+            SubprocessError = Exception
+
+            def Popen(self, *_a, **_k):
+                raise OSError("no such binary")
+
+        sco.subprocess = NoPopen()
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        hold = sco.Hold()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            hold.start_on("bluez_output.X")
+        self.assertIsNone(hold.proc)
+        self.assertIn("could not start the hold", out.getvalue())
+
+    def test_a_call_that_never_ends_does_not_hold_the_link_all_day(self):
+        # A missed CallRemoved would otherwise leave the earbuds in hands-free
+        # for the rest of the day: music narrow-band and mono, and nothing on
+        # screen to say why.
+        FakePopen.started = []
+        sco.subprocess = types.SimpleNamespace(Popen=FakePopen, DEVNULL=-3,
+                                               SubprocessError=Exception)
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        hold = sco.Hold()
+        with redirect_stdout(io.StringIO()):
+            hold.start_on("bluez_output.X")
+            proc = hold.proc
+            hold._too_long()
+        self.assertIsNone(hold.proc)
+        self.assertIsNotNone(proc.poll())
+
+
+class ScoHoldLetsGoOnTheWayOut(unittest.TestCase):
+    """Being stopped has to release the link, or the earbuds stay in hands-free.
+
+    systemctl stop, a session ending, a reboot: whatever the reason, a hold
+    that outlives the service leaves music narrow-band and mono with nothing on
+    screen to say why.
+    """
+
+    def test_a_termination_signal_stops_the_hold(self):
+        FakePopen.started = []
+        sco.subprocess = types.SimpleNamespace(Popen=FakePopen, DEVNULL=-3,
+                                               SubprocessError=Exception)
+        sco.hands_free_sink = lambda: "bluez_output.X"
+        bus = OfonoBus(modems=["/ril_0"], calls={"/ril_0": ["/ril_0/voicecall01"]})
+        quits, handlers = [], []
+        originals = (sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which,
+                     sco.unix_signal_add)
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        self.addCleanup(setattr, sco, "hands_free_sink", hands_free_sink_real)
+
+        def restore():
+            (sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which,
+             sco.unix_signal_add) = originals
+        self.addCleanup(restore)
+
+        sco.Gio.bus_get_sync = lambda _kind, _c: bus
+        sco.GLib.MainLoop = lambda: type(
+            "Loop", (), {"run": lambda _s: None,
+                         "quit": lambda _s: quits.append(True)})()
+        sco.shutil.which = lambda tool: "/usr/bin/" + tool
+        sco.unix_signal_add = lambda _prio, _sig, fn: handlers.append(fn)
+
+        with redirect_stdout(io.StringIO()):
+            sco.main()
+            # SIGTERM and SIGINT both, and both have to let go.
+            self.assertEqual(len(handlers), 2)
+            proc = None
+            for line in FakePopen.started:
+                self.assertEqual(line[0], "paplay")
+            handlers[0]()
+        self.assertTrue(quits, "the loop has to be asked to stop")
+
+    def test_without_the_new_signal_module_the_old_spelling_is_used(self):
+        # Both spellings are in the wild; the phone has the new one. Load the
+        # module again with it hidden and check the fallback is real.
+        import gi as gi_mod
+        saved = sys.modules.pop("gi.repository.GLibUnix", None)
+        removed = gi_mod.repository.GLibUnix
+        del gi_mod.repository.GLibUnix
+        try:
+            again = load(ROOT / "tools" / "furios-audio-sco-hold.py", "sco_again")
+            self.assertIs(again.unix_signal_add, again.GLib.unix_signal_add)
+        finally:
+            gi_mod.repository.GLibUnix = removed
+            if saved is not None:
+                sys.modules["gi.repository.GLibUnix"] = saved
 
 
 if __name__ == "__main__":

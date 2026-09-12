@@ -45,6 +45,11 @@ executable, missing = set(), []
 heredoc_end = None
 continued = False
 statement_start = 0
+# A single-quoted string that runs over several lines is data too, exactly like
+# a here-document: the awk program inside bt_node_id spans three lines, bash
+# announces the line the command starts on and never the two below it, and
+# those two then read as lines no test could reach. They are reached - by awk.
+in_quote = False
 for n, line in enumerate(open(target, errors="replace"), 1):
     s = line.strip()
     stripped = line.rstrip()
@@ -81,6 +86,14 @@ for n, line in enumerate(open(target, errors="replace"), 1):
     # and variables, so match on the shape rather than on the character set -
     # an empty branch used to count as a line no test could ever reach.
     if re.match(r"^[A-Za-z0-9_*?|.\-\[\]]+\)$", s) or re.match(r"^\S.*\)\s*;;$", s):
+        continue
+    was_in_quote = in_quote
+    # Count the quotes this line opens or closes. Escaped quotes cannot occur
+    # inside a single-quoted string - that is the whole point of them - so a
+    # plain count is exact here rather than approximate.
+    if line.count("'") % 2:
+        in_quote = not in_quote
+    if was_in_quote:
         continue
     executable.add(n)
 

@@ -1,0 +1,15 @@
+[Unit]
+# Holds an SCO link open for the length of a call, so that a call routed to a
+# Bluetooth headset is actually audible. The routing itself is
+# droid-bluetooth-call.lua's job; this only keeps the link up underneath it.
+Description=Hold the Bluetooth SCO link open during a call
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/furios-audio-sco-hold
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

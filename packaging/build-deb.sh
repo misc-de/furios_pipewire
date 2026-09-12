@@ -61,6 +61,8 @@ install -Dm755 tools/furios-audio-pause-on-disconnect.py \
     "$STAGE/usr/bin/furios-audio-pause-on-disconnect"
 install -Dm755 tools/furios-audio-callaudio-refresh \
     "$STAGE/usr/bin/furios-audio-callaudio-refresh"
+install -Dm755 tools/furios-audio-sco-hold.py \
+    "$STAGE/usr/bin/furios-audio-sco-hold"
 
 install -Dm644 tunnel.conf                    "$STAGE/usr/share/furios-audio/tunnel.conf"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$STAGE/tmp-hal.conf" >/dev/null
@@ -90,6 +92,8 @@ install -Dm644 furios-audio-pause-on-disconnect.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-pause-on-disconnect.service"
 install -Dm644 furios-audio-callaudio-refresh.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-callaudio-refresh.service"
+install -Dm644 furios-audio-sco-hold.service \
+    "$STAGE/usr/lib/systemd/user/furios-audio-sco-hold.service"
 
 install -Dm644 gui/de.furios.audioswitch.desktop \
     "$STAGE/usr/share/applications/de.furios.audioswitch.desktop"

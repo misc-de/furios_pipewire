@@ -123,7 +123,10 @@ def install():
     gi.require_version = lambda *a, **k: None
     repository = types.ModuleType("gi.repository")
 
-    for name in ("Gtk", "Adw", "Gio", "GLib", "GObject", "Gdk",
+    # GLibUnix is where GLib.unix_signal_add moved to. Without it here the
+    # only path a test could take is the fallback, which is not the one the
+    # phone takes.
+    for name in ("Gtk", "Adw", "Gio", "GLib", "GLibUnix", "GObject", "Gdk",
                  "Polkit", "PolkitAgent"):
         module = _factory(name)
         setattr(repository, name, module)

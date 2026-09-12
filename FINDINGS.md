@@ -1275,3 +1275,43 @@ They show host streams - a recording, a playback - not telephony. Reading them
 during a call and concluding anything from them is reading the wrong dial: for
 the microphone outside a call they are still the only reading that settles
 where the samples came from, but for a call the ear is the instrument.
+
+### The service that holds it, and two ways of measuring that lie
+
+`furios-audio-sco-hold` is the missing half: it watches ofono for calls, waits
+for the hands-free profile to appear, and keeps a stream of zeroes on
+`bluez_output.*` until the call ends. Measured 2026-09-12, 15:33, with nothing
+else in play - no `bt-mic`, no port watcher, no hand-set profile:
+
+    15:33:34  call voicecall01 - waiting for the hands-free profile
+    15:33:36  holding the link on bluez_output.F4_9D_8A_7C_5C_66.1 (pid 27657)
+    15:34:09  call ended
+    15:34:09  hold stopped
+
+Two seconds from the call arriving to a held link, heard in both directions,
+and the card back on A2DP afterwards with nothing left running.
+
+It is deliberately narrow. It does not set the profile or the routes - that is
+droid-bluetooth-call.lua's job, it is hard to get right around callaudiod, and
+two things setting the same ports is what produced a call with no audio at all
+once before. And it refuses to hold anything unless the card is *already* in a
+hands-free profile, which is not fussiness: in the A2DP profile `bluez_output`
+exists too, under the same name, and a hold placed there keeps music Bluetooth
+open for the length of a call while the call stays silent and everything looks
+busy.
+
+Two measurements had to be corrected while writing the tests for it, and both
+were reading the wrong thing rather than reading it wrongly:
+
+  - **`grep -q` closes the pipe.** Three blocks of `audioctl` read as untested
+    because the test piped its output into `grep -q`: the match arrives on the
+    first line, grep exits, audioctl dies of SIGPIPE, and every line below
+    never runs. The coverage number said 97.42 %, the tests said they covered
+    it, and both were right about different things. Collect the output into a
+    variable and search it afterwards.
+
+  - **A multi-line single-quoted string is data, not code.** The `awk` program
+    inside `bt_node_id` spans three lines; bash announces the line the command
+    starts on and never the two below it, so they counted as lines no test
+    could reach. The same exception the coverage script already made for
+    here-documents applies to them.

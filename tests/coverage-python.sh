@@ -20,7 +20,8 @@ import os, re, sys
 root, out = sys.argv[1], sys.argv[2]
 wanted = ["gen-pipewire-hal-conf.py",
           "furios-audio-pause-on-disconnect.py",
-          "furios-audio-switch.py"]
+          "furios-audio-switch.py",
+          "furios-audio-sco-hold.py"]
 
 covers = {}
 for name in os.listdir(out):
