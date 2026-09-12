@@ -193,43 +193,43 @@ conversion and never show up in pipewire-pulse as a sink.
 The detour is necessary because device and node run in **different processes** -
 only the node holds the HAL stream.
 
-## The one thing that needs root
+## Nothing here needs root
 
-Switching the stack masks system units in `/etc/systemd/user` and writes one
-systemd drop-in. Everything else `audioctl` does runs as the user.
+A profile switch masks three units, writes one systemd drop-in and turns the
+droid monitor off or on. All three happen in the user's own configuration:
 
-That part used to be `sudo ln`, `sudo rm`, `sudo mv` and `sudo tee` straight
-out of `audioctl` - root for arbitrary commands with arbitrary arguments. It is
-now `/usr/libexec/furios-audio-helper`, which knows five operations and takes
-no paths from its caller at all: the unit names are checked against a list and
-every path is fixed in the helper. Masking is a symlink to `/dev/null`, and
-doing that to the wrong unit is how a phone stops booting.
+    ~/.config/systemd/user/                     masks and the drop-in
+    ~/.config/wireplumber/wireplumber.conf.d/   the monitor
 
-`pkexec` authenticates the caller against `de.furios.audioctl.configure`
-(`auth_self_keep`: your own password, remembered for a few minutes, so a switch
-asks once rather than once per step). This matters more than it looks, because
-FuriOS ships
+systemd and WirePlumber both read those **before** `/etc` and `/usr/share`, so
+the session can do the whole thing itself. There is no helper, no `pkexec`, no
+`sudo` and nothing for a sudoers line to allow.
+
+That is a recent change. It used to be `sudo ln`, `sudo rm`, `sudo mv` and
+`sudo tee` out of `audioctl`; then a helper behind polkit with five fixed
+operations; and the safety net at boot still needed passwordless `sudo`,
+because nobody is there to type anything. The line that made that work is the
+one FuriOS ships:
 
     furios ALL=(ALL) NOPASSWD:ALL
 
-in `/etc/sudoers` - the whole user has passwordless root, so `sudo` would never
-ask for anything. polkit does not go through sudo and is unaffected by that
-line.
+Nothing in this repository depends on it any more. Whether to keep it is now a
+question about the rest of the system, not about audio.
 
-**The switcher app brings its own password dialog.** polkit asks whatever
-authentication agent the session registered, and phosh registers none - so on
-this phone every polkit action fails with "No authentication agent found",
-ours included. `PasswordAgent` in `gui/furios-audio-switch.py` registers one
-while the app is open, and unregisters it on shutdown. In a terminal `pkexec`
-brings its own prompt, so `audioctl` works there either way; if neither is
-available the app says so in a toast rather than letting a switch fail with
-nothing on screen.
+**Coming from an older version:** masks and drop-ins left in `/etc/systemd/user`
+still win, and `audioctl` can no longer remove them. It says so when it
+matters, with the command that clears them:
 
-**The safety net at boot does not ask.** `furios-audio-apply.service` drops a
-test profile before the sound stack starts, and nobody is there to type a
-password - a safety net that stops to ask for one is not a safety net. It sets
-`AUDIOCTL_NONINTERACTIVE=1`, and `audioctl` then uses `sudo`, which that
-sudoers line lets through.
+    sudo audioctl migrate
+
+That is the only thing in `audioctl` that wants root, and it is meant to be run
+once.
+
+**The switcher app no longer handles passwords either.** It used to register a
+polkit authentication agent, because phosh registers none and every polkit
+action would otherwise fail with "No authentication agent found". With nothing
+left to authenticate, that came out - about 180 lines, a dependency on the
+polkit bindings, and a dialog that took a password.
 
 ## Switching at the push of a button
 

@@ -40,8 +40,16 @@ write_state() {
     ( umask 022; printf '%s\n' "$_v" > "$_f" ) || return 1
     chmod 0644 "$_f" 2>/dev/null
 }
-ETCU=${AUDIOCTL_ETCU:-/etc/systemd/user}
+# systemd --user reads ~/.config/systemd/user BEFORE /etc/systemd/user, and
+# WirePlumber reads ~/.config/wireplumber the same way. Everything audioctl
+# changes therefore lives in the user's own configuration - which is why none
+# of this needs root any more, and why there is no helper, no pkexec and no
+# sudoers line left to get wrong.
+USERCFG=${XDG_CONFIG_HOME:-$HOME/.config}
+ETCU=${AUDIOCTL_ETCU:-$USERCFG/systemd/user}
 DROPIN=$ETCU/pipewire.service.d/50-furios-audio.conf
+WPUSER=${AUDIOCTL_WPCONF_DIR:-$USERCFG/wireplumber/wireplumber.conf.d}
+WPOFF=$WPUSER/99-furios-droid-off.conf
 # Files can come from two sources: installed from the source tree
 # (/usr/local) or from the package (/usr). Both have to be found.
 first_existing() {
@@ -60,54 +68,126 @@ info() { printf '  %s\n' "$*"; }
 warn() { printf 'audioctl: %s\n' "$*" >&2; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
 
-[ "$(id -un)" = root ] && die "please run as the furios user, not as root - it asks for the password itself where it needs one."
+# Root is wrong for everything here except the one-off migration below: the
+# state audioctl writes belongs to the user whose session it is.
+if [ "$(id -un)" = root ] && [ "${1:-}" != migrate ]; then
+    die "please run as the furios user, not as root - nothing here needs it (except 'audioctl migrate', once)."
+fi
 
 uctl() { systemctl --user "$@"; }
 
-# --- the one privileged step -------------------------------------------------
+# --- the three things a profile switch changes ------------------------------
 #
-# Everything that needs root goes through furios-audio-helper, which knows five
-# operations and takes no paths from here at all. pkexec asks for the password
-# (see de.furios.audioctl.policy); polkit remembers it for a few minutes, so a
-# switch asks once rather than once per step.
+# None of them needs root: systemd and WirePlumber both look in the user's
+# configuration first, so masking a unit, dropping in a different ExecStart and
+# turning the droid monitor off all happen under $HOME.
 #
-# Not sudo: FuriOS ships "furios ALL=(ALL) NOPASSWD:ALL", so sudo would never
-# ask - and the point is to ask. sudo stays as the fallback for a system
-# without polkit, where the alternative would be no switching at all.
-HELPER=$(first_existing /usr/local/libexec/furios-audio-helper \
-                        /usr/libexec/furios-audio-helper)
-# Can anybody actually answer a password prompt right now?
-#
-# pkexec needs someone to ask. In a terminal it brings its own prompt; in the
-# graphical session the switcher app registers an agent while it is open.
-# Neither is true for the safety net that runs at boot to drop a test profile -
-# and a safety net that stops to ask for a password is not one, so that path
-# uses sudo, which FuriOS lets through without asking.
-can_ask() {
-    [ -n "${AUDIOCTL_NONINTERACTIVE:-}" ] && return 1
-    command -v pkexec >/dev/null 2>&1 || return 1
-    [ -x "$HELPER" ] || return 1
-    [ -t 0 ] && return 0
-    [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && return 0
+# This used to be furios-audio-helper behind pkexec, with a sudo fallback for
+# the boot-time safety net - and that fallback is why FuriOS shipping
+# "furios ALL=(ALL) NOPASSWD:ALL" mattered to us at all. It does not any more.
+
+# The units a profile switch is allowed to touch. Masking is a symlink to
+# /dev/null, and doing that to the wrong unit is how a session stops coming up.
+known_unit() {
+    case "$1" in
+    pipewire-pulse.service|pipewire-pulse.socket|wireplumber.service|\
+    pulseaudio.service|pulseaudio.socket) return 0 ;;
+    esac
     return 1
 }
 
-priv() {
-    # AUDIOCTL_PRIV replaces the whole way to root, so it is a test seam and
-    # nothing else: ignored outright once this runs as root, where inheriting
-    # a command name from the environment would be the last thing to do.
-    if [ -n "${AUDIOCTL_PRIV:-}" ] && [ "$(id -u)" != 0 ]; then
-        "$AUDIOCTL_PRIV" "$@"
-    elif can_ask; then
-        pkexec "$HELPER" "$@"
-    else
-        sudo "$HELPER" "$@"
-    fi
+do_mask() {
+    for u in "$@"; do
+        known_unit "$u" || { warn "refusing to mask \"$u\" - not one of ours"; return 1; }
+    done
+    mkdir -p "$ETCU" || return 1
+    for u in "$@"; do
+        ln -sf /dev/null "$ETCU/$u" || { warn "could not mask $u"; return 1; }
+    done
+    return 0
 }
 
-# --- masks: create or remove a file -> /dev/null link ------------------------
-mask()   { run priv mask "$@"; }
-unmask() { run priv unmask "$@"; }
+do_unmask() {
+    for u in "$@"; do
+        known_unit "$u" || { warn "refusing to unmask \"$u\" - not one of ours"; return 1; }
+    done
+    for u in "$@"; do
+        # Only our own kind of mask, never a real file someone put there.
+        if [ -L "$ETCU/$u" ] && [ "$(readlink "$ETCU/$u")" = /dev/null ]; then
+            rm -f "$ETCU/$u" || { warn "could not unmask $u"; return 1; }
+        fi
+    done
+    return 0
+}
+
+mask()   { run do_mask "$@"; }
+unmask() { run do_unmask "$@"; }
+
+dropin_write() {
+    [ -e "$LOCAL/pipewire-hal.conf" ] || { warn "no pipewire-hal.conf in $LOCAL"; return 1; }
+    mkdir -p "$(dirname "$DROPIN")" || return 1
+    printf '[Service]\nExecStart=\nExecStart=/usr/bin/pipewire -c %s/pipewire-hal.conf\n' \
+        "$LOCAL" > "$DROPIN"
+}
+
+dropin_remove() { rm -f "$DROPIN"; }
+
+# What an older version left in /etc, which we can no longer write and no
+# longer need.
+#
+# systemd reads ~/.config/systemd/user first, but only for units that are
+# actually there: a mask still sitting in /etc/systemd/user keeps masking, and
+# a drop-in there keeps applying. So say so, once, with the command that clears
+# it - rather than silently fighting a state we cannot reach.
+LEGACY_ETCU=/etc/systemd/user
+legacy_leftovers() {
+    out=
+    for u in pipewire-pulse.service pipewire-pulse.socket wireplumber.service \
+             pulseaudio.service pulseaudio.socket; do
+        if [ -L "$LEGACY_ETCU/$u" ] && [ "$(readlink "$LEGACY_ETCU/$u")" = /dev/null ]; then
+            out="$out $LEGACY_ETCU/$u"
+        fi
+    done
+    [ -e "$LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf" ] \
+        && out="$out $LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf"
+    for f in /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf.off \
+             /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf.off; do
+        [ -e "$f" ] && out="$out $f"
+    done
+    printf '%s' "${out# }"
+}
+
+warn_about_legacy() {
+    left=$(legacy_leftovers)
+    [ -z "$left" ] && return 0
+    warn "an older version left system-wide state behind, and it still wins:"
+    for f in $left; do warn "    $f"; done
+    warn "  audioctl no longer needs root and cannot clear these itself. Once:"
+    warn "    sudo audioctl migrate"
+    return 0
+}
+
+# Clear exactly those leftovers, and nothing else. The only thing in audioctl
+# that wants root, run once by hand.
+migrate_legacy() {
+    [ "$(id -u)" = 0 ] || die "run this one as root: sudo audioctl migrate"
+    left=$(legacy_leftovers)
+    [ -z "$left" ] && { info "nothing left over - already migrated"; return 0; }
+    for f in $left; do
+        case "$f" in
+        "$LEGACY_ETCU"/*|*/wireplumber.conf.d/50-droid.conf.off) ;;
+        *) warn "refusing to touch $f"; continue ;;
+        esac
+        if [ "${f%.off}" != "$f" ]; then
+            run mv "$f" "${f%.off}" && info "restored ${f%.off}"
+        else
+            run rm -f "$f" && info "removed $f"
+        fi
+    done
+    run systemctl --global daemon-reload 2>/dev/null
+    info "done - the profile now lives under \$HOME and needs no root"
+    return 0
+}
 
 current_profile() {
     [ -r "$TRY" ]    && { printf '%s' "$(cat "$TRY")";    return; }
@@ -184,15 +264,34 @@ aac_version_check() {
 # WirePlumber's droid monitor may only run when PipeWire is meant to hold the
 # HAL. In the pw-tunnel profile PulseAudio holds it - if the monitor started
 # there it would reach for the same device.
-WPCONF=$(first_existing /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf \
-                        /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf \
-                        /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf.off \
-                        /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf.off)
-WPCONF=${WPCONF%.off}
+# The system file that loads the monitor (50-droid.conf in /usr/share) is never
+# touched. Turning the monitor off is a file of our own in the user's
+# configuration, read after it and switching the components to "disabled";
+# turning it on again is removing that file. WirePlumber reads conf.d in
+# alphabetical order, so 99- wins over 50-.
+droid_monitor_off_file() {
+    mkdir -p "$WPUSER" || return 1
+    cat > "$WPOFF" <<'WPEOF'
+# Written by audioctl for the pw-tunnel profile, removed again for the others.
+#
+# There PulseAudio owns the Android HAL, and the droid monitor would reach for
+# the same device. This turns the components off without touching the system
+# file that declares them.
+wireplumber.profiles = {
+  main = {
+    monitor.droid = disabled
+    policy.droid-input-follows-output = disabled
+    policy.droid-default-sink-policy = disabled
+    policy.droid-bluetooth-call = disabled
+  }
+}
+WPEOF
+}
+
 droid_monitor() {
     case "$1" in
-    on)  [ -e "$WPCONF.off" ] && run priv wpconf on ;;
-    off) [ -e "$WPCONF" ]     && run priv wpconf off ;;
+    on)  [ -e "$WPOFF" ] && run rm -f "$WPOFF" ;;
+    off) [ -e "$WPOFF" ] || run droid_monitor_off_file ;;
     esac
     return 0
 }
@@ -232,7 +331,7 @@ apply() {
         run uctl stop wireplumber.service 2>/dev/null
         mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
         unmask pulseaudio.service pulseaudio.socket
-        run priv dropin-remove
+        run dropin_remove
         run uctl daemon-reload
         # A failed pw-hal leaves pipewire in 'failed' - without reset-failed
         # the camera would stay dead. Reset first, then start.
@@ -253,7 +352,7 @@ apply() {
         droid_monitor off
         mask   pipewire-pulse.service pipewire-pulse.socket
         unmask pulseaudio.service pulseaudio.socket wireplumber.service
-        run priv dropin-remove
+        run dropin_remove
         run uctl daemon-reload
         run uctl start pulseaudio.socket pulseaudio.service
         run uctl restart wireplumber.service
@@ -276,7 +375,7 @@ apply() {
             printf '  [dry run] write %s (-c %s/pipewire-hal.conf)\n' \
                 "$DROPIN" "$LOCAL"
         else
-            priv dropin-write
+            dropin_write
         fi
         run uctl daemon-reload
         run uctl restart pipewire.service
@@ -384,6 +483,7 @@ ensure_safety_net() {
 
 switch_to() {
     local p=$1 mode=$2 prev
+    warn_about_legacy
     prev=$(current_profile)
     ensure_safety_net
     ensure_pause_on_disconnect
@@ -592,6 +692,8 @@ audioctl - switch the audio stack
                                Bluetooth headset itself and holds it there
   audioctl bt-call on|off      move a running call by hand
   audioctl revert              back to standard immediately
+  sudo audioctl migrate        once, if an older version left system-wide
+                               state behind (it says so when it matters)
   audioctl verify              check whether a sink is there
 
   --dry-run                    only show what would happen
@@ -655,6 +757,7 @@ case "${1:-status}" in
     rescue) rescue ;;
     bt-call) [ $# -ge 2 ] || die "bt-call needs 'on', 'off' or 'watch'."; bt_call "$2" ;;
     revert) switch_to standard sticky ;;
+    migrate) migrate_legacy ;;
     verify) verify && echo "OK - sink present." || { echo "no sink." >&2; exit 1; } ;;
     -h|--help|help) usage ;;
     *) usage; exit 1 ;;

@@ -61,10 +61,6 @@ install -Dm755 tools/furios-audio-pause-on-disconnect.py \
     "$STAGE/usr/bin/furios-audio-pause-on-disconnect"
 install -Dm755 tools/furios-audio-callaudio-refresh \
     "$STAGE/usr/bin/furios-audio-callaudio-refresh"
-# The only thing that gets root, and the policy that authenticates it.
-install -Dm755 tools/furios-audio-helper "$STAGE/usr/libexec/furios-audio-helper"
-install -Dm644 packaging/de.furios.audioctl.policy \
-    "$STAGE/usr/share/polkit-1/actions/de.furios.audioctl.policy"
 
 install -Dm644 tunnel.conf                    "$STAGE/usr/share/furios-audio/tunnel.conf"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$STAGE/tmp-hal.conf" >/dev/null
@@ -163,7 +159,7 @@ Section: sound
 Priority: optional
 Depends: pipewire (>= $PWVER), pipewire (<< $(echo "$PWVER" | cut -d. -f1).$(( $(echo "$PWVER" | cut -d. -f2) + 1 ))),
  pipewire-pulse, wireplumber, pulseaudio, libhardware2, libexpat1,
- python3-gi, gir1.2-adw-1, gir1.2-gtk-4.0, gir1.2-polkit-1.0, policykit-1 | polkitd,
+ python3-gi, gir1.2-adw-1, gir1.2-gtk-4.0,
  pulseaudio-utils
 Recommends: libspa-0.2-bluetooth
 Description: PipeWire talks directly to the Android audio HAL

@@ -787,6 +787,66 @@ whitelist.
 
 ---
 
+## Getting rid of root entirely
+
+`audioctl` needed root for three things: masking units, writing a systemd
+drop-in, and turning the droid monitor off. All three had a home-directory
+equivalent the whole time, and systemd and WirePlumber read those **first**:
+
+| needed root | does not |
+|---|---|
+| masks in `/etc/systemd/user/` | `~/.config/systemd/user/` |
+| drop-in in `/etc/systemd/user/pipewire.service.d/` | `~/.config/systemd/user/pipewire.service.d/` |
+| renaming `50-droid.conf` to `.off` in `/usr/share/` | a `99-` file in `~/.config/wireplumber/wireplumber.conf.d/` setting the components to `disabled` |
+
+The third one is smaller than it looks: the monitor only has to be off in the
+`pw-tunnel` profile. In `standard` WirePlumber is masked anyway, so the file
+that loads it changes nothing there - which the file itself says.
+
+**What that removed:** `furios-audio-helper` (112 lines), the polkit policy,
+the authentication agent in the switcher app (about 180 lines, plus the polkit
+bindings as a dependency), both `sudo` fallbacks, and the reason this project
+had to care that FuriOS ships `furios ALL=(ALL) NOPASSWD:ALL`. The helper was
+good work - a whitelist of unit names, no paths from the caller - but the best
+version of a privileged component is the one that does not exist.
+
+**What it added:** one migration. Masks left in `/etc/systemd/user` keep
+masking, and audioctl can no longer remove them, so it warns with the command
+that can: `sudo audioctl migrate`. That is now the only thing in audioctl that
+wants root, run once.
+
+**And it fixed the safety net on the way.** `furios-audio-apply.service` used
+to skip the case where the stored profile is `standard`:
+
+    test "$p" = standard || "$a" set "$p" || "$a" revert
+
+A test profile leaves its masks and drop-in behind in the configuration, so
+`audioctl try pw-hal` survived the reboot it was supposed to be discarded by -
+which is the one thing `try` promises. Applying the stored profile
+unconditionally is what discards it.
+
+---
+
+## The sink monitor reads silence, whatever is playing
+
+`droid-sink.monitor` returns digital silence while audio is demonstrably
+playing - the HAL holding `pcmC0D0p`, the stream not corked, the tone audible.
+Checked against a `module-null-sink` in the same session and the same way:
+RMS 1243 there, RMS 0 and a single distinct sample value on ours.
+
+**This invalidates a measurement made earlier in this repository.** When
+looking into why a podcast played all morning, "the player holds an active
+stream and sends digital silence" was concluded from exactly this monitor. The
+same reading would have come back from a stream at full volume. What the hung
+player actually sends is therefore unknown, and the morning is not explained
+by silence.
+
+Whatever a monitor port needs from a SPA node, this one is not providing it.
+Nothing else in the stack depends on it - it is a measurement tool, not a
+signal path - but it is a tool that answers the same thing to every question.
+
+---
+
 ## How the tests are built, and why
 
 The Python is measured with the standard library's `trace` module, and runs

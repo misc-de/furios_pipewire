@@ -24,36 +24,10 @@ load_audioctl() {
     AUDIOCTL_LIB=1 . "$HERE/../audioctl"
 }
 
-# The privileged half. On the phone this is pkexec plus furios-audio-helper,
-# which asks for a password and then writes into /etc; here it is a stand-in
-# that does the same five things inside the temporary directory. Some of them
-# have to actually happen - droid_monitor moves a file, and a stub that
-# swallowed it would test nothing - and what the tests are really checking is
-# that audioctl asks for the right operation with the right arguments. The
-# helper itself has its own suite.
-cat > "$STUBDIR/priv" <<'PRIV'
-#!/bin/sh
-set -u
-printf '%s\n' "$*" >> "$STUBDIR/priv.args"
-op=$1; shift
-case "$op" in
-mask)   for u in "$@"; do ln -sf /dev/null "$AUDIOCTL_ETCU/$u"; done ;;
-unmask) for u in "$@"; do
-            [ -L "$AUDIOCTL_ETCU/$u" ] && rm -f "$AUDIOCTL_ETCU/$u"
-        done ;;
-wpconf) case "$1" in
-        on)  [ -e "$WPCONF.off" ] && mv "$WPCONF.off" "$WPCONF" ;;
-        off) [ -e "$WPCONF" ]     && mv "$WPCONF" "$WPCONF.off" ;;
-        esac ;;
-dropin-write)  mkdir -p "$(dirname "$AUDIOCTL_DROPIN")"
-               echo drop-in > "$AUDIOCTL_DROPIN" ;;
-dropin-remove) rm -f "$AUDIOCTL_DROPIN" ;;
-*) exit 64 ;;
-esac
-exit 0
-PRIV
-chmod +x "$STUBDIR/priv"
-export AUDIOCTL_PRIV="$STUBDIR/priv"
+# Nothing here is privileged any more: audioctl masks units and writes its
+# drop-in under $HOME, and the tests point that at a temporary directory. What
+# used to be a stand-in for pkexec plus furios-audio-helper is simply the real
+# code now, running where it can do no harm.
 export STUBDIR
 
 # --- verify(): the safety net -----------------------------------------------
@@ -185,8 +159,12 @@ with_audioctl() {
       AUDIOCTL_LIB=1 . "$HERE/../audioctl"
       STATE_DIR="$STUBDIR/state"; STICKY="$STATE_DIR/profile"; TRY="$STATE_DIR/profile.try"
       ETCU="$STUBDIR/etc"; DROPIN="$ETCU/pipewire.service.d/50-furios-audio.conf"
-      export AUDIOCTL_ETCU="$ETCU" AUDIOCTL_DROPIN="$DROPIN" WPCONF
-      mkdir -p "$STATE_DIR" "$ETCU"
+      WPUSER="$STUBDIR/wpuser"; WPOFF="$WPUSER/99-furios-droid-off.conf"
+      LOCAL="$STUBDIR/local"
+      export AUDIOCTL_ETCU="$ETCU" AUDIOCTL_DROPIN="$DROPIN" \
+             AUDIOCTL_WPCONF_DIR="$WPUSER"
+      mkdir -p "$STATE_DIR" "$ETCU" "$WPUSER" "$LOCAL"
+      : > "$LOCAL/pipewire-hal.conf"
       eval "$snippet" )
 }
 
@@ -224,13 +202,21 @@ check "a matching plugin version says nothing" "" \
 check "and a missing marker file is not an error" "" \
     "$(with_audioctl 'aac_version_check 2>&1')"
 
-# --- the droid monitor is moved aside, not deleted -------------------------
-check "switching the monitor off renames its file" "yes" \
-    "$(with_audioctl 'WPCONF="$STUBDIR/50-droid.conf"; touch "$WPCONF"
-        droid_monitor off; [ -e "$WPCONF.off" ] && echo yes || echo no')"
-check "and switching it on renames it back" "yes" \
-    "$(with_audioctl 'WPCONF="$STUBDIR/50-droid2.conf"; touch "$WPCONF.off"
-        droid_monitor on; [ -e "$WPCONF" ] && echo yes || echo no')"
+# --- the droid monitor is turned off in the user's own configuration --------
+#
+# The system file that declares the components is never touched - which is why
+# none of this needs root. Turning the monitor off is a file of ours read after
+# it; turning it on again is removing that file.
+check "switching the monitor off writes a file of our own" "yes" \
+    "$(with_audioctl 'droid_monitor off; [ -e "$WPOFF" ] && echo yes || echo no')"
+check "and it disables the components rather than the file" "yes" \
+    "$(with_audioctl 'droid_monitor off
+        grep -q "monitor.droid = disabled" "$WPOFF" && echo yes || echo no')"
+check "switching it on removes the file again" "no" \
+    "$(with_audioctl 'droid_monitor off; droid_monitor on
+        [ -e "$WPOFF" ] && echo yes || echo no')"
+check "and switching off twice is not an error" "yes" \
+    "$(with_audioctl 'droid_monitor off; droid_monitor off && echo yes || echo no')"
 
 # --- preconditions ---------------------------------------------------------
 check "standard needs nothing in place" "0" \
@@ -267,46 +253,52 @@ make_recording_stub busctl 1 ""
 check "and neither is one where the service will not start" "yes" \
     "$(with_audioctl 'restart_audio_clients >/dev/null 2>&1 && echo yes || echo no')"
 
-# --- who gets asked for the password ---------------------------------------
+# --- what a switch writes, and where ---------------------------------------
 #
-# pkexec needs somebody who can answer. At boot nobody can, and a safety net
-# that stops to ask for a password is not one.
-# A terminal is the one case that needs a real one, so the check runs under a
-# pseudo-terminal rather than pretending.
-if command -v script >/dev/null 2>&1; then
-    check "in a terminal it asks" "yes" \
-        "$(script -qec "HELPER=$(command -v sh) AUDIOCTL_ETCU=$STUBDIR/etc bash -c '
-            AUDIOCTL_LIB=1 . \"$HERE/../audioctl\"
-            HELPER=$(command -v sh)
-            can_ask && echo yes || echo no'" /dev/null </dev/null 2>/dev/null | tr -d '\r\n')"
-fi
-check "in the graphical session it asks" "yes" \
-    "$(with_audioctl 'HELPER=$(command -v sh); unset AUDIOCTL_NONINTERACTIVE
-        WAYLAND_DISPLAY=wayland-0; can_ask <&- && echo yes || echo no')"
-check "at boot it does not" "no" \
-    "$(with_audioctl 'HELPER=$(command -v sh); AUDIOCTL_NONINTERACTIVE=1
-        WAYLAND_DISPLAY=wayland-0; can_ask && echo yes || echo no')"
-check "and not without a helper to run either" "no" \
-    "$(with_audioctl 'HELPER=/nonexistent; unset AUDIOCTL_NONINTERACTIVE
-        WAYLAND_DISPLAY=wayland-0; can_ask && echo yes || echo no')"
-check "nor with nobody and nothing" "no" \
-    "$(with_audioctl 'HELPER=$(command -v sh); unset AUDIOCTL_NONINTERACTIVE
-        unset WAYLAND_DISPLAY DISPLAY; can_ask <&- && echo yes || echo no')"
+# Nothing here asks for a password any more, because nothing here needs root:
+# masks and the drop-in go under $HOME, which systemd reads before /etc. These
+# used to be a stand-in for pkexec and a second one for the sudo fallback at
+# boot; what is left is checking that the files land where they should.
 
-# And which of the two actually gets run. The helper is the same either way;
-# what differs is who authenticates the caller.
-make_recording_stub pkexec 0 ""
-make_recording_stub sudo 0 ""
-rm -f "$STUBDIR/pkexec.args" "$STUBDIR/sudo.args"
-check "with somebody to ask, the call goes through pkexec" "yes" \
-    "$(with_audioctl 'unset AUDIOCTL_PRIV; HELPER=$(command -v sh)
-        WAYLAND_DISPLAY=wayland-0; priv mask pulseaudio.service
-        grep -q "mask pulseaudio.service" "$STUBDIR/pkexec.args" && echo yes || echo no')"
-check "at boot it goes through sudo instead" "yes" \
-    "$(with_audioctl 'unset AUDIOCTL_PRIV; HELPER=$(command -v sh)
-        AUDIOCTL_NONINTERACTIVE=1; priv dropin-remove
-        grep -q dropin-remove "$STUBDIR/sudo.args" && echo yes || echo no')"
-export AUDIOCTL_PRIV="$STUBDIR/priv"
+check "masking writes a link to /dev/null under our own configuration" "yes" \
+    "$(with_audioctl 'do_mask pulseaudio.service
+        [ "$(readlink "$ETCU/pulseaudio.service")" = /dev/null ] && echo yes || echo no')"
+check "and unmasking takes it away again" "no" \
+    "$(with_audioctl 'do_mask pulseaudio.service; do_unmask pulseaudio.service
+        [ -e "$ETCU/pulseaudio.service" ] && echo yes || echo no')"
+check "a unit that is not ours is refused" "no" \
+    "$(with_audioctl 'do_mask sshd.service 2>/dev/null && echo yes || echo no')"
+check "and refusing it masks nothing" "no" \
+    "$(with_audioctl 'do_mask sshd.service 2>/dev/null
+        [ -e "$ETCU/sshd.service" ] && echo yes || echo no')"
+check "unmasking leaves a real file somebody else put there alone" "yes" \
+    "$(with_audioctl 'echo real > "$ETCU/pulseaudio.service"
+        do_unmask pulseaudio.service
+        [ -f "$ETCU/pulseaudio.service" ] && echo yes || echo no')"
+
+check "the drop-in is written under our own configuration" "yes" \
+    "$(with_audioctl 'dropin_write; grep -q "pipewire -c" "$DROPIN" && echo yes || echo no')"
+check "and names the configuration it was told about" "yes" \
+    "$(with_audioctl 'dropin_write
+        grep -q "$LOCAL/pipewire-hal.conf" "$DROPIN" && echo yes || echo no')"
+check "removing it is removing a file" "no" \
+    "$(with_audioctl 'dropin_write; dropin_remove; [ -e "$DROPIN" ] && echo yes || echo no')"
+check "without a configuration to point at, it refuses" "no" \
+    "$(with_audioctl 'rm -f "$LOCAL/pipewire-hal.conf"
+        dropin_write 2>/dev/null && echo yes || echo no')"
+
+# --- what an older version left behind -------------------------------------
+#
+# A mask still sitting in /etc/systemd/user keeps masking, and audioctl can no
+# longer remove it. It has to say so rather than quietly fight it.
+check "leftovers in /etc are noticed" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/legacy"; mkdir -p "$LEGACY_ETCU"
+        ln -sf /dev/null "$LEGACY_ETCU/pulseaudio.service"
+        warn_about_legacy 2>&1 | grep -q "still wins" && echo yes || echo no')"
+check "and a clean system says nothing" "" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/nothing-here"; warn_about_legacy 2>&1')"
+check "migrating without root is refused" "yes" \
+    "$(with_audioctl 'migrate_legacy 2>&1 | grep -q "as root" && echo yes || echo no')"
 
 # --- the safety net --------------------------------------------------------
 stub_systemctl none none
