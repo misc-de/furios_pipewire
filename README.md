@@ -62,9 +62,10 @@ from one boot to the next.
 | playback, capture, route switching | works |
 | phone call: ringtone, both directions, speaker button | works |
 | Bluetooth music (A2DP, AAC/SBC-XQ) | works |
-| Bluetooth call (HFP) | works - needs the codec announced, see FINDINGS |
+| Bluetooth call (HFP) | works - needs the codec announced *and* the link held, see FINDINGS |
 | Bluetooth microphone outside a call | works - `audioctl bt-mic`, measured and heard |
-| which process gets the HFP profile | **decided by start order**, see FINDINGS |
+| which process gets the HFP profile | settled - ofono no longer registers it |
+| holding the SCO link for the length of a call | **open** - the last piece of an automatic BT call |
 | echo during a call | **open** |
 | `deep_buffer` / `compress_offload` for lower power | **unused** |
 | `droid-sink.monitor` | **broken** - reads silence whatever plays |
@@ -269,6 +270,16 @@ tells the nodes which codec was negotiated, and routes the card to
 opens the stream. It gives up and hands the call back to the phone rather than
 fight callaudiod for the route.
 
+**It is off because it is not finished, and this is what is missing.** All of
+that was measured working in a real call on 2026-09-12 - and the call was still
+silent both ways. A hands-free profile means the card *can* carry a link; it
+does not make one exist. The link exists only while a stream is active on
+`bluez_output.*`, and in a call nobody opens one, because the voice path runs
+modem <-> DSP and never reaches the host. The same call with
+`audioctl bt-mic on` holding a stream of zeroes underneath it was heard in both
+directions. Until something holds that link for the length of a call, leave the
+setting off: a call on the earpiece beats a call with no audio.
+
 **Recording from the headset outside a call** - a voice memo, a dictation app,
 anything that is not a phone call:
 
@@ -285,13 +296,19 @@ What `bt-mic status` calls *HAL Bluetooth PCM* is the only reading that settles
 whether the samples really come off the Bluetooth link - and it has to be read
 while a recording runs.
 
-**A headset may have no hands-free profile at all.** If `bt-mic on` says the
-profile could not be set and the card lists only A2DP, ofono won the race for
-BlueZ's `hfp_ag` registration during this boot and WirePlumber lost it. Calls
-over the headset are gone the same way. It is decided by service start order,
-it changes between boots, and the way out for one session is to restart
-WirePlumber while ofono is stopped - which switches the modem off as a side
-effect and needs it put back online by hand afterwards. See FINDINGS.
+**A headset with no hands-free profile at all** used to be the normal case and
+is now a symptom of a broken install. ofono and WirePlumber both used to
+register BlueZ's `hfp_ag` UUID, whoever started first got it, and a card that
+lost carried A2DP only - no headset microphone, no call, nothing said out loud.
+The drop-in `systemd/ofono.service.d/30-furios-audio-hfp.conf` takes the plugin
+out of ofono (`ofonod -P hfp_ag_bluez5`) and settles it. If a card lists only
+A2DP again, check that the drop-in is installed and in effect:
+
+    systemctl cat ofono.service | tail -3
+    busctl --system tree org.ofono | grep hfp      # hfp_hf yes, hfp_ag no
+
+ofono restarting takes the modem with it for a moment, so check
+`Online: true` afterwards. See FINDINGS.
 
 **When a headset disconnects, playback pauses** instead of moving to the
 loudspeaker (`furios-audio-pause-on-disconnect`). Only players with MPRIS can

@@ -48,6 +48,19 @@ sudo install -m644 wireplumber/droid-bluetooth-call.lua \
 sudo install -m644 wireplumber/50-droid.conf /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf
 sudo install -m644 wireplumber/51-bluez-ofono.conf /usr/local/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf
 
+# /etc and not /usr/local: systemd does not look under /usr/local at all, so a
+# drop-in placed there is simply never read. The package installs the same
+# file under /usr/lib, which is where a package's drop-ins belong; /etc is the
+# administrator's place and is what this script-driven install can use.
+sudo mkdir -p /etc/systemd/system/ofono.service.d
+sudo install -m644 systemd/ofono.service.d/30-furios-audio-hfp.conf \
+    /etc/systemd/system/ofono.service.d/30-furios-audio-hfp.conf
+sudo systemctl daemon-reload
+# Not restarted here. ofono restarting takes the modem down for a moment, and
+# on this device it has come back Powered but Online: false - no network and
+# nothing on screen to say why. The drop-in takes effect at the next boot, or
+# after "sudo systemctl restart ofono" when somebody is watching.
+
 echo "4) echo experiment (DMNR)"
 sudo install -m755 experiments/dmnr-handsfree.sh /usr/local/bin/furios-audio-dmnr
 

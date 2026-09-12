@@ -1204,3 +1204,74 @@ It asks BlueZ for the device's UUIDs now and only acts on the audio profiles
 already gone from the bus, BlueZ does not answer, the property is not what it
 should be - it counts as audio and pauses. Doubt resolves towards pausing,
 because that costs a press of play and the other way costs a morning.
+
+## A hands-free profile is not a hands-free link
+
+A Bluetooth call had no audio in either direction, while everything that can
+be inspected said it should. This is what was actually wrong, and what was
+merely in the way.
+
+**In the way: ofono and WirePlumber both want BlueZ' hands-free registration.**
+ofono's built-in `hfp_ag_bluez5` plugin and WirePlumber's native bluez5 backend
+both register the `hfp_ag` UUID, exactly one gets it, and the loser says so
+once:
+
+    spa.bluez5.native: RegisterProfile() failed: org.bluez.Error.NotPermitted
+
+When WirePlumber loses, the Bluetooth card carries A2DP profiles only. No
+`headset-head-unit`, so no SCO, so neither the headset microphone nor a call -
+and nothing says so anywhere a user would look. It is not specific to this
+stack: the shipped PulseAudio loses the same race (2026-09-12, 15:13:38, same
+error). ofono starts as a system service long before the user session, so it
+wins almost every boot; the two sessions in the journal where it lost were
+both restarts into a running session.
+
+The fix is to decide it up front instead of by startup order, and to decide it
+in ofono, because the other direction is already ruled out:
+`bluez5.hfphsp-backend = "ofono"` cannot be used here - only the native backend
+offers a hands-free profile on this device, which is why `51-bluez-ofono.conf`
+sets `native` with a page of reasons. So ofono gives the plugin up:
+
+    ExecStart=/usr/sbin/ofonod --nodetach -P hfp_ag_bluez5
+
+After that `/bluetooth/profile/hfp_ag` is gone from ofono while `hfp_hf` and
+`dun_gw` stay, WirePlumber registers without complaint, and the card offers
+`headset-head-unit` (mSBC) and `headset-head-unit-cvsd`, both available. Modem
+telephony does not go through that plugin and was unaffected - the modem stayed
+`Online: true` across the restart, which is worth checking every time, because
+it has come back `false` before.
+
+**The actual problem: nobody holds the link.** With the registration settled
+and `furios.bluetooth-call-routing` on, the take-over during a real call was
+flawless. Two seconds after the call arrived:
+
+    15:26:11 call=voicecall01 out=output-earpiece       in=input-builtin_mic
+    15:26:11 FIX out war output-earpiece                 <- callaudiod, once
+    15:26:14 call=voicecall01 out=output-bluetooth_sco  in=input-bluetooth_sco_headset
+             ... unchanged until the call ended ...
+
+Profile `headset-head-unit`, both routes set, `bt_wbs` announced, callaudiod
+pushing the ports away exactly once at the start - `MAX_DEFENDS = 3` was never
+close to being used up. And the call was silent in both directions.
+
+What is missing is the SCO link itself. A hands-free profile means the card
+*can* carry one; it does not make one exist. On this chip the link exists only
+while a stream is active on `bluez_output.*` - and in a call nobody opens one,
+because the voice path runs modem <-> DSP and never reaches the host. There is
+no stream to be had, so the profile sits there with nothing underneath it.
+
+Repeating the same call with `audioctl bt-mic on` holding a stream of zeroes on
+`bluez_output` underneath it, the output routed to `output-bluetooth_sco`, and a
+thin watcher putting the ports back when callaudiod took them: **heard, both
+directions.**
+
+So the routing in `droid-bluetooth-call.lua` is right and incomplete, and so is
+`audioctl bt-call`, whose `bt_hold` defends the *port* and not the *link*. The
+setting stays off until something holds a link for the length of a call.
+
+**And a measuring instrument fell over.** `/proc/asound/card0/pcm55p` and
+`pcm55c` stayed `closed` through the call that was working and being heard.
+They show host streams - a recording, a playback - not telephony. Reading them
+during a call and concluding anything from them is reading the wrong dial: for
+the microphone outside a call they are still the only reading that settles
+where the samples came from, but for a call the ear is the instrument.

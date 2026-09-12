@@ -77,6 +77,12 @@ install -Dm644 wireplumber/droid-bluetooth-call.lua \
 install -Dm644 wireplumber/50-droid.conf      "$STAGE/usr/share/wireplumber/wireplumber.conf.d/50-droid.conf"
 install -Dm644 wireplumber/51-bluez-ofono.conf "$STAGE/usr/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf"
 
+# A drop-in for somebody else's service, and the only one this package ships.
+# ofono would otherwise take BlueZ' hands-free registration away from
+# WirePlumber and leave the Bluetooth card with A2DP only - see the file.
+install -Dm644 systemd/ofono.service.d/30-furios-audio-hfp.conf \
+    "$STAGE/usr/lib/systemd/system/ofono.service.d/30-furios-audio-hfp.conf"
+
 install -Dm644 furios-pw-tunnel.service       "$STAGE/usr/lib/systemd/user/furios-pw-tunnel.service"
 install -Dm644 furios-audio-apply.service     "$STAGE/usr/lib/systemd/user/furios-audio-apply.service"
 install -Dm644 furios-audio-verify.service    "$STAGE/usr/lib/systemd/user/furios-audio-verify.service"

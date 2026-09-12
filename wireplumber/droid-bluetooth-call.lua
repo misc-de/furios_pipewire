@@ -9,6 +9,20 @@
 --
 --   1. the headset is in a hands-free profile, so an SCO channel exists at all
 --   2. the phone card is routed to output-bluetooth_sco / input-bluetooth_sco_headset
+--   3. something holds an SCO link open for the length of the call
+--
+-- The third one is not done here yet, and without it the other two are not
+-- enough: measured 2026-09-12, a call with the profile and both routes set
+-- correctly and held steady for the whole call was silent in both directions.
+-- A hands-free PROFILE is not a hands-free LINK. The link exists only while a
+-- stream is active on bluez_output.*, and in a call nobody opens one - the
+-- voice path runs modem <-> DSP and never reaches the host, so there is no
+-- stream to be had. The same call with "audioctl bt-mic on" holding a stream
+-- of zeroes on bluez_output underneath it was heard, both directions.
+--
+-- Do not look for that in /proc/asound/card0/pcm55p|pcm55c. Those stay closed
+-- through a call that is working and being heard; they show host streams, not
+-- telephony. For a call the ear is the instrument.
 --
 -- "audioctl bt-call watch" does both, but it has to be started before the call.
 -- This does the same as a hook: it reacts when the card enters the voicecall

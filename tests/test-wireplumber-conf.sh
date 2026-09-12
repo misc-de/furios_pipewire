@@ -84,4 +84,46 @@ val=$(keys_in_block "$ROOT/wireplumber/51-bluez-ofono.conf" "wireplumber.setting
           "$ROOT/wireplumber/51-bluez-ofono.conf")
 check "the always-show-microphone setting is off" "false" "$val"
 
+# The backend decides whether there is a hands-free profile at all on this
+# device. Set to "ofono" it would take every Bluetooth call and the headset
+# microphone with it - the reasons fill the top of 51-bluez-ofono.conf, and a
+# one-word edit would undo them silently.
+printf '\nthe hands-free backend stays native\n'
+val=$(awk -F'= *' '/bluez5.hfphsp-backend +=/ && !/^ *#/ {gsub(/"/,"",$2); print $2}' \
+      "$ROOT/wireplumber/51-bluez-ofono.conf")
+check "bluez5.hfphsp-backend is native" "native" "$val"
+
+# ofono has to give the registration up, or the native backend above never
+# gets it and the card carries A2DP only - no microphone, no call, and nothing
+# said out loud about why.
+printf '\nofono gives up the hands-free registration\n'
+DROPIN="$ROOT/systemd/ofono.service.d/30-furios-audio-hfp.conf"
+if [ -r "$DROPIN" ]; then
+    ok "the drop-in exists"
+    TESTS_RUN=$((TESTS_RUN + 1))
+else
+    TESTS_RUN=$((TESTS_RUN + 1)); TESTS_FAILED=$((TESTS_FAILED + 1))
+    fail "the drop-in exists" "$DROPIN is missing"
+fi
+# An ExecStart override that does not clear the old one first is a unit error,
+# not an override: systemd refuses the service outright and the phone boots
+# without a modem.
+check "ExecStart is cleared before it is set" \
+      "yes" "$(grep -qx 'ExecStart=' "$DROPIN" 2>/dev/null && echo yes || echo no)"
+check "ofonod is started without the hfp_ag plugin" \
+      "yes" "$(grep -qE '^ExecStart=.*-P +hfp_ag_bluez5' "$DROPIN" 2>/dev/null && echo yes || echo no)"
+# Shipped by all three install paths, or it is only ever true on the machine
+# it was typed on.
+check "the package installs it under /usr/lib" "yes" \
+      "$(grep -q 'usr/lib/systemd/system/ofono.service.d/30-furios-audio-hfp.conf' \
+         "$ROOT/packaging/build-deb.sh" && echo yes || echo no)"
+# /usr/local is not a place systemd reads, so the script-driven install has to
+# use /etc - a drop-in under /usr/local would be installed and never read.
+check "install-hal.sh installs it under /etc" "yes" \
+      "$(grep -q '/etc/systemd/system/ofono.service.d/30-furios-audio-hfp.conf' \
+         "$ROOT/install-hal.sh" && echo yes || echo no)"
+check "uninstall.sh takes it away again" "yes" \
+      "$(grep -q '/etc/systemd/system/ofono.service.d/30-furios-audio-hfp.conf' \
+         "$ROOT/uninstall.sh" && echo yes || echo no)"
+
 summary

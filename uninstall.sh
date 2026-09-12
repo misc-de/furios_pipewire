@@ -22,6 +22,8 @@ sudo rm -f /usr/local/bin/furios-audio-switch \
 sudo rm -f /usr/local/share/wireplumber/scripts/monitors/droid.lua \
            /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf \
            /usr/local/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf
+sudo rm -f /etc/systemd/system/ofono.service.d/30-furios-audio-hfp.conf
+sudo rmdir /etc/systemd/system/ofono.service.d 2>/dev/null || true
 sudo rmdir --ignore-fail-on-non-empty \
     /usr/local/share/wireplumber/scripts/monitors \
     /usr/local/share/wireplumber/scripts \
