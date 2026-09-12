@@ -1966,6 +1966,170 @@ static void send_props(struct impl *this, const char *key, const char *val)
 	spa_node_set_param(&this->node, SPA_PARAM_Props, 0, pod);
 }
 
+/* The error paths of the reopen, which are the ones that matter when it goes
+ * wrong at three in the morning.
+ *
+ * A reopen has to put back what it tore down: the writer thread and the clock.
+ * If it cannot, the node must not be left looking healthy while playing
+ * nothing - and if even the way back to the previous route fails, it has to
+ * say so rather than sit there silently without a stream.
+ */
+static void test_reopen_when_things_fail(void)
+{
+	struct impl *this;
+
+	section("a reopen that cannot put everything back");
+
+	/* Crossing into Bluetooth while the node is RUNNING: the writer and the
+	 * clock have to come back up on the other side. */
+	reset_all();
+	this = make_node(false, playback_info());
+	if (!check("the node is there", this != NULL))
+		return;
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-speaker");
+	check_int("it starts", 0, start(this));
+	check("the writer is running", this->started);
+	check_int("crossing into Bluetooth while running", 0,
+			apply_route(this, "output-bluetooth_sco"));
+	check("and the writer is running again afterwards", this->started);
+	check_str("on the Bluetooth port", "BT SCO", hal_stub.last_route);
+	pause_node(this);
+	hal_close(this);
+	free_node(this);
+
+	/* Neither route can be opened: the first attempt fails, and so does the
+	 * way back. The node says it has no stream instead of pretending. */
+	reset_all();
+	this = make_node(false, playback_info());
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-speaker");
+	hal_open(this);
+	hal_stub.output_opens_failing = 2;   /* the move AND the way back */
+	check_int("a crossing that fails both ways is reported", -EIO,
+			apply_route(this, "output-bluetooth_sco"));
+	check("and the node is honest about having no stream", this->stream == NULL);
+	free_node(this);
+
+	/* The stream reopens fine and the writer thread will not start again.
+	 * Leaving the HAL open there would be a node holding hardware it cannot
+	 * feed - the one state nothing else would clean up. */
+	reset_all();
+	this = make_node(false, playback_info());
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-speaker");
+	check_int("it starts", 0, start(this));
+	fail_thread_create = true;
+	check("a reopen whose writer will not start is reported",
+			apply_route(this, "output-bluetooth_sco") < 0);
+	fail_thread_create = false;
+	check("and it does not leave the HAL open behind it", this->stream == NULL);
+	free_node(this);
+
+	/* Same again one step later: the writer starts, the clock will not arm.
+	 * Without the clock nothing calls process(), so the node would sit there
+	 * with an open HAL stream and a thread waiting for audio that never
+	 * comes. It has to undo both. */
+	reset_all();
+	this = make_node(false, playback_info());
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-speaker");
+	check_int("it starts", 0, start(this));
+	sys.settime_result = -EPERM;
+	check("a reopen whose clock will not arm is reported",
+			apply_route(this, "output-bluetooth_sco") < 0);
+	sys.settime_result = 0;
+	check("and that leaves no HAL stream either", this->stream == NULL);
+	check("nor a running writer", !this->started);
+	free_node(this);
+}
+
+/* Telling the HAL about the codec can fail too, and a capture node has its own
+ * way into the Bluetooth port. */
+static void test_bt_codec_edges(void)
+{
+	struct impl *this;
+
+	section("the edges of the Bluetooth codec");
+
+	/* The HAL refusing bt_wbs must not stop the stream from opening: a
+	 * narrow-band link is still better than no audio, and the warning is
+	 * what tells anyone why it sounds wrong. */
+	reset_all();
+	this = make_node(false, playback_info());
+	if (!check("the node is there", this != NULL))
+		return;
+	negotiate(this, 48000, 2);
+	apply_bt_wbs(this, "on");
+	apply_route(this, "output-bluetooth_sco");
+	hal_stub.set_parameters_result = -EIO;
+	check_int("the stream opens even when the HAL refuses the codec", 0,
+			hal_open(this));
+	hal_stub.set_parameters_result = 0;
+	hal_close(this);
+	free_node(this);
+
+	/* The capture side reaches the Bluetooth microphone through the same
+	 * remembered route, and has to announce the codec the same way. */
+	reset_all();
+	this = make_node(true, playback_info());
+	negotiate(this, 48000, 2);
+	apply_bt_wbs(this, "on");
+	check_int("a capture node takes the Bluetooth route", 0,
+			apply_route(this, "input-bluetooth_sco_headset"));
+	hal_stub.all_parameters[0] = '\0';
+	check_int("and opens on it", 0, hal_open(this));
+	check("with the codec announced", strstr(hal_stub.all_parameters, "bt_wbs=on") != NULL);
+	check_str("on the headset microphone", "BT SCO Headset Mic",
+			hal_stub.last_input_device);
+	hal_close(this);
+	free_node(this);
+
+	/* And the way it actually arrives in the daemon: as a node prop, which is
+	 * how droid-bluetooth-call.lua sends it. */
+	reset_all();
+	this = make_node(false, playback_info());
+	send_props(this, "droid.bt-wbs", "off");
+	check_str("the codec arrives as a node prop", "off", this->bt_wbs);
+	send_props(this, "droid.bt-wbs", "neither");
+	check_str("and nonsense leaves the last good one alone", "off", this->bt_wbs);
+	free_node(this);
+
+	/* A route the configuration no longer has. It used to fall through to the
+	 * speaker without a word, which is how a Bluetooth call spent days
+	 * playing out of the phone; now it warns and falls back openly. The port
+	 * name remembered alongside it is what the fallback tries first. */
+	reset_all();
+	this = make_node(false, playback_info());
+	negotiate(this, 48000, 2);
+	apply_route(this, "output-earpiece");
+	snprintf(this->wanted_route, sizeof(this->wanted_route), "%s", "output-gone");
+	check_int("a route that vanished still opens something", 0, hal_open(this));
+	check_str("by falling back on the port it remembered", "Earpiece",
+			hal_stub.last_route);
+	hal_close(this);
+
+	/* A capture node whose remembered route cannot be resolved: the codec
+	 * announcement has nothing to announce for and must simply keep quiet
+	 * rather than reach into a null port. */
+	{
+		struct impl *cap = make_node(true, playback_info());
+		negotiate(cap, 48000, 2);
+		snprintf(cap->wanted_route, sizeof(cap->wanted_route), "%s", "input-gone");
+		check_int("a capture node with a vanished route still opens", 0,
+				hal_open(cap));
+		hal_close(cap);
+		free_node(cap);
+	}
+
+	/* And with neither of them resolvable, the default output. */
+	snprintf(this->wanted_route, sizeof(this->wanted_route), "%s", "output-gone");
+	this->wanted_port[0] = '\0';
+	check_int("with nothing left to go on, the default output", 0, hal_open(this));
+	hal_close(this);
+	free_node(this);
+}
+
 static void test_set_param(void)
 {
 	struct impl *this;
@@ -2413,6 +2577,8 @@ int main(void)
 	test_apply_route();
 	test_bluetooth_reopen();
 	test_bt_codec();
+	test_reopen_when_things_fail();
+	test_bt_codec_edges();
 	test_registry();
 	test_apply_mode();
 	test_apply_mode_details();

@@ -345,82 +345,25 @@ static void bt_sco_announce(struct impl *this, const dm_config_port *dev)
 		DIAG(this, "BT_SCO=%s sent before opening", bt ? "on" : "off");
 }
 
-static int hal_open(struct impl *this)
+
+/* Everything a fresh stream starts from: what the ring has handed over, what
+ * the HAL has taken, and the failure counters that decide when to give up. */
+static void reset_counters(struct impl *this)
+{
+	this->bytes_queued = this->bytes_written = 0;
+	this->n_process = this->n_write = 0;
+	this->n_write_err = this->n_overrun = this->n_underrun = 0;
+	this->hal_failed = false;
+}
+
+/* The output half of hal_open(), which the input half has had to itself since
+ * hal_open_input(). Same shape: work out the device, tell the HAL what it
+ * needs before the stream exists, open, then check what came back. */
+static int hal_open_output(struct impl *this)
 {
 	dm_config_port *mix, *dev;
 	pa_sample_spec spec;
 	pa_channel_map map;
-
-	if (this->stream)
-		return 0;
-
-	{
-		/* Through modargs, so the module's vendor options take effect. This
-		 * one is off on this device and concerns the voice path:
-		 *
-		 *   speaker_before_voice=true routes briefly to the speaker before
-		 *                             the mode change; some devices start the
-		 *                             call wrong otherwise.
-		 *
-		 * FuriOS loads module-droid-card without it. Set droid.hw-options in
-		 * the node configuration to something else if you disagree.
-		 *
-		 * Options only take effect on the FIRST open of the module - after
-		 * that it lives in the process-wide registry. */
-		char args[512];
-		pa_modargs *ma;
-
-		snprintf(args, sizeof(args), "config=%s %s",
-				this->config_file, this->hw_options);
-		ma = pa_modargs_new(args, NULL);
-		this->hw = pa_droid_hw_module_get2(pa_compat_core(), ma, "primary");
-		pa_modargs_free(ma);
-	}
-	if (!this->hw) {
-		spa_log_error(this->log, NAME " could not open the HAL module");
-		return -EIO;
-	}
-	/* Keep the module loaded for the life of the process.
-	 *
-	 * Letting the last reference go unloads the Android side through
-	 * libhybris, and the next open faults inside the Android linker's own
-	 * initialisation:
-	 *
-	 *   android_linker_init () -> android_dlopen () -> hw_get_module_by_class ()
-	 *   -> droid_hw_module_open () -> hal_open ()            SIGSEGV
-	 *
-	 * That is one open and close per suspend/resume, so it was a matter of
-	 * time; it took down the whole daemon when playback fell back from a
-	 * Bluetooth headset to the phone. PulseAudio keeps the module for as long
-	 * as it runs, and so do we now. The module is not the exclusive part -
-	 * the stream is, and that is still opened and closed as before. */
-	if (hw_module_keepalive == NULL)
-		hw_module_keepalive = pa_droid_hw_module_ref(this->hw);
-	DIAG(this, "HAL options: %s", this->hw_options[0] ? this->hw_options : "(none)");
-
-	if (this->capture) {
-		int res;
-		spec.format = PA_SAMPLE_S16LE;
-		spec.rate = this->port.have_format
-			? this->port.current_format.info.raw.rate : DEFAULT_RATE;
-		spec.channels = this->port.have_format
-			? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS;
-		if (spec.channels == 1)
-			pa_channel_map_init_mono(&map);
-		else
-			pa_channel_map_init_stereo(&map);
-
-		if ((res = hal_open_input(this, &spec, &map)) < 0) {
-			pa_droid_hw_module_unref(this->hw);
-			this->hw = NULL;
-			return res;
-		}
-		this->bytes_queued = this->bytes_written = 0;
-		this->n_process = this->n_write = 0;
-		this->n_write_err = this->n_overrun = this->n_underrun = 0;
-		this->hal_failed = false;
-		return 0;
-	}
 
 	/* IMPORTANT: pa_droid_hw_module_get duplicates the configuration
 	 * (dm_config_dup). pa_droid_open_output_stream compares ports by POINTER
@@ -516,11 +459,86 @@ static int hal_open(struct impl *this)
 	}
 	pa_droid_hw_module_unlock(this->hw);
 
-	this->bytes_queued = this->bytes_written = 0;
-	this->n_process = this->n_write = 0;
-	this->n_write_err = this->n_overrun = this->n_underrun = 0;
-	this->hal_failed = false;
+	reset_counters(this);
 	return 0;
+}
+
+/* Open the HAL: the module first, which both directions share, then whichever
+ * half this node is. */
+static int hal_open(struct impl *this)
+{
+	if (this->stream)
+		return 0;
+
+	{
+		/* Through modargs, so the module's vendor options take effect. This
+		 * one is off on this device and concerns the voice path:
+		 *
+		 *   speaker_before_voice=true routes briefly to the speaker before
+		 *                             the mode change; some devices start the
+		 *                             call wrong otherwise.
+		 *
+		 * FuriOS loads module-droid-card without it. Set droid.hw-options in
+		 * the node configuration to something else if you disagree.
+		 *
+		 * Options only take effect on the FIRST open of the module - after
+		 * that it lives in the process-wide registry. */
+		char args[512];
+		pa_modargs *ma;
+
+		snprintf(args, sizeof(args), "config=%s %s",
+				this->config_file, this->hw_options);
+		ma = pa_modargs_new(args, NULL);
+		this->hw = pa_droid_hw_module_get2(pa_compat_core(), ma, "primary");
+		pa_modargs_free(ma);
+	}
+	if (!this->hw) {
+		spa_log_error(this->log, NAME " could not open the HAL module");
+		return -EIO;
+	}
+	/* Keep the module loaded for the life of the process.
+	 *
+	 * Letting the last reference go unloads the Android side through
+	 * libhybris, and the next open faults inside the Android linker's own
+	 * initialisation:
+	 *
+	 *   android_linker_init () -> android_dlopen () -> hw_get_module_by_class ()
+	 *   -> droid_hw_module_open () -> hal_open ()            SIGSEGV
+	 *
+	 * That is one open and close per suspend/resume, so it was a matter of
+	 * time; it took down the whole daemon when playback fell back from a
+	 * Bluetooth headset to the phone. PulseAudio keeps the module for as long
+	 * as it runs, and so do we now. The module is not the exclusive part -
+	 * the stream is, and that is still opened and closed as before. */
+	if (hw_module_keepalive == NULL)
+		hw_module_keepalive = pa_droid_hw_module_ref(this->hw);
+	DIAG(this, "HAL options: %s", this->hw_options[0] ? this->hw_options : "(none)");
+
+	if (this->capture) {
+		pa_sample_spec spec;
+		pa_channel_map map;
+		int res;
+
+		spec.format = PA_SAMPLE_S16LE;
+		spec.rate = this->port.have_format
+			? this->port.current_format.info.raw.rate : DEFAULT_RATE;
+		spec.channels = this->port.have_format
+			? this->port.current_format.info.raw.channels : DEFAULT_CHANNELS;
+		if (spec.channels == 1)
+			pa_channel_map_init_mono(&map);
+		else
+			pa_channel_map_init_stereo(&map);
+
+		if ((res = hal_open_input(this, &spec, &map)) < 0) {
+			pa_droid_hw_module_unref(this->hw);
+			this->hw = NULL;
+			return res;
+		}
+		reset_counters(this);
+		return 0;
+	}
+
+	return hal_open_output(this);
 }
 
 static void hal_close(struct impl *this)

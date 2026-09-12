@@ -92,7 +92,8 @@ install -Dm644 gui/de.furios.audioswitch.desktop \
     "$STAGE/usr/share/applications/de.furios.audioswitch.desktop"
 install -Dm644 gui/de.furios.audioswitch.svg \
     "$STAGE/usr/share/icons/hicolor/scalable/apps/de.furios.audioswitch.svg"
-install -Dm644 README.md "$STAGE/usr/share/doc/$PKG/README.md"
+install -Dm644 README.md   "$STAGE/usr/share/doc/$PKG/README.md"
+install -Dm644 FINDINGS.md "$STAGE/usr/share/doc/$PKG/FINDINGS.md"
 
 # The sources here are MIT, but the plugin links LGPL-2.1 code from
 # pulseaudio-modules-droid-modern - so the package as a whole is LGPL-2.1.
