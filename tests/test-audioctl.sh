@@ -300,6 +300,48 @@ check "and a clean system says nothing" "" \
 check "migrating without root is refused" "yes" \
     "$(with_audioctl 'migrate_legacy 2>&1 | grep -q "as root" && echo yes || echo no')"
 
+# And what it does when it IS root. "id" is a stub here: the alternative is a
+# test that only runs for somebody who is willing to run a test suite as root,
+# which is nobody, which is how this path would stay untested.
+# "id -u" and "id -un" have to answer differently, which make_stub cannot do.
+cat > "$STUBDIR/id" <<'IDEOF'
+#!/bin/sh
+case "${1:-}" in
+-un) echo root ;;
+-u)  echo 0 ;;
+*)   echo "uid=0(root)" ;;
+esac
+IDEOF
+chmod +x "$STUBDIR/id"
+check "as root it clears the mask an older version left" "no" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/lg1"; mkdir -p "$LEGACY_ETCU"
+        ln -sf /dev/null "$LEGACY_ETCU/pulseaudio.service"
+        migrate_legacy >/dev/null 2>&1
+        [ -e "$LEGACY_ETCU/pulseaudio.service" ] && echo yes || echo no')"
+check "and the drop-in with it" "no" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/lg2"
+        mkdir -p "$LEGACY_ETCU/pipewire.service.d"
+        : > "$LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf"
+        migrate_legacy >/dev/null 2>&1
+        [ -e "$LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf" ] && echo yes || echo no')"
+check "a monitor file moved aside is put back rather than deleted" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/lg3"; mkdir -p "$LEGACY_ETCU"
+        d="$STUBDIR/usr/share/wireplumber/wireplumber.conf.d"; mkdir -p "$d"
+        : > "$d/50-droid.conf.off"
+        legacy_leftovers() { printf "%s" "$d/50-droid.conf.off"; }
+        migrate_legacy >/dev/null 2>&1
+        [ -e "$d/50-droid.conf" ] && echo yes || echo no')"
+check "anything else is refused rather than removed" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/lg4"; mkdir -p "$LEGACY_ETCU"
+        : > "$STUBDIR/innocent"
+        legacy_leftovers() { printf "%s" "$STUBDIR/innocent"; }
+        migrate_legacy >/dev/null 2>&1
+        [ -e "$STUBDIR/innocent" ] && echo yes || echo no')"
+check "with nothing left over it says so" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/lg5"
+        migrate_legacy 2>&1 | grep -q "already migrated" && echo yes || echo no')"
+rm -f "$STUBDIR/id"
+
 # --- the safety net --------------------------------------------------------
 stub_systemctl none none
 check "the safety net is enabled on the first switch" "yes" \
@@ -694,5 +736,22 @@ check "and it gives the directory an owner" "yes" \
 
 check "a directory anyone could write to is narrowed" "no" \
     "$(case "$(tail -1 "$STUBDIR/wide.txt")" in *[2367]) echo yes ;; *) echo no ;; esac)"
+
+# The dispatcher's own view of root: in for the migration, out for everything
+# else. Down here because run_audioctl is defined above this point.
+cat > "$STUBDIR/id" <<'IDEOF'
+#!/bin/sh
+case "${1:-}" in
+-un) echo root ;;
+-u)  echo 0 ;;
+*)   echo "uid=0(root)" ;;
+esac
+IDEOF
+chmod +x "$STUBDIR/id"
+check "root is allowed in for exactly this one command" "yes" \
+    "$(run_audioctl migrate 2>&1 | grep -q 'already migrated' && echo yes || echo no)"
+check "and turned away from everything else" "yes" \
+    "$(run_audioctl status 2>&1 | grep -q 'not as root' && echo yes || echo no)"
+rm -f "$STUBDIR/id"
 
 summary

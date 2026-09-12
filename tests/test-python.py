@@ -411,6 +411,41 @@ class Recording:
         self.text = getattr(toast, "title", toast)
 
 
+class FindsItsTools(unittest.TestCase):
+    """Which "audioctl" the app starts.
+
+    The installed paths come before $PATH, because what is started here used to
+    go on and ask polkit for root - and letting the search order decide which
+    binary that is was the one thing not to do. The reason is gone, the order
+    stays: $PATH is the last resort, not the first.
+    """
+
+    def test_an_installed_path_wins_over_the_search_path(self):
+        original = switcher.os.access
+        switcher.os.access = lambda path, mode: path == "/usr/bin/audioctl"
+        try:
+            self.assertEqual("/usr/bin/audioctl", switcher._tool("audioctl"))
+        finally:
+            switcher.os.access = original
+
+    def test_usr_local_wins_over_usr(self):
+        original = switcher.os.access
+        switcher.os.access = lambda path, mode: True
+        try:
+            self.assertEqual("/usr/local/bin/audioctl", switcher._tool("audioctl"))
+        finally:
+            switcher.os.access = original
+
+    def test_with_nothing_installed_it_falls_back(self):
+        original_access, original_which = switcher.os.access, switcher.shutil.which
+        switcher.os.access = lambda path, mode: False
+        switcher.shutil.which = lambda name: "/opt/bin/" + name
+        try:
+            self.assertEqual("/opt/bin/audioctl", switcher._tool("audioctl"))
+        finally:
+            switcher.os.access, switcher.shutil.which = original_access, original_which
+
+
 class TheWindow(unittest.TestCase):
     """The window, driven through its own callbacks.
 
@@ -722,6 +757,51 @@ class PauseOnDisconnect(unittest.TestCase):
                 ticks += 1
                 self.assertLess(ticks, 100, "this should not go on forever")
         self.assertEqual(ticks, len(watcher.RETRY_DELAYS_MS))
+
+    def test_a_second_disconnect_calls_off_the_first_watch(self):
+        """Two devices dropping in a row, or one dropping twice.
+
+        Each disconnect starts its own watch; the one before it has to be
+        called off, or the old one keeps pausing on a state it no longer knows
+        anything about.
+        """
+        buses = []
+
+        def bus_get_sync(kind, _cancellable):
+            bus = FakeBus(names=["org.mpris.MediaPlayer2.emilia"],
+                          status={"org.mpris.MediaPlayer2.emilia": "Playing"})
+            buses.append(bus)
+            return bus
+
+        original_get, original_loop = watcher.Gio.bus_get_sync, watcher.GLib.MainLoop
+        original_timeout = watcher.GLib.timeout_add
+        scheduled = []
+        watcher.Gio.bus_get_sync = bus_get_sync
+        watcher.GLib.MainLoop = lambda: type("L", (), {"run": lambda self: None})()
+        watcher.GLib.timeout_add = lambda _ms, fn: scheduled.append(fn)
+        try:
+            with redirect_stdout(io.StringIO()):
+                watcher.main()
+            system, session = buses[0], buses[1]
+            handler = system.subscriptions[0][-1]
+            lost = FakeVariant(["org.bluez.Device1", {"Connected": False}, []])
+
+            with redirect_stdout(io.StringIO()):
+                handler(None, None, "/org/bluez/hci0/dev_AA", None, None, lost)
+            first_round = list(scheduled)
+            with redirect_stdout(io.StringIO()):
+                handler(None, None, "/org/bluez/hci0/dev_BB", None, None, lost)
+
+            session.paused = []
+            with redirect_stdout(io.StringIO()):
+                for fire in first_round:
+                    fire()
+            self.assertEqual(session.paused, [],
+                             "the watch from the first disconnect must be off")
+        finally:
+            watcher.Gio.bus_get_sync = original_get
+            watcher.GLib.MainLoop = original_loop
+            watcher.GLib.timeout_add = original_timeout
 
     def test_a_cancelled_retry_does_nothing(self):
         bus = FakeBus(names=["org.mpris.MediaPlayer2.emilia"],

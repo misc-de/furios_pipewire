@@ -68,11 +68,6 @@ info() { printf '  %s\n' "$*"; }
 warn() { printf 'audioctl: %s\n' "$*" >&2; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
 
-# Root is wrong for everything here except the one-off migration below: the
-# state audioctl writes belongs to the user whose session it is.
-if [ "$(id -un)" = root ] && [ "${1:-}" != migrate ]; then
-    die "please run as the furios user, not as root - nothing here needs it (except 'audioctl migrate', once)."
-fi
 
 uctl() { systemctl --user "$@"; }
 
@@ -730,6 +725,14 @@ status() {
 # effective_profile() with stubbed pactl and systemctl.
 if [ -n "${AUDIOCTL_LIB:-}" ]; then
     return 0 2>/dev/null || exit 0
+fi
+
+# Root is wrong for everything here except the one-off migration: the state
+# audioctl writes belongs to the user whose session it is. Checked here rather
+# than at the top of the file, because sourcing this as a library must not end
+# in an exit.
+if [ "$(id -un)" = root ] && [ "${1:-}" != migrate ]; then
+    die "please run as the furios user, not as root - nothing here needs it (except 'audioctl migrate', once)."
 fi
 
 args=(); for a in "$@"; do [ "$a" = --dry-run ] && DRY=1 || args+=("$a"); done

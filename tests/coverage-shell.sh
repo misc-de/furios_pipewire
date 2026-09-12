@@ -75,8 +75,12 @@ for n, line in enumerate(open(target, errors="replace"), 1):
     if re.match(r"^[a-z_]+\(\)\s*\{?$", s) or s == "{":
         continue
     # The pattern line of a case branch is not a command either - bash reports
-    # what runs inside the branch, never the label.
-    if re.match(r"^[A-Za-z0-9_*?|.\-\[\]]+\)$", s):
+    # what runs inside the branch, never the label. Two shapes: a label on its
+    # own, and a label whose branch is empty ("...) ;;"), which is how a case
+    # says "this one is fine, do nothing". Patterns can contain quotes, slashes
+    # and variables, so match on the shape rather than on the character set -
+    # an empty branch used to count as a line no test could ever reach.
+    if re.match(r"^[A-Za-z0-9_*?|.\-\[\]]+\)$", s) or re.match(r"^\S.*\)\s*;;$", s):
         continue
     executable.add(n)
 

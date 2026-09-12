@@ -124,6 +124,19 @@ end
 T.check("the codec is told before the first route",
         first_route ~= nil and last_codec > 0 and last_codec < first_route)
 
+-- A headset whose hands-free profiles we cannot name: no codec is invented for
+-- it. The HAL then keeps its narrow-band default and says so in the log, which
+-- beats guessing - the wrong guess is silence that measures perfectly.
+setup()
+local dev2 = wp.add("device", droid_card("voicecall"))
+wp.add("device", wp.object({ ["device.api"] = "bluez5" }, { params = {
+  EnumProfile = { { name = "a2dp-sink", index = 0 } },
+} }))
+droid_nodes(dev2)
+fire(dev2)
+T.check_equal("a headset with no hands-free profile is told no codec", 0,
+              #codecs_told())
+
 -- The same event again while the call runs, with the card now reporting the
 -- Bluetooth route: there is nothing to defend, so nothing is set.
 wp.reset()

@@ -61,6 +61,12 @@ and Bluetooth calls over a headset (2026-09-12, heard end to end).
 | Bluetooth call (HFP) | works - needs the codec announced, see FINDINGS |
 | echo during a call | **open** |
 | `deep_buffer` / `compress_offload` for lower power | **unused** |
+| `droid-sink.monitor` | **broken** - reads silence whatever plays |
+
+The monitor is worth knowing about before using it to measure anything: it
+returns digital silence while audio is demonstrably playing. Nothing in the
+signal path depends on it, but it answers every question the same way. See
+FINDINGS.md.
 
 The control chain telephony runs on:
 
@@ -149,14 +155,13 @@ Everything reachable without hardware is at **100 %**:
 | `compat/pa-compat.c` | 100 % of 77 |
 | `compat/pa-containers.c` | 100 % of 172 |
 | `wireplumber/droid.lua` | 100 % of 133 |
-| `wireplumber/droid-bluetooth-call.lua` | 100 % of 140 |
+| `wireplumber/droid-bluetooth-call.lua` | 100 % of 172 |
 | `wireplumber/droid-default-sink-policy.lua` | 100 % of 61 |
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
-| `audioctl` | 100 % of 282 |
+| `audioctl` | 100 % of 333 |
 | `tools/furios-audio-callaudio-refresh` | 100 % of 9 |
-| `tools/furios-audio-helper` | 100 % of 44 |
-| `gui/furios-audio-switch.py` | 100 % of 383 |
-| `tools/furios-audio-pause-on-disconnect.py` | 100 % of 61 |
+| `gui/furios-audio-switch.py` | 100 % of 273 |
+| `tools/furios-audio-pause-on-disconnect.py` | 100 % of 95 |
 | `gen-pipewire-hal-conf.py` | 100 % of 28 |
 
 How the stubs work and why each suite is built the way it is:
