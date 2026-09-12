@@ -967,6 +967,63 @@ class PauseOnDisconnect(unittest.TestCase):
             watcher.pause_all(bus)
         self.assertIn("nothing was playing", out.getvalue())
 
+    def test_a_player_that_is_only_readable_later_is_still_caught(self):
+        """The morning this service was written for, and then failed at.
+
+        Earbuds died at 06:31:30 with a podcast playing. The one look at the
+        moment of the signal found nothing, the podcast moved to the
+        loudspeaker and played for 66 minutes. Reproduced with the service
+        stopped: the player really does stay "Playing" and follows the stream
+        onto the speaker. So a look that comes up empty is not an answer - it
+        has to be asked again.
+        """
+        bus = FakeBus(names=["org.mpris.MediaPlayer2.emilia"],
+                      status={"org.mpris.MediaPlayer2.emilia": "Paused"})
+        retry = watcher.Retry(bus)
+
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(retry.tick(), "it has to keep looking")
+        self.assertEqual(bus.paused, [], "nothing was playing on that look")
+
+        # A moment later the player is readable again, and playing.
+        bus.status["org.mpris.MediaPlayer2.emilia"] = "Playing"
+        with redirect_stdout(io.StringIO()):
+            retry.tick()
+        self.assertEqual(bus.paused, ["org.mpris.MediaPlayer2.emilia"])
+
+    def test_the_retries_run_out(self):
+        """It watches for a few seconds, not forever."""
+        bus = FakeBus(names=[])
+        retry = watcher.Retry(bus)
+        with redirect_stdout(io.StringIO()):
+            ticks = 1
+            while retry.tick():
+                ticks += 1
+                self.assertLess(ticks, 100, "this should not go on forever")
+        self.assertEqual(ticks, len(watcher.RETRY_DELAYS_MS))
+
+    def test_a_cancelled_retry_does_nothing(self):
+        bus = FakeBus(names=["org.mpris.MediaPlayer2.emilia"],
+                      status={"org.mpris.MediaPlayer2.emilia": "Playing"})
+        retry = watcher.Retry(bus)
+        retry.cancel()
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(retry.tick())
+        self.assertEqual(bus.paused, [], "a cancelled retry must not pause")
+
+    def test_a_player_too_slow_to_answer_is_reported(self):
+        """Silence here is what let a podcast run all morning.
+
+        A player that fails to answer within the timeout looked exactly like
+        one that was not playing, and the code said nothing at all about it.
+        """
+        bus = FakeBus(names=["org.mpris.MediaPlayer2.slow"],
+                      status={}, fail_on={"org.mpris.MediaPlayer2.slow"})
+        out = io.StringIO()
+        with redirect_stdout(out):
+            watcher.playing_players(bus)
+        self.assertIn("could not ask slow", out.getvalue())
+
     def test_it_watches_bluez_and_reacts_to_a_lost_connection(self):
         """main() wires the signal up; the handler is what decides."""
         buses = []
@@ -978,10 +1035,15 @@ class PauseOnDisconnect(unittest.TestCase):
             return bus
 
         original_get, original_loop = watcher.Gio.bus_get_sync, watcher.GLib.MainLoop
+        original_timeout = watcher.GLib.timeout_add
         ran = []
+        scheduled = []
         watcher.Gio.bus_get_sync = bus_get_sync
         watcher.GLib.MainLoop = lambda: type(
             "Loop", (), {"run": lambda self: ran.append(True)})()
+        # The retries are timeouts on the main loop; there is no loop here, so
+        # keep them and fire them by hand.
+        watcher.GLib.timeout_add = lambda _ms, fn: scheduled.append(fn)
         try:
             out = io.StringIO()
             with redirect_stdout(out):
@@ -1001,13 +1063,26 @@ class PauseOnDisconnect(unittest.TestCase):
             self.assertEqual(session.paused, ["org.mpris.MediaPlayer2.emilia"])
             self.assertIn("dev_AA disconnected", out.getvalue())
 
-            # Connecting is not our business.
+            # Losing a device also arms the retries.
+            self.assertEqual(len(scheduled), len(watcher.RETRY_DELAYS_MS),
+                             "one timeout per retry delay")
+
+            # Connecting is not our business - and it calls the retries off.
+            # Somebody just put their earbuds back in; pausing their music a
+            # few seconds later would be worse than the problem this service
+            # exists for.
             session.paused = []
             with redirect_stdout(out):
                 handler(None, None, "/org/bluez/hci0/dev_AA", None, None,
                         FakeVariant(["org.bluez.Device1", {"Connected": True},
                                      []]))
             self.assertEqual(session.paused, [])
+
+            with redirect_stdout(out):
+                for fire in scheduled:
+                    fire()
+            self.assertEqual(session.paused, [],
+                             "a retry after reconnecting must stay silent")
 
             # Neither is anything that is not a Bluetooth device.
             with redirect_stdout(out):
@@ -1018,6 +1093,7 @@ class PauseOnDisconnect(unittest.TestCase):
         finally:
             watcher.Gio.bus_get_sync = original_get
             watcher.GLib.MainLoop = original_loop
+            watcher.GLib.timeout_add = original_timeout
 
     def test_it_pauses_rather_than_muting_anything(self):
         """The alternative would be a phone that is silent for reasons nobody
