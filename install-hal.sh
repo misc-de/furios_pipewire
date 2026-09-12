@@ -25,10 +25,16 @@ echo "$BUILT_AGAINST" | sudo tee "$SPA_DIR/built-against" >/dev/null
 echo "   built against PipeWire $BUILT_AGAINST"
 
 echo "2) generating PipeWire configuration"
-./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf /tmp/pipewire-hal.conf
+# mktemp, not a fixed name in /tmp: this file is installed into /usr with
+# sudo, and a predictable path is one anyone on the machine can point
+# somewhere else - or swap out between writing it and installing it.
+HALCONF=$(mktemp) || { echo "could not create a temporary file" >&2; exit 1; }
+trap 'rm -f "$HALCONF"' EXIT INT TERM
+./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$HALCONF"
 sudo mkdir -p /usr/local/share/furios-audio
-sudo install -m644 /tmp/pipewire-hal.conf /usr/local/share/furios-audio/pipewire-hal.conf
-rm -f /tmp/pipewire-hal.conf
+sudo install -m644 "$HALCONF" /usr/local/share/furios-audio/pipewire-hal.conf
+rm -f "$HALCONF"
+trap - EXIT INT TERM
 
 echo "3) WirePlumber monitor"
 sudo mkdir -p /usr/local/share/wireplumber/scripts/monitors /usr/local/share/wireplumber/wireplumber.conf.d

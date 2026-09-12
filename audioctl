@@ -13,6 +13,33 @@ set -u
 STATE_DIR=${AUDIOCTL_STATE_DIR:-/var/lib/furios-audio}
 STICKY=$STATE_DIR/profile
 TRY=$STATE_DIR/profile.try
+
+# The profile written here decides what furios-audio-apply.service applies at
+# the next login, and that runs audioctl again - so a state directory anyone
+# can write to hands the audio stack to anyone on the machine. Found exactly
+# that on the phone this was developed on: /var/lib/furios-audio at 1777 and
+# profile at 0666. Create it narrow, and say so rather than trust a wide one.
+state_dir_ready() {
+    [ -d "$STATE_DIR" ] || { mkdir -p "$STATE_DIR" 2>/dev/null || return 1; chmod 0755 "$STATE_DIR" 2>/dev/null; }
+    perms=$(stat -c %a "$STATE_DIR" 2>/dev/null) || return 0
+    case "$perms" in
+    *[2367])
+        # Ours to fix, or somebody else's to know about.
+        chmod o-w,g-w "$STATE_DIR" 2>/dev/null \
+            || warn "$STATE_DIR is writable by others ($perms) - anyone on this device can choose the audio profile"
+        ;;
+    esac
+    return 0
+}
+
+# Write one line into a state file, readable by all and writable by nobody
+# else. Without the umask the file inherits whatever the caller had.
+write_state() {
+    _f=$1 _v=$2
+    state_dir_ready || return 1
+    ( umask 022; printf '%s\n' "$_v" > "$_f" ) || return 1
+    chmod 0644 "$_f" 2>/dev/null
+}
 ETCU=${AUDIOCTL_ETCU:-/etc/systemd/user}
 DROPIN=$ETCU/pipewire.service.d/50-furios-audio.conf
 # Files can come from two sources: installed from the source tree
@@ -30,6 +57,7 @@ DRY=0
 
 die()  { printf 'audioctl: %s\n' "$*" >&2; exit 1; }
 info() { printf '  %s\n' "$*"; }
+warn() { printf 'audioctl: %s\n' "$*" >&2; }
 run()  { if [ "$DRY" = 1 ]; then printf '  [dry] %s\n' "$*"; else "$@"; fi; }
 
 [ "$(id -un)" = root ] && die "please run as the furios user, not as root - it asks for the password itself where it needs one."
@@ -65,7 +93,10 @@ can_ask() {
 }
 
 priv() {
-    if [ -n "${AUDIOCTL_PRIV:-}" ]; then
+    # AUDIOCTL_PRIV replaces the whole way to root, so it is a test seam and
+    # nothing else: ignored outright once this runs as root, where inheriting
+    # a command name from the environment would be the last thing to do.
+    if [ -n "${AUDIOCTL_PRIV:-}" ] && [ "$(id -u)" != 0 ]; then
         "$AUDIOCTL_PRIV" "$@"
     elif can_ask; then
         pkexec "$HELPER" "$@"
@@ -368,9 +399,9 @@ switch_to() {
         info "OK - sink present: $(pactl list sinks short | awk '{print $2}' | paste -sd, -)"
         info "Pulse server: $(pulse_owner)"
         case "$mode" in
-        sticky) mkdir -p "$STATE_DIR"; printf '%s\n' "$p" > "$STICKY"; rm -f "$TRY"
+        sticky) write_state "$STICKY" "$p"; rm -f "$TRY"
                 info "set persistently (survives a reboot)" ;;
-        try)    mkdir -p "$STATE_DIR"; printf '%s\n' "$p" > "$TRY"
+        try)    write_state "$TRY" "$p"
                 info "only until the next reboot - then back to '$(cat "$STICKY" 2>/dev/null || echo standard)'" ;;
         esac
         [ "$p" != standard ] && info "please check telephony: call, ringtone, earpiece/speaker."

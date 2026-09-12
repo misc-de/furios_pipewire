@@ -23,7 +23,13 @@ set -e
 
 PWVER=$(pkg-config --modversion libpipewire-0.3)
 SPADIR=$(pkg-config --variable=libdir libpipewire-0.3)/spa-0.2/bluez5
-SRC=${SRC:-/tmp/pipewire-$PWVER-src}
+# NOT /tmp: what is built here is installed into /usr with sudo, so whoever
+# controls the source tree controls a file that every session then loads. A
+# predictable path under /tmp lets anyone on the machine put one there first -
+# this script would find it ("sources already in ...") and build it. The
+# default now lives in the user's own cache, and a path handed in through SRC
+# is checked before it is trusted.
+SRC=${SRC:-${XDG_CACHE_HOME:-$HOME/.cache}/furios-audio/pipewire-$PWVER-src}
 
 echo "PipeWire $PWVER, module goes to $SPADIR"
 
@@ -40,11 +46,29 @@ if [ -n "$MISSING" ]; then
     exit 1
 fi
 
+# A tree that is already there is only reused when it is ours and nobody else
+# can write to it. Anything else is refused rather than built: the result of
+# this build goes into a system directory.
+check_tree() {
+    [ -L "$1" ] && { echo "$1 is a symlink - refusing to build from it" >&2; exit 1; }
+    owner=$(stat -c %u "$1" 2>/dev/null) || return 0
+    [ "$owner" = "$(id -u)" ] || {
+        echo "$1 belongs to uid $owner, not to you - refusing to build from it" >&2
+        exit 1; }
+    perms=$(stat -c %a "$1" 2>/dev/null)
+    case "$perms" in
+    *[2367])  echo "$1 is writable by others ($perms) - refusing" >&2; exit 1 ;;
+    esac
+}
+
 if [ ! -d "$SRC" ]; then
     echo "1) fetching the matching sources"
+    mkdir -p "$(dirname "$SRC")"
     git clone -q --depth 1 --branch "$PWVER" \
         https://gitlab.freedesktop.org/pipewire/pipewire.git "$SRC"
+    check_tree "$SRC"
 else
+    check_tree "$SRC"
     echo "1) sources already in $SRC"
 fi
 

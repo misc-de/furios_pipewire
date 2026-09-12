@@ -182,13 +182,34 @@ EOF
 cat > "$STAGE/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
-# State directory; the switcher writes into it as the user.
+# State directory. audioctl runs as the user and rewrites the profile on every
+# switch, so the user needs to be able to write here - but by OWNING it, not by
+# it being open to everyone.
+#
+# It used to be chmod 1777 on the directory and 666 on the file, which is the
+# same as letting anyone on the device choose the audio profile: the file is
+# read at every login by furios-audio-apply.service, which then runs audioctl
+# with it. Found that way on a running phone.
+#
+# Who owns it: whoever is installing, or whoever is logged in. NOT "the first
+# account above uid 1000" - on this phone that is the system account "radio",
+# while the person using it is "furios" at uid 32011. An upgrade keeps the
+# owner it already has. If none of that yields anybody, the directory stays
+# root's and narrow, and audioctl says it cannot persist a profile - which is
+# a great deal better than a state file the whole machine can write.
+existing=$(stat -c %U /var/lib/furios-audio 2>/dev/null || echo "")
 mkdir -p /var/lib/furios-audio
-chmod 1777 /var/lib/furios-audio
+chmod 0755 /var/lib/furios-audio
 [ -e /var/lib/furios-audio/profile ] || echo standard > /var/lib/furios-audio/profile
-# The file is created by root, but audioctl runs as the user and rewrites it on
-# every switch - without this it could never persist a profile.
-chmod 666 /var/lib/furios-audio/profile
+chmod 0644 /var/lib/furios-audio/profile
+
+owner=${SUDO_USER:-}
+[ -z "$owner" ] && [ -n "${PKEXEC_UID:-}" ] && owner=$(getent passwd "$PKEXEC_UID" | cut -d: -f1)
+[ -z "$owner" ] && [ -n "$existing" ] && [ "$existing" != root ] && owner=$existing
+[ -z "$owner" ] && owner=$(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $3; exit}')
+if [ -n "$owner" ] && [ "$owner" != root ] && getent passwd "$owner" >/dev/null 2>&1; then
+    chown -R "$owner" /var/lib/furios-audio || true
+fi
 gtk-update-icon-cache -qtf /usr/share/icons/hicolor 2>/dev/null || true
 update-desktop-database -q /usr/share/applications 2>/dev/null || true
 echo "Installed. Active profile unchanged - switch with: audioctl toggle"

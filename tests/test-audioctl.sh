@@ -655,4 +655,52 @@ stub_systemctl pipewire-pulse.service furios-audio-apply.service
 check "toggle from pw-hal goes back to standard, and stays" "yes" \
     "$(run_audioctl --dry-run toggle | grep -q -- '-> standard (sticky)' && echo yes || echo no)"
 
+# --- what it refuses, and how it leaves the state directory ------------------
+#
+# The profile written into the state directory decides what
+# furios-audio-apply.service applies at the next login, and that runs audioctl
+# again. So the name has to be one of ours, and the directory must not be
+# something anyone on the device can write to. Found at 1777 with the profile
+# file at 0666 on the phone this was developed on.
+
+# preflight() already refuses these - this is here so it stays that way. The
+# name ends up in the state file, and from there in the next login's audioctl.
+check "an unknown profile is refused rather than stored" "yes" \
+    "$(run_audioctl --dry-run set boesartig 2>&1 | grep -q 'unknown profile' && echo yes || echo no)"
+check "and a made-up one for try as well" "yes" \
+    "$(run_audioctl --dry-run try nonsense 2>&1 | grep -q 'unknown profile' && echo yes || echo no)"
+check "the three real ones are not refused" "no" \
+    "$(for p in standard pw-tunnel pw-hal; do
+          run_audioctl --dry-run set "$p" 2>&1 | grep -q 'unknown profile' && echo yes
+       done | grep -q yes && echo yes || echo no)"
+
+# --- the state directory it leaves behind -----------------------------------
+
+( load_audioctl >/dev/null 2>&1
+  STATE_DIR=$STUBDIR/state; STICKY=$STATE_DIR/profile
+  rm -rf "$STATE_DIR"
+  write_state "$STICKY" pw-hal >/dev/null 2>&1
+  stat -c '%a' "$STATE_DIR" "$STICKY" 2>/dev/null ) > "$STUBDIR/perms.txt" 2>&1
+check "a fresh state directory is not writable by others" "755" \
+    "$(sed -n 1p "$STUBDIR/perms.txt")"
+check "and the profile file neither" "644" \
+    "$(sed -n 2p "$STUBDIR/perms.txt")"
+
+( load_audioctl >/dev/null 2>&1
+  STATE_DIR=$STUBDIR/wide; rm -rf "$STATE_DIR"; mkdir -p "$STATE_DIR"; chmod 0777 "$STATE_DIR"
+  state_dir_ready >/dev/null 2>&1
+  stat -c '%a' "$STATE_DIR" ) > "$STUBDIR/wide.txt" 2>&1
+# And the package must not undo it. This was the actual source: postinst set
+# the directory to 1777 and the profile file to 0666, so every account on the
+# phone could pick what audioctl applies at the next login.
+check "the package does not open the state directory to everyone" "no" \
+    "$(grep -qE 'chmod +(1777|777|0777|666|0666) +/var/lib/furios-audio' \
+        "$HERE/../packaging/build-deb.sh" && echo yes || echo no)"
+check "and it gives the directory an owner" "yes" \
+    "$(grep -q 'chown -R "\$owner" /var/lib/furios-audio' \
+        "$HERE/../packaging/build-deb.sh" && echo yes || echo no)"
+
+check "a directory anyone could write to is narrowed" "no" \
+    "$(case "$(tail -1 "$STUBDIR/wide.txt")" in *[2367]) echo yes ;; *) echo no ;; esac)"
+
 summary
