@@ -12,8 +12,8 @@ This repository contains two things:
    directly to PipeWire, so PulseAudio can be dropped entirely.
 
 **Two files:** this one says what it does and how to run it.
-**[FINDINGS.md](FINDINGS.md)** says why it is built this way - every
-measurement, every wrong turn, and the traps that cost days.
+**[FINDINGS.md](FINDINGS.md)** says why it is built this way - the
+measurements behind each decision, and the traps worth knowing about.
 
 ## Profiles (audioctl)
 
@@ -33,9 +33,9 @@ after the switch, audioctl falls back to `standard` on its own.
 After a switch, actually play something.
 
 Before switching to `pw-hal`, audioctl checks whether the plugin still matches
-the installed PipeWire version (`built-against` next to the plugin file). If a
-system update breaks the SPA interface, `pw-hal` would otherwise go silent
-without a word - now there is a warning telling you to rebuild.
+the installed PipeWire version (`built-against` next to the plugin file) and
+warns you to rebuild if it does not. A broken SPA interface makes `pw-hal` go
+silent without a word otherwise.
 
 `audioctl rescue` makes sound audible again: shipped state, speaker instead of
 earpiece, unmuted, 65 %. `bt-call` catches aborts with a trap so an interrupted
@@ -81,8 +81,8 @@ The control chain telephony runs on:
 the card and waits synchronously for every PulseAudio operation it starts, so
 anything that changes the set of cards underneath it leaves the next call
 without audio in either direction. `audioctl` and
-`furios-audio-callaudio-refresh.service` handle the cases we know of;
-FINDINGS.md has the three that cost a day each.
+`furios-audio-callaudio-refresh.service` cover the cases we know of; the rest
+is in [FINDINGS.md](FINDINGS.md#why-telephony-is-fragile-callaudiod).
 
 ## As a package
 
@@ -206,35 +206,18 @@ droid monitor off or on. All three happen in the user's own configuration:
     ~/.config/systemd/user/                     masks and the drop-in
     ~/.config/wireplumber/wireplumber.conf.d/   the monitor
 
-systemd and WirePlumber both read those **before** `/etc` and `/usr/share`, so
-the session can do the whole thing itself. There is no helper, no `pkexec`, no
-`sudo` and nothing for a sudoers line to allow.
+systemd and WirePlumber read those **before** `/etc` and `/usr/share`, so the
+session does the whole thing itself: no helper, no `pkexec`, no `sudo`, and
+nothing for a sudoers line to allow. The switcher app handles no passwords
+either. Why it is built this way:
+[FINDINGS.md](FINDINGS.md#getting-rid-of-root-entirely).
 
-That is a recent change. It used to be `sudo ln`, `sudo rm`, `sudo mv` and
-`sudo tee` out of `audioctl`; then a helper behind polkit with five fixed
-operations; and the safety net at boot still needed passwordless `sudo`,
-because nobody is there to type anything. The line that made that work is the
-one FuriOS ships:
-
-    furios ALL=(ALL) NOPASSWD:ALL
-
-Nothing in this repository depends on it any more. Whether to keep it is now a
-question about the rest of the system, not about audio.
-
-**Coming from an older version:** masks and drop-ins left in `/etc/systemd/user`
-still win, and `audioctl` can no longer remove them. It says so when it
-matters, with the command that clears them:
+If masks or a drop-in sit in `/etc/systemd/user`, they win and `audioctl`
+cannot remove them. It says so when it matters, with the command that can:
 
     sudo audioctl migrate
 
-That is the only thing in `audioctl` that wants root, and it is meant to be run
-once.
-
-**The switcher app no longer handles passwords either.** It used to register a
-polkit authentication agent, because phosh registers none and every polkit
-action would otherwise fail with "No authentication agent found". With nothing
-left to authenticate, that came out - about 180 lines, a dependency on the
-polkit bindings, and a dialog that took a password.
+That is the only thing in `audioctl` that wants root, and it is run once.
 
 ## Switching at the push of a button
 
