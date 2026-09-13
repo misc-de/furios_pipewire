@@ -88,9 +88,17 @@ def log(msg):
     print(msg, flush=True)
 
 
-def hands_free_sink():
-    """The Bluetooth sink to hold, but only if the card is in a hands-free
-    profile right now. None means "not yet" or "not this profile"."""
+def bluez_profile():
+    """The active profile of the Bluetooth card, or None if there is no such
+    card at all.
+
+    The difference matters only for what gets said afterwards: "no headset is
+    connected" is an ordinary call on the earpiece and worth one quiet line,
+    while "a headset is connected and never reached hands-free" is the routing
+    being broken and worth a warning that names the setting. Logging the second
+    one for every earpiece call is how a later search starts in the wrong
+    place.
+    """
     try:
         cards = subprocess.run(["pactl", "list", "cards"],
                                capture_output=True, text=True, timeout=5).stdout
@@ -98,14 +106,20 @@ def hands_free_sink():
         log("could not ask pactl about cards: %s" % err)
         return None
 
-    in_bluez, profile = False, None
+    in_bluez = False
     for line in cards.splitlines():
         stripped = line.strip()
         if stripped.startswith("Name: "):
             in_bluez = stripped[len("Name: "):].startswith("bluez_card.")
         elif in_bluez and stripped.startswith("Active Profile: "):
-            profile = stripped[len("Active Profile: "):]
-            break
+            return stripped[len("Active Profile: "):]
+    return None
+
+
+def hands_free_sink():
+    """The Bluetooth sink to hold, but only if the card is in a hands-free
+    profile right now. None means "not yet" or "not this profile"."""
+    profile = bluez_profile()
     if profile is None or not profile.startswith(HANDS_FREE_PREFIX):
         return None
 
@@ -128,9 +142,11 @@ class Hold:
     def __init__(self):
         self.proc = None
         self.restarts = 0
-        self.waiting = False
         self.watch = None
         self.deadline = None
+        # Which call the waiting belongs to. stop() moves it on, so a poll
+        # scheduled for a call that has since ended knows to do nothing.
+        self.epoch = 0
 
     def running(self):
         return self.proc is not None and self.proc.poll() is None
@@ -172,34 +188,45 @@ class Hold:
         self.stop()
         return False
 
-    def begin(self, waited=0):
+    def begin(self, waited=0, epoch=None):
         """Wait for the hands-free profile, then hold. Called on every call."""
+        if epoch is not None and epoch != self.epoch:
+            # The call this poll was waiting for ended while the poll was in
+            # flight, and a short call - one ring, one rejection - ends well
+            # inside the twelve seconds. Holding now would put a silent stream
+            # on a headset nobody is talking through, and since no CallRemoved
+            # is coming any more, nothing would take it back off until the
+            # three-hour deadline: narrow-band mono music for the afternoon,
+            # blamed on the headset.
+            return False
         if self.running():
             return False
         sink = hands_free_sink()
         if sink:
-            self.waiting = False
             self.start_on(sink)
             return False
         if waited >= MAX_WAIT_MS:
-            self.waiting = False
-            log("no hands-free profile after %d s - not holding anything. "
-                "Is furios.bluetooth-call-routing on?" % (MAX_WAIT_MS // 1000))
+            if bluez_profile() is None:
+                log("no Bluetooth headset on this call - nothing to hold")
+            else:
+                log("no hands-free profile after %d s - not holding anything. "
+                    "Is furios.bluetooth-call-routing on?" % (MAX_WAIT_MS // 1000))
             return False
-        self.waiting = True
-        GLib.timeout_add(POLL_MS, self.begin, waited + POLL_MS)
+        GLib.timeout_add(POLL_MS, self.begin, waited + POLL_MS, self.epoch)
         return False
 
     def stop(self):
-        self.waiting = False
+        # Anything still waiting was waiting for this call. Moving the epoch on
+        # is what calls it off; the poll itself fires once more and returns.
+        self.epoch += 1
         self.restarts = 0
         if self.deadline is not None:
             GLib.source_remove(self.deadline)
             self.deadline = None
         proc, self.proc = self.proc, None
-        if self.watch is not None:
-            GLib.source_remove(self.watch)
-            self.watch = None
+        # The child watch is deliberately left in place: it is what reaps the
+        # stream once the kill lands, and _died already does nothing when the
+        # stop was on purpose. Removing it here left a zombie behind per call.
         if proc is None or proc.poll() is not None:
             return
         try:
@@ -243,7 +270,7 @@ def main():
 
     system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
     hold = Hold()
-    calls = existing_calls(system)
+    calls = set()
 
     def on_added(_conn, _sender, _path, _iface, _signal, params):
         path = params.unpack()[0]
@@ -260,12 +287,49 @@ def main():
             log("call ended")
             hold.stop()
 
+    # Subscribing before asking what is up, not after: in the other order a
+    # call that starts in between is never seen at all. A subscription on a
+    # well-known name keeps working across a change of owner - measured on
+    # 2026-09-13 against a name claimed only after the subscription was made -
+    # so this survives ofono starting late and ofono being restarted.
     system.signal_subscribe("org.ofono", "org.ofono.VoiceCallManager",
                             "CallAdded", None, None, Gio.DBusSignalFlags.NONE,
                             on_added)
     system.signal_subscribe("org.ofono", "org.ofono.VoiceCallManager",
                             "CallRemoved", None, None,
                             Gio.DBusSignalFlags.NONE, on_removed)
+
+    def ofono_appeared(_conn, _name, _owner):
+        # Either ofono is starting after this service - the usual order at
+        # boot, where asking straight away only produced a ServiceUnknown in
+        # the journal - or it has just been restarted. Both are answered the
+        # same way: ask what is up right now instead of assuming.
+        #
+        # This re-read is what repairs a restart. A call that was up when
+        # ofono went down never gets a CallRemoved, and a path left behind in
+        # the set makes every later call look like a second call - which is
+        # deliberately not held. One restart during one call would otherwise
+        # cost every Bluetooth call after it until this service was restarted.
+        calls.clear()
+        calls.update(existing_calls(system))
+        if calls:
+            log("ofono is here and a call is already up - "
+                "waiting for the hands-free profile")
+            hold.begin()
+        else:
+            log("watching ofono for calls")
+
+    def ofono_vanished(_conn, _name):
+        # No CallRemoved is ever coming for what was up, so let go now rather
+        # than leave a headset in hands-free waiting for one. What the set
+        # still says is put right on the way back in, not here.
+        if calls:
+            log("ofono went away mid-call - letting go")
+            hold.stop()
+
+    Gio.bus_watch_name_on_connection(
+        system, "org.ofono", Gio.BusNameWatcherFlags.NONE,
+        ofono_appeared, ofono_vanished)
 
     loop = GLib.MainLoop()
 
@@ -279,10 +343,6 @@ def main():
     unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGTERM, bye)
     unix_signal_add(GLib.PRIORITY_DEFAULT, signal.SIGINT, bye)
 
-    if calls:
-        log("started during a call - waiting for the hands-free profile")
-        hold.begin()
-    log("watching ofono for calls")
     loop.run()
 
 

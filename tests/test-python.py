@@ -44,6 +44,7 @@ watcher = load(ROOT / "tools" / "furios-audio-pause-on-disconnect.py", "watcher"
 switcher = load(ROOT / "gui" / "furios-audio-switch.py", "switcher")
 sco = load(ROOT / "tools" / "furios-audio-sco-hold.py", "sco_hold")
 hands_free_sink_real = sco.hands_free_sink
+os_real = sco.os
 
 
 class ConfigGenerator(unittest.TestCase):
@@ -992,6 +993,8 @@ class PauseOnDisconnect(unittest.TestCase):
 class FakePactl:
     """Stands in for the two pactl calls hands_free_sink() makes."""
 
+    SubprocessError = Exception
+
     def __init__(self, cards, sinks):
         self.cards, self.sinks = cards, sinks
 
@@ -1053,13 +1056,69 @@ class ScoHoldFindsTheRightSink(unittest.TestCase):
         self.assertIsNone(sco.hands_free_sink())
 
 
+class ScoHoldSaysWhyItHeldNothing(unittest.TestCase):
+    """Two ways to hold nothing, and only one of them is a fault.
+
+    Every call on the earpiece ends up here, so a warning that names the
+    routing setting would be printed for calls that never had a headset in
+    them. A journal full of those is how the next search into a silent
+    Bluetooth call starts by ruling out the wrong thing.
+    """
+
+    def gave_up_with(self, cards):
+        sco.subprocess = FakePactl(cards, SINKS)
+        self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            sco.Hold().begin(waited=sco.MAX_WAIT_MS)
+        return out.getvalue()
+
+    def test_no_headset_at_all_is_not_worth_a_warning(self):
+        text = self.gave_up_with("Card #118\n\tName: droid\n\tActive Profile: default\n")
+        self.assertIn("no Bluetooth headset", text)
+        self.assertNotIn("furios.bluetooth-call-routing", text)
+
+    def test_a_headset_that_never_switched_is_worth_one(self):
+        # The headset is right there in A2DP and the call is up: the routing
+        # was supposed to move it and did not. That is the case the setting is
+        # named for.
+        text = self.gave_up_with(CARDS_A2DP)
+        self.assertIn("furios.bluetooth-call-routing", text)
+
+
+class FakeOs:
+    """os, but it cannot reach anything that is really running.
+
+    stop() kills the process group the stream was started in. FakePopen makes
+    its pid up, and on a machine where that number happens to belong to a real
+    process - on a freshly booted phone 4242 is an ordinary pid - the real
+    os.getpgid succeeds and the suite sends SIGTERM to whatever that is. It
+    also made the test pass or fail depending on what else was running, which
+    is how it was found.
+    """
+
+    def __init__(self, gone=False):
+        self.killed = []
+        self.gone = gone
+
+    def getpgid(self, pid):
+        if self.gone:
+            raise ProcessLookupError("no such process")
+        return pid
+
+    def killpg(self, pgid, sig):
+        self.killed.append((pgid, sig))
+
+
 class FakePopen:
     """A process that is alive until somebody says otherwise."""
 
     started = []
 
+    PID = 4242
+
     def __init__(self, argv, **_kwargs):
-        self.argv, self.pid, self._rc = argv, 4242, None
+        self.argv, self.pid, self._rc = argv, FakePopen.PID, None
         FakePopen.started.append(argv)
 
     def poll(self):
@@ -1078,6 +1137,9 @@ class ScoHoldBehaviour(unittest.TestCase):
                                           SubprocessError=Exception)
         sco.subprocess = self.fake
         self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        self.os = FakeOs()
+        sco.os = self.os
+        self.addCleanup(setattr, sco, "os", os_real)
 
     def hold_with(self, sink):
         hold = sco.Hold()
@@ -1111,17 +1173,29 @@ class ScoHoldBehaviour(unittest.TestCase):
         with redirect_stdout(out):
             hold.begin(waited=sco.MAX_WAIT_MS)
         self.assertEqual(FakePopen.started, [])
-        # And it says why, naming the setting - a call that is silently not
-        # held looks exactly like a headset that is broken.
-        self.assertIn("furios.bluetooth-call-routing", out.getvalue())
+        # And it says why - a call that is silently not held looks exactly
+        # like a headset that is broken. Which of the two reasons it gives is
+        # ScoHoldSaysWhyItHeldNothing's business.
+        self.assertIn("nothing to hold", out.getvalue())
 
     def test_stopping_ends_the_stream(self):
         hold = self.hold_with("bluez_output.X")
-        proc = hold.proc
+        pid = hold.proc.pid
         with redirect_stdout(io.StringIO()):
             hold.stop()
         self.assertIsNone(hold.proc)
-        self.assertIsNotNone(proc.poll())
+        # The group, not the process: the stream runs in a session of its own
+        # so that a profile change cannot take it down, and only the group
+        # kill reaches it there.
+        self.assertEqual(self.os.killed, [(pid, sco.signal.SIGTERM)])
+
+    def test_a_stream_whose_group_is_already_gone_is_not_an_error(self):
+        hold = self.hold_with("bluez_output.X")
+        sco.os = FakeOs(gone=True)
+        proc = hold.proc
+        with redirect_stdout(io.StringIO()):
+            hold.stop()
+        self.assertIsNotNone(proc.poll(), "it has to fall back to terminate()")
 
     def test_stopping_twice_is_harmless(self):
         hold = self.hold_with("bluez_output.X")
@@ -1144,6 +1218,43 @@ class ScoHoldBehaviour(unittest.TestCase):
         # stops - not "at most", or a version that never restarts at all would
         # pass this too.
         self.assertEqual(len(FakePopen.started), sco.MAX_RESTARTS + 1)
+
+    def test_a_poll_left_over_from_an_ended_call_holds_nothing(self):
+        """The bug this guards: a call short enough to end while the wait for
+        the hands-free profile is still running - one ring and a rejection -
+        left the poll in flight. It fired afterwards, found the headset still
+        in hands-free because the routing had not switched back yet, and put a
+        silent stream on it with no call to end it. Nothing would have taken it
+        off again until the three-hour deadline."""
+        hold = sco.Hold()
+        sco.hands_free_sink = lambda: "bluez_output.X"
+        self.addCleanup(setattr, sco, "hands_free_sink", hands_free_sink_real)
+        epoch = hold.epoch
+        with redirect_stdout(io.StringIO()):
+            hold.stop()                       # the call ended first
+            hold.begin(waited=sco.POLL_MS, epoch=epoch)
+        self.assertEqual(FakePopen.started, [],
+                         "a poll from a call that is over must hold nothing")
+
+    def test_the_wait_for_a_new_call_is_not_called_off_by_the_old_one(self):
+        # The epoch must not be so blunt that it kills the call after it too.
+        hold = sco.Hold()
+        sco.hands_free_sink = lambda: "bluez_output.X"
+        self.addCleanup(setattr, sco, "hands_free_sink", hands_free_sink_real)
+        with redirect_stdout(io.StringIO()):
+            hold.stop()
+            hold.begin(waited=sco.POLL_MS, epoch=hold.epoch)
+        self.assertEqual(len(FakePopen.started), 1)
+
+    def test_stopping_leaves_the_child_watch_to_reap_the_stream(self):
+        # Taking the watch away and only then killing the process leaves
+        # nobody to reap it: one zombie per call. _died already ignores a
+        # deliberate stop, so the watch can simply be left alone.
+        hold = self.hold_with("bluez_output.X")
+        with redirect_stdout(io.StringIO()):
+            hold.stop()
+        self.assertIsNotNone(hold.watch,
+                             "the watch has to outlive the kill to reap it")
 
     def test_a_deliberate_stop_is_not_treated_as_a_death(self):
         # stop() clears proc first; the child watch then fires. Restarting
@@ -1214,20 +1325,46 @@ class ScoHoldMain(unittest.TestCase):
         sco.subprocess = types.SimpleNamespace(Popen=FakePopen, DEVNULL=-3,
                                                SubprocessError=Exception)
         self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        self.os = FakeOs()
+        sco.os = self.os
+        self.addCleanup(setattr, sco, "os", os_real)
         sco.hands_free_sink = lambda: "bluez_output.X"
         self.addCleanup(setattr, sco, "hands_free_sink", hands_free_sink_real)
         self.bus = OfonoBus()
         self.ran = []
-        originals = (sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which)
+        self.watchers = []
+        originals = (sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which,
+                     sco.Gio.bus_watch_name_on_connection)
         self.addCleanup(self.restore, originals)
         sco.Gio.bus_get_sync = lambda _kind, _c: self.bus
+        sco.Gio.bus_watch_name_on_connection = self.watch_name
         sco.GLib.MainLoop = lambda: type(
             "Loop", (), {"run": lambda _self: self.ran.append(True),
                          "quit": lambda _self: None})()
         sco.shutil.which = lambda _tool: "/usr/bin/" + _tool
 
     def restore(self, originals):
-        sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which = originals
+        (sco.Gio.bus_get_sync, sco.GLib.MainLoop, sco.shutil.which,
+         sco.Gio.bus_watch_name_on_connection) = originals
+
+    def watch_name(self, _conn, _name, _flags, appeared, vanished):
+        self.watchers.append((appeared, vanished))
+        return 1
+
+    def ofono_appears(self):
+        """ofono claiming the name - at boot it does so after this service."""
+        out = io.StringIO()
+        with redirect_stdout(out):
+            for appeared, _vanished in self.watchers:
+                appeared(None, "org.ofono", ":1.5")
+        return out.getvalue()
+
+    def ofono_vanishes(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            for _appeared, vanished in self.watchers:
+                vanished(None, "org.ofono")
+        return out.getvalue()
 
     def run_main(self):
         out = io.StringIO()
@@ -1240,11 +1377,20 @@ class ScoHoldMain(unittest.TestCase):
         return self.bus.subscriptions[0][-1], self.bus.subscriptions[1][-1]
 
     def test_it_subscribes_to_both_ends_of_a_call(self):
-        text = self.run_main()
-        self.assertIn("watching ofono", text)
+        self.run_main()
         self.assertTrue(self.ran, "it has to keep running, not return at once")
         members = [args[2] for args in self.bus.subscriptions]
         self.assertEqual(members, ["CallAdded", "CallRemoved"])
+        self.assertIn("watching ofono", self.ofono_appears())
+
+    def test_it_subscribes_before_asking_what_is_up(self):
+        # In the other order a call that starts between the asking and the
+        # subscribing is never seen at all - and at boot the asking is the
+        # part that has to wait for ofono.
+        self.bus = OfonoBus(modems=["/ril_0"])
+        self.run_main()
+        self.assertTrue(self.bus.subscriptions,
+                        "subscribed too late to be sure of catching a call")
 
     def test_a_call_starts_a_hold_and_its_end_stops_it(self):
         self.run_main()
@@ -1279,9 +1425,50 @@ class ScoHoldMain(unittest.TestCase):
 
     def test_starting_during_a_call_holds_straight_away(self):
         self.bus = OfonoBus(modems=["/ril_0"], calls={"/ril_0": ["/ril_0/voicecall01"]})
-        text = self.run_main()
-        self.assertIn("started during a call", text)
+        self.run_main()
+        self.assertIn("a call is already up", self.ofono_appears())
         self.assertEqual(len(FakePopen.started), 1)
+
+    def test_asking_ofono_waits_until_ofono_is_there(self):
+        # At boot this service starts before ofono, and asking straight away
+        # only put a ServiceUnknown in the journal. Nothing may be asked until
+        # the name shows up.
+        self.bus = OfonoBus(modems=["/ril_0"], calls={"/ril_0": ["/ril_0/voicecall01"]})
+        self.run_main()
+        self.assertEqual(FakePopen.started, [],
+                         "asked ofono before it was there")
+        self.ofono_appears()
+        self.assertEqual(len(FakePopen.started), 1)
+
+    def test_ofono_going_away_mid_call_lets_go(self):
+        self.run_main()
+        added, _removed = self.handlers()
+        with redirect_stdout(io.StringIO()):
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+        self.assertEqual(len(FakePopen.started), 1)
+        text = self.ofono_vanishes()
+        self.assertIn("went away mid-call", text)
+        self.assertEqual(self.os.killed, [(FakePopen.PID, sco.signal.SIGTERM)],
+                         "a headset left in hands-free waits for a CallRemoved "
+                         "that is never coming")
+
+    def test_a_call_left_behind_by_an_ofono_restart_does_not_cost_every_call_after_it(self):
+        """The bug this guards: ofono restarting during a call means its
+        CallRemoved never arrives. The path stayed in the set, so every later
+        call looked like a second call - and a second call is deliberately not
+        held. One restart during one call quietly cost every Bluetooth call
+        afterwards, until somebody restarted this service."""
+        self.run_main()
+        added, _removed = self.handlers()
+        with redirect_stdout(io.StringIO()):
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+            self.ofono_vanishes()
+            self.ofono_appears()          # ofono is back, with no calls up
+            FakePopen.started = []
+            # The next call, on a headset, has to be held like any other.
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall02"]))
+        self.assertEqual(len(FakePopen.started), 1,
+                         "the call after an ofono restart was never held")
 
     def test_without_paplay_it_says_so_and_stops(self):
         sco.shutil.which = lambda tool: None if tool == "paplay" else "/usr/bin/pactl"
@@ -1346,13 +1533,16 @@ class ScoHoldSurvivesBadDays(unittest.TestCase):
         sco.subprocess = types.SimpleNamespace(Popen=FakePopen, DEVNULL=-3,
                                                SubprocessError=Exception)
         self.addCleanup(setattr, sco, "subprocess", subprocess_real)
+        fake_os = FakeOs()
+        sco.os = fake_os
+        self.addCleanup(setattr, sco, "os", os_real)
         hold = sco.Hold()
         with redirect_stdout(io.StringIO()):
             hold.start_on("bluez_output.X")
-            proc = hold.proc
+            pid = hold.proc.pid
             hold._too_long()
         self.assertIsNone(hold.proc)
-        self.assertIsNotNone(proc.poll())
+        self.assertEqual(fake_os.killed, [(pid, sco.signal.SIGTERM)])
 
 
 class ScoHoldLetsGoOnTheWayOut(unittest.TestCase):
