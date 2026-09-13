@@ -51,7 +51,7 @@ install -Dm644 "$PLUGIN" "$STAGE/usr/lib/$TRIPLET/spa-0.2/droid/libspa-droid.so"
 printf '%s\n' "$PWVER" > "$STAGE/usr/lib/$TRIPLET/spa-0.2/droid/built-against"
 
 install -Dm755 audioctl                       "$STAGE/usr/bin/audioctl"
-install -Dm755 gui/furios-audio-switch.py     "$STAGE/usr/bin/furios-audio-switch"
+install -Dm755 gui/misc-de.py                 "$STAGE/usr/bin/misc-de"
 install -Dm755 experiments/dmnr-handsfree.sh  "$STAGE/usr/bin/furios-audio-dmnr"
 # The AAC codec module is deliberately NOT shipped as a binary: it links
 # fdk-aac, and building it locally is a different thing from redistributing
@@ -99,10 +99,10 @@ install -Dm644 furios-audio-sco-hold.service \
 install -Dm644 furios-audio-bt-mic.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-bt-mic.service"
 
-install -Dm644 gui/de.furios.audioswitch.desktop \
-    "$STAGE/usr/share/applications/de.furios.audioswitch.desktop"
-install -Dm644 gui/de.furios.audioswitch.svg \
-    "$STAGE/usr/share/icons/hicolor/scalable/apps/de.furios.audioswitch.svg"
+install -Dm644 gui/de.misc-de.tools.desktop \
+    "$STAGE/usr/share/applications/de.misc-de.tools.desktop"
+install -Dm644 gui/de.misc-de.tools.svg \
+    "$STAGE/usr/share/icons/hicolor/scalable/apps/de.misc-de.tools.svg"
 install -Dm644 README.md   "$STAGE/usr/share/doc/$PKG/README.md"
 install -Dm644 FINDINGS.md "$STAGE/usr/share/doc/$PKG/FINDINGS.md"
 

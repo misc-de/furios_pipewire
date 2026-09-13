@@ -14,7 +14,13 @@ sudo rm -rf /usr/local/share/furios-audio /var/lib/furios-audio
 sudo rm -rf /usr/lib/aarch64-linux-gnu/spa-0.2/droid
 sudo rmdir /etc/systemd/user/pipewire.service.d 2>/dev/null || true
 # switcher app
-sudo rm -f /usr/local/bin/furios-audio-switch \
+# Both names: the app was called furios-audio-switch until it grew a second
+# page, and an uninstall that only knows the new name leaves the old launcher
+# in the app grid pointing at a program that is gone.
+sudo rm -f /usr/local/bin/misc-de \
+           /usr/local/share/applications/de.misc-de.tools.desktop \
+           /usr/local/share/icons/hicolor/scalable/apps/de.misc-de.tools.svg \
+           /usr/local/bin/furios-audio-switch \
            /usr/local/share/applications/de.furios.audioswitch.desktop \
            /usr/local/share/icons/hicolor/scalable/apps/de.furios.audioswitch.svg
 

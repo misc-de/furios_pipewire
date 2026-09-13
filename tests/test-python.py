@@ -43,7 +43,7 @@ def load(path, name):
 
 gen = load(ROOT / "gen-pipewire-hal-conf.py", "gen_hal_conf")
 watcher = load(ROOT / "tools" / "furios-audio-pause-on-disconnect.py", "watcher")
-switcher = load(ROOT / "gui" / "furios-audio-switch.py", "switcher")
+switcher = load(ROOT / "gui" / "misc-de.py", "switcher")
 sco = load(ROOT / "tools" / "furios-audio-sco-hold.py", "sco_hold")
 btmic = load(ROOT / "tools" / "furios-audio-bt-mic.py", "bt_mic")
 hands_free_sink_real = sco.hands_free_sink
@@ -142,7 +142,7 @@ class AppReadsAudioctl(unittest.TestCase):
     def setUpClass(cls):
         sys.modules.setdefault("gi", None)
         cls.audioctl = (ROOT / "audioctl").read_text()
-        cls.app = (ROOT / "gui" / "furios-audio-switch.py").read_text()
+        cls.app = (ROOT / "gui" / "misc-de.py").read_text()
 
     def labels_in_app(self):
         return re.findall(r'line\.startswith\("([^"]+)"\)', self.app)
@@ -489,10 +489,20 @@ class TheWindow(unittest.TestCase):
 
     def setUp(self):
         self.win = switcher.Window(switcher.Adw.Application())
-        for name in ("row_profile", "row_server", "row_sinks", "switch_row",
-                     "persist_row", "dmnr_row", "refresh_btn", "progress",
-                     "progress_revealer", "toasts"):
+        names = ["row_profile", "row_server", "row_sinks", "switch_row",
+                 "persist_row", "dmnr_row", "refresh_btn", "progress",
+                 "progress_revealer", "toasts"]
+        # The modem widgets only exist when the page was built, and the page is
+        # only built when modemctl is installed - so they are swapped in the
+        # same way, and only when they are there to swap.
+        if switcher.MODEMCTL:
+            names += ["modem_row", "modem_persist", "modem_progress",
+                      "modem_revealer", "mrow_profile", "mrow_health",
+                      "mrow_signal"]
+        for name in names:
             setattr(self.win, name, Recording())
+        if switcher.MODEMCTL:
+            self.win.modem_rows = [self.win.modem_row, self.win.modem_persist]
         self.ran = []
         self.original = switcher.run_async
         switcher.run_async = lambda argv, done, on_line=None: self.ran.append(
@@ -635,9 +645,85 @@ class TheWindow(unittest.TestCase):
         self.win.on_rescued(False, "no")
         self.assertIn("failed", str(self.win.toasts.text).lower())
 
-    def test_refresh_asks_both_helpers(self):
+    def test_refresh_asks_every_helper_there_is(self):
+        """Two for audio, and two more for the modem when modemctl is here.
+
+        Counted rather than named, because the point is that adding a page
+        must not leave one of the others unasked - which is how a window ends
+        up showing a state that stopped being true ten minutes ago."""
         self.win.refresh()
-        self.assertEqual(2, len(self.ran))
+        expected = 2 + (2 if switcher.MODEMCTL else 0)
+        self.assertEqual(expected, len(self.ran))
+
+    # --- the modem page ----------------------------------------------------
+    #
+    # It is built only when modemctl is installed, so every check here says so
+    # first. On a phone without the modem package there is no second tab and
+    # nothing below has anything to test - which is itself the behaviour that
+    # matters most: a tab that always says "not installed" would make a healthy
+    # phone look broken.
+
+    def test_without_modemctl_there_is_no_second_page(self):
+        real = switcher.MODEMCTL
+        try:
+            switcher.MODEMCTL = None
+            win = switcher.Window(switcher.Adw.Application())
+            self.assertEqual([], win.modem_rows)
+        finally:
+            switcher.MODEMCTL = real
+
+    def test_the_two_words_the_profile_is_read_by(self):
+        """modemctl lives in another package. These two keys are the contract
+        between them, and its other half is checked over there, where they are
+        printed."""
+        found = switcher.Window._keyed("recorded: fixed\nactual:   shipped\n")
+        self.assertEqual({"recorded": "fixed", "actual": "shipped"}, found)
+
+    def modem_win(self):
+        if not switcher.MODEMCTL:
+            self.skipTest("no modemctl on this machine, so no modem page")
+        return self.win
+
+    def test_a_repaired_modem_reads_as_repaired(self):
+        win = self.modem_win()
+        win.on_modem_profile(True, "recorded: fixed\nactual:   fixed\n")
+        self.assertTrue(win.modem_row.get_active())
+        self.assertIn("repairs are in place", win.mrow_profile.subtitle)
+
+    def test_a_try_says_the_next_boot_will_undo_it(self):
+        win = self.modem_win()
+        win.on_modem_profile(True, "recorded: fixed\nactual:   shipped\n")
+        self.assertFalse(win.modem_row.get_active())
+        self.assertIn("next boot", win.mrow_profile.subtitle)
+
+    def test_half_repaired_is_not_dressed_up_as_either(self):
+        win = self.modem_win()
+        win.on_modem_profile(True, "recorded: fixed\nactual:   mixed\n")
+        self.assertIn("half repaired", win.mrow_profile.subtitle)
+
+    def test_the_switch_asks_for_the_rights_it_needs(self):
+        win = self.modem_win()
+        win.modem_persist.active = True
+        win.modem_row.active = False
+        win.on_modem_switch(win.modem_row, None)
+        argv = self.ran[-1][0]
+        self.assertIn("pkexec", argv[0])
+        self.assertEqual(["set", "shipped"], argv[2:])
+
+    def test_not_remembering_is_a_try_and_not_a_set(self):
+        win = self.modem_win()
+        win.modem_persist.active = False
+        win.modem_row.active = True
+        win.on_modem_switch(win.modem_row, None)
+        self.assertEqual(["try", "fixed"], self.ran[-1][0][2:])
+
+    def test_the_switch_does_not_fire_while_the_window_is_syncing(self):
+        """Filling the switch from the status would otherwise switch the modem."""
+        win = self.modem_win()
+        win._syncing = True
+        win.on_modem_switch(win.modem_row, None)
+        win._syncing = False
+        self.assertEqual([], self.ran)
 
     def test_busy_says_what_is_happening_and_locks_the_controls(self):
         self.win.set_busy(True)

@@ -20,7 +20,7 @@ import os, re, sys
 root, out = sys.argv[1], sys.argv[2]
 wanted = ["gen-pipewire-hal-conf.py",
           "furios-audio-pause-on-disconnect.py",
-          "furios-audio-switch.py",
+          "misc-de.py",
           "furios-audio-sco-hold.py",
           "furios-audio-bt-mic.py"]
 
