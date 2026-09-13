@@ -64,6 +64,7 @@ from one boot to the next.
 | Bluetooth music (A2DP, AAC/SBC-XQ) | works |
 | Bluetooth call (HFP) | works - needs the codec announced *and* the link held, see FINDINGS |
 | Bluetooth microphone outside a call | works - `audioctl bt-mic`, measured and heard |
+| a voice memo using it by itself | works - `furios-audio-bt-mic`, off by default |
 | which process gets the HFP profile | settled - ofono no longer registers it |
 | holding the SCO link during a call | works - `furios-audio-sco-hold`, heard end to end |
 | echo during a call | **open** |
@@ -307,6 +308,40 @@ Bluetooth capture onto a link that is not there and records digital silence.
 What `bt-mic status` calls *HAL Bluetooth PCM* is the only reading that settles
 whether the samples really come off the Bluetooth link - and it has to be read
 while a recording runs.
+
+**Doing that by itself when something starts recording** is
+`furios-audio-bt-mic`, and like the call routing it is off until asked for:
+
+    wpctl settings -s furios.bluetooth-mic-routing true
+
+It watches for a recording on `droid-source` - the phone's capture node, which
+is the default source and therefore what an application gets without choosing
+anything - and runs the same four steps, then puts everything back when the
+recording ends. The recorder never learns that Bluetooth was involved.
+
+Measured on 2026-09-13 with emilia's voice memo, 18 s: energy above 8.2 kHz,
+which the 7.5 kHz SCO path cannot carry, was 3.6-4.5 % on the memos recorded
+before the switch and **0.001 %** on the one after. That is the headset
+microphone, and the band edge at 7.5 kHz says the announced codec was right -
+CVSD would have stopped at 3.4 kHz.
+
+**It reacts, so it is late.** Switching in the middle of a running recording
+does work - the HAL reopens the input underneath the recorder - but the first
+seconds of the file are the phone's own microphone and there is a gap of about
+1.5 s while the path is rebuilt. Say the first sentence twice, or start
+recording and wait two seconds. Music, on the other hand, does not fall onto
+the loudspeaker: the streams follow the rebuilt Bluetooth sink and play on in
+mono until the memo is over.
+
+Three things it deliberately does not touch: a call (`droid-bluetooth-call.lua`
+and `furios-audio-sco-hold` own the card while one is up), a headset already in
+hands-free when the recording started, and one somebody is holding by hand with
+`audioctl bt-mic on`. What it does undo is a headset left hands-free by
+something that is gone - a WirePlumber restart can pick that profile at startup
+and nothing else ever puts it back, which shows up as music that has quietly
+gone mono.
+
+    systemctl --user status furios-audio-bt-mic    # enabled on the first switch
 
 **A headset with no hands-free profile at all** used to be the normal case and
 is now a symptom of a broken install. ofono and WirePlumber both used to

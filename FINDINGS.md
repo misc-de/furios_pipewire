@@ -1315,3 +1315,91 @@ were reading the wrong thing rather than reading it wrongly:
     starts on and never the two below it, so they counted as lines no test
     could reach. The same exception the coverage script already made for
     here-documents applies to them.
+
+---
+
+## A voice memo, and the microphone that was on the wrong side of the room
+
+Start a recording while wearing Bluetooth earbuds and the phone records its own
+microphone - the one lying on the table. Everything about that is correct
+behaviour: A2DP is a playback profile with no microphone in it, so the headset
+genuinely has nothing to offer, and on this device not even the hands-free
+profile is enough, because SCO does not cross HCI here. The path that works
+goes through the HAL, and `audioctl bt-mic on` has walked it since 2026-09-12:
+hands-free profile, codec announced to the nodes, phone card routed to
+`input-bluetooth_sco_headset`, and a stream held on `bluez_output` underneath
+it all. What was missing was somebody to run it at the right moment.
+
+**The recorder never has to know.** Measured with emilia's voice memo on
+2026-09-13: the recording stream sat on `Source: 55` - `droid-source`, the
+phone's own capture node and the default source. An application that simply
+records gets it without choosing anything, so changing that card's route is
+enough and no application needs a Bluetooth setting of its own. The
+alternative would have been hopeless: what BlueZ offers as a microphone here,
+`bluez_input.<address>`, is the host side of SCO and delivers digital silence.
+
+**The proof that it was the headset is spectral, not a level.** SCO is
+band-limited at 7.5 kHz and cannot carry anything above it, so energy above
+8.2 kHz says which microphone a file came from:
+
+| recording | RMS | energy > 8.2 kHz |
+|---|---|---|
+| 17:45, before the switch | 682 | 4.46 % |
+| 17:46, before the switch | 252 | 3.57 % |
+| **17:50, 18.4 s, after the switch** | **372** | **0.001 %** |
+
+The band edge sits at 7.5 kHz, not at 3.4 kHz, which also settles the codec:
+`bt_wbs=on` matched the negotiated mSBC. A level alone could not have said
+either thing - a HAL encoding CVSD into an mSBC link produces noise with
+perfectly healthy numbers.
+
+**Reacting to a recording is inherently late, and here is the price.** The same
+day, switching in the middle of a running 48 kHz recording of room noise:
+
+    t = 0.5 .. 5.0 s   phone microphone     25 .. 47 % above 8.2 kHz
+    t = 5.5 .. 7.0 s   nothing at all       RMS 0.0, about 1.5 s of silence
+    t = 7.0 s onwards  headset microphone   0.002 % above 8.2 kHz
+
+So the switch does take effect on a stream that is already open - the HAL
+reopens the input underneath the recorder - but the first seconds belong to the
+phone and there is a gap while the path is rebuilt. Nothing can fix that from
+this side: the recording is the only signal that a microphone is wanted, and by
+the time it arrives it has started. `furios-audio-bt-mic` keeps the hands-free
+profile for 2.5 s after a recording ends so that a second memo does not pay the
+gap again.
+
+**Music does not fall onto the loudspeaker, which had been the worry.** The
+profile change destroys the Bluetooth sink and builds a new one, so the fear
+was the failure `furios-audio-pause-on-disconnect` exists for. Measured
+instead: every stream followed the new node (sink 703 -> 725, a test stream and
+a paused player both). Music plays on through the headset, mono and 16 kHz for
+as long as the recording runs. There is nothing to pause here.
+
+**Going back is not guaranteed, and that was a real hole.** `bt-mic off` asked
+for `a2dp-sink` and returned 0 whatever happened. On 2026-09-13 a WirePlumber
+restart left the card offering only `off` and the two headset profiles - the
+A2DP ones were gone - so the request answered **No such entity**, the headset
+stayed hands-free, and every track after that would have played mono at 16 kHz
+with nothing anywhere saying why. It was found by looking, not by hearing it.
+Now `bt_headset_profile` reports the failure and names the cure
+(`bluetoothctl disconnect <address>; bluetoothctl connect <address>`), and the
+service checks that the headset really arrived rather than that it was asked.
+
+**A headset can also be left hands-free by something that is gone.** The same
+restart came up with the card in `headset-head-unit` although the saved profile
+was `a2dp-sink`: WirePlumber picks from what is available at that instant, and
+the A2DP transport was not back yet. Nothing ever re-evaluates that. So
+`furios-audio-bt-mic` puts back a hands-free card that has nothing recording,
+no call, and no hold anybody started by hand - but only after seeing it twice
+30 s apart, because a call routes the headset before callaudiod sets the phone
+card's own profile, and undoing that inside the gap would take the call off the
+headset it was just put on.
+
+**One recording out of six came back as pure silence and has not been
+explained.** 10.24 s, RMS 0.0, every sample the same value, with the profile,
+the codec, the route and `pcm55c: RUNNING` all correct at the time. Five later
+runs under the same conditions - including one deliberately made the first
+after a WirePlumber restart, which was the obvious suspect - all carried
+audio. It is written down because a recording that silently contains nothing is
+the exact failure this project keeps finding in Bluetooth audio, and because
+the next occurrence should not look like the first.

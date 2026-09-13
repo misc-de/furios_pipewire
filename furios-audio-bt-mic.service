@@ -1,0 +1,19 @@
+[Unit]
+# Puts the Bluetooth headset into its hands-free profile while something is
+# recording, so that a voice memo uses the microphone on your ears instead of
+# the phone lying on the table. The four steps themselves are audioctl's
+# ("audioctl bt-mic on"); this service is only the question of when.
+#
+# It stays out of calls: droid-bluetooth-call.lua and furios-audio-sco-hold
+# own the card while one is up.
+Description=Record through the Bluetooth headset outside a call
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/furios-audio-bt-mic
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

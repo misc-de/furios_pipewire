@@ -589,6 +589,24 @@ ensure_sco_hold() {
 # The other half of the safety net: furios-audio-apply.service writes the
 # configuration before the stack, this one checks after it. Enabled the same
 # way - only the user can enable their own unit.
+# A voice memo through worn earbuds records the phone on the table: A2DP has
+# no microphone, and the way to the one on your ears is the hands-free
+# profile, the announced codec, input-bluetooth_sco_headset and a held link -
+# the four steps of "bt-mic on". This service runs them when something starts
+# recording and undoes them when it stops.
+#
+# Harmless while furios.bluetooth-mic-routing is off, which is the default: it
+# reads the setting before it touches anything. Like the others, only the user
+# can enable their own unit.
+ensure_bt_mic() {
+    uctl is-enabled furios-audio-bt-mic.service >/dev/null 2>&1 && return 0
+    if uctl cat furios-audio-bt-mic.service >/dev/null 2>&1; then
+        run uctl enable --now furios-audio-bt-mic.service >/dev/null 2>&1 \
+            && info "recordings can now use the Bluetooth microphone"
+    fi
+    return 0
+}
+
 ensure_boot_check() {
     uctl is-enabled furios-audio-verify.service >/dev/null 2>&1 && return 0
     if uctl cat furios-audio-verify.service >/dev/null 2>&1; then
@@ -616,6 +634,7 @@ switch_to() {
     ensure_pause_on_disconnect
     ensure_callaudio_refresh
     ensure_sco_hold
+    ensure_bt_mic
     preflight "$p"
     printf 'switching: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"
@@ -701,7 +720,9 @@ BTTAG=bt-call
 
 # Force the headset into its hands-free profile so an SCO channel is up.
 bt_headset_profile() {
-    local card=$1 want=$2 prof
+    local card=$1 want=$2 prof ADDR
+    # bluez_card.AA_BB_.. -> AA:BB:.. , so the hint below can be pasted.
+    ADDR=$(printf '%s' "${card#bluez_card.}" | tr '_' ':')
     [ -n "$card" ] || return 1
     if [ "$want" = headset ]; then
         pactl set-card-profile "$card" headset-head-unit 2>/dev/null && { btlog "$BTTAG: headset profile headset-head-unit"; return 0; }
@@ -710,8 +731,19 @@ bt_headset_profile() {
         btlog "$BTTAG: WARNING hands-free profile could not be set (active: ${prof:-unknown})"
         return 1
     fi
-    pactl set-card-profile "$card" a2dp-sink 2>/dev/null
-    return 0
+    # Going back is not guaranteed and used to be assumed. A card that lost
+    # its A2DP profiles - which happens when WirePlumber restarts while
+    # Bluetooth is connected, see FINDINGS.md - answers "No such entity" here,
+    # and this returned 0 anyway. The headset then stays hands-free, every
+    # later track plays mono at 16 kHz, and nothing anywhere says why. Seen on
+    # 2026-09-13 with the card offering only "off" and the two headset
+    # profiles.
+    if pactl set-card-profile "$card" a2dp-sink 2>/dev/null; then
+        return 0
+    fi
+    btlog "$BTTAG: WARNING could not go back to a2dp-sink - the headset stays in hands-free (mono, 16 kHz)."
+    btlog "$BTTAG: the card usually gets its A2DP profiles back with: bluetoothctl disconnect $ADDR; bluetoothctl connect $ADDR"
+    return 1
 }
 
 # Set the phone card's routes and report what actually took effect.

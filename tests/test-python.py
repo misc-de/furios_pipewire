@@ -12,7 +12,9 @@ import importlib.util
 import os
 import io
 import re
+import shutil as shutil_real
 import subprocess as subprocess_real
+import tempfile
 import sys
 import types
 import unittest
@@ -43,6 +45,7 @@ gen = load(ROOT / "gen-pipewire-hal-conf.py", "gen_hal_conf")
 watcher = load(ROOT / "tools" / "furios-audio-pause-on-disconnect.py", "watcher")
 switcher = load(ROOT / "gui" / "furios-audio-switch.py", "switcher")
 sco = load(ROOT / "tools" / "furios-audio-sco-hold.py", "sco_hold")
+btmic = load(ROOT / "tools" / "furios-audio-bt-mic.py", "bt_mic")
 hands_free_sink_real = sco.hands_free_sink
 os_real = sco.os
 
@@ -1602,6 +1605,749 @@ class ScoHoldLetsGoOnTheWayOut(unittest.TestCase):
             if saved is not None:
                 sys.modules["gi.repository.GLibUnix"] = saved
 
+
+
+BT_SOURCES = "54\tdroid-sink.monitor\tPipeWire\n55\tdroid-source\tPipeWire\n"
+BT_OUTPUTS = (
+    "Source Output #359\n\tDriver: PipeWire\n\tSource: 55\n\tProperties:\n"
+    "\t\tapplication.name = \"emilia\"\n\n"
+    "Source Output #360\n\tDriver: PipeWire\n\tSource: 54\n\tProperties:\n"
+    "\t\tapplication.name = \"pavucontrol\"\n\n"
+)
+BT_CARDS = ("Card #118\n\tName: droid\n\tActive Profile: default\n\n"
+            "Card #144\n\tName: bluez_card.F4_9D_8A_7C_5C_66\n"
+            "\tActive Profile: a2dp-sink\n")
+
+
+class BtPactl:
+    """pactl, wpctl and audioctl, all of which this service only ever asks."""
+
+    SubprocessError = Exception
+    PIPE = -1
+    DEVNULL = -3
+
+    def __init__(self, sources=BT_SOURCES, outputs=BT_OUTPUTS, cards=BT_CARDS,
+                 setting="Value: true (Saved: true)\n", broken=False):
+        self.sources, self.outputs, self.cards = sources, outputs, cards
+        self.setting, self.broken = setting, broken
+        self.ran = []
+
+    def run(self, argv, **_kwargs):
+        argv = list(argv)
+        self.ran.append(argv)
+        if self.broken:
+            raise OSError("pactl is not there")
+        if argv[0] == "wpctl":
+            return types.SimpleNamespace(stdout=self.setting, returncode=0)
+        if argv[0].endswith("audioctl"):
+            return types.SimpleNamespace(stdout="bt-mic: headset profile x\n",
+                                         returncode=0)
+        if "cards" in argv:
+            return types.SimpleNamespace(stdout=self.cards, returncode=0)
+        if "source-outputs" in argv:
+            return types.SimpleNamespace(stdout=self.outputs, returncode=0)
+        return types.SimpleNamespace(stdout=self.sources, returncode=0)
+
+
+class BtMicUses(unittest.TestCase):
+    """Shared plumbing: every one of these reads the phone through pactl."""
+
+    def use(self, **kwargs):
+        fake = BtPactl(**kwargs)
+        btmic.subprocess = fake
+        self.addCleanup(setattr, btmic, "subprocess", subprocess_real)
+        return fake
+
+
+class BtMicSeesWhoIsRecording(BtMicUses):
+    """Which streams count as somebody wanting a microphone.
+
+    Only droid-source does. A monitor being read is not a recording, and
+    switching the headset out of stereo because something watches a level
+    meter would be a haunted phone of its own.
+    """
+
+    def test_a_recorder_on_the_phone_source_counts(self):
+        self.use()
+        self.assertEqual(btmic.recorders(), ["emilia"])
+
+    def test_a_stream_on_a_monitor_does_not(self):
+        self.use(outputs=BT_OUTPUTS.split("\n\n")[1] + "\n")
+        self.assertEqual(btmic.recorders(), [])
+
+    def test_a_recorder_without_a_name_is_still_somebody(self):
+        self.use(outputs="Source Output #7\n\tSource: 55\n")
+        self.assertEqual(btmic.recorders(), ["something"])
+
+    def test_no_droid_source_means_nothing_to_answer_for(self):
+        self.use(sources="54\tdroid-sink.monitor\tPipeWire\n")
+        self.assertEqual(btmic.recorders(), [])
+
+    def test_pactl_being_gone_reads_as_nobody_recording(self):
+        # The safe direction: no switch, and the phone keeps its own
+        # microphone, which is what happened before this service existed.
+        self.use(broken=True)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(btmic.recorders(), [])
+
+    def test_the_index_is_read_again_and_not_remembered(self):
+        # Indices are not stable - every profile change builds new nodes, and
+        # the number that was droid-source can belong to a Bluetooth sink ten
+        # minutes later. Same stream, different index, still found.
+        self.use(sources="931\tdroid-source\tPipeWire\n",
+                 outputs="Source Output #1\n\tSource: 931\n")
+        self.assertEqual(btmic.recorders(), ["something"])
+
+
+class BtMicReadsTheCards(BtMicUses):
+    """The phone card is listed first and has a profile of its own.
+
+    Reading that one instead of the headset's is the mistake that would put a
+    hold on music Bluetooth during a call - it cost a day once already, in the
+    service that holds the link.
+    """
+
+    def test_the_headsets_profile_is_the_one_that_is_read(self):
+        self.use()
+        self.assertFalse(btmic.hands_free())
+        self.assertTrue(btmic.headset_connected())
+
+    def test_hands_free_is_seen_for_both_codecs(self):
+        for profile in ("headset-head-unit", "headset-head-unit-cvsd"):
+            self.use(cards=BT_CARDS.replace("a2dp-sink", profile))
+            self.assertTrue(btmic.hands_free(), profile)
+
+    def test_the_phone_cards_profile_is_not_mistaken_for_the_headsets(self):
+        self.use(cards=BT_CARDS.replace("Active Profile: default",
+                                        "Active Profile: headset-head-unit"))
+        self.assertFalse(btmic.hands_free())
+
+    def test_a_call_is_read_from_the_phone_card(self):
+        self.use(cards=BT_CARDS.replace("Active Profile: default",
+                                        "Active Profile: voicecall"))
+        self.assertTrue(btmic.call_is_up())
+
+    def test_no_bluetooth_card_at_all(self):
+        self.use(cards="Card #118\n\tName: droid\n\tActive Profile: default\n")
+        self.assertFalse(btmic.headset_connected())
+        self.assertFalse(btmic.hands_free())
+
+    def test_pactl_being_gone_is_not_a_call(self):
+        self.use(broken=True)
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(btmic.call_is_up())
+
+
+class BtMicReadsTheSetting(BtMicUses):
+    """Anything that cannot be read counts as off.
+
+    A setting that cannot be read is not a reason to take somebody's music out
+    of stereo.
+    """
+
+    def test_on(self):
+        self.use()
+        self.assertTrue(btmic.setting_on())
+
+    def test_off(self):
+        self.use(setting="Value: false\n")
+        self.assertFalse(btmic.setting_on())
+
+    def test_an_answer_without_a_value_counts_as_off(self):
+        self.use(setting="Setting 'furios.bluetooth-mic-routing' not found\n")
+        self.assertFalse(btmic.setting_on())
+
+    def test_wpctl_being_gone_counts_as_off(self):
+        self.use(broken=True)
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertFalse(btmic.setting_on())
+        self.assertIn("staying out of it", out.getvalue())
+
+
+class BtMicKnowsAHandHeldHold(unittest.TestCase):
+    """Told apart from a leftover by the pid file audioctl writes.
+
+    Somebody who ran "audioctl bt-mic on" in a terminal is holding the headset
+    on purpose and must not have it taken away; a headset left hands-free by
+    something that is gone has nobody to put it back.
+    """
+
+    def setUp(self):
+        self.runtime = os.environ.get("XDG_RUNTIME_DIR")
+        self.dir = tempfile.mkdtemp()
+        os.environ["XDG_RUNTIME_DIR"] = self.dir
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        if self.runtime is None:
+            os.environ.pop("XDG_RUNTIME_DIR", None)
+        else:
+            os.environ["XDG_RUNTIME_DIR"] = self.runtime
+        shutil_real.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, text):
+        with open(os.path.join(self.dir, "furios-audio-sco-hold.pid"), "w") as fh:
+            fh.write(text)
+
+    def test_no_file_means_nobody_is_holding(self):
+        self.assertFalse(btmic.hand_held())
+
+    def test_a_live_pid_means_somebody_is(self):
+        self.write("%d\n" % os.getpid())
+        self.assertTrue(btmic.hand_held())
+
+    def test_a_pid_that_is_gone_does_not_count(self):
+        # The file outlives the process it names: audioctl removes it on the
+        # way out, but a kill -9 or a reboot leaves it behind, and a stale
+        # file would make every leftover look deliberate forever.
+        self.write("999999")
+        self.assertFalse(btmic.hand_held())
+
+    def test_junk_in_the_file_does_not_count(self):
+        self.write("not a pid")
+        self.assertFalse(btmic.hand_held())
+
+    def test_without_a_runtime_dir_there_is_nothing_to_read(self):
+        os.environ.pop("XDG_RUNTIME_DIR", None)
+        self.assertFalse(btmic.hand_held())
+
+
+class FakeTimers:
+    """GLib's timers, held still so a test can decide when they fire."""
+
+    def __init__(self):
+        self.pending = {}
+        self.removed = []
+        self.next_id = 1
+
+    def timeout_add(self, _ms, fn, *args):
+        token = self.next_id
+        self.next_id += 1
+        self.pending[token] = (fn, args)
+        return token
+
+    def source_remove(self, token):
+        self.removed.append(token)
+        self.pending.pop(token, None)
+
+    def fire_all(self):
+        """Every timer that is due, in the order it was asked for."""
+        while self.pending:
+            token = sorted(self.pending)[0]
+            fn, args = self.pending.pop(token)
+            fn(*args)
+
+
+class BtMicSwitching(unittest.TestCase):
+    """Taking the headset, giving it back, and never doing either twice."""
+
+    def setUp(self):
+        self.pactl = BtPactl()
+        btmic.subprocess = self.pactl
+        self.addCleanup(setattr, btmic, "subprocess", subprocess_real)
+        self.timers = FakeTimers()
+        self.glib = btmic.GLib
+        btmic.GLib = types.SimpleNamespace(
+            timeout_add=self.timers.timeout_add,
+            source_remove=self.timers.source_remove)
+        self.addCleanup(setattr, btmic, "GLib", self.glib)
+        self.free = [False]
+        self.real_hands_free = btmic.hands_free
+        btmic.hands_free = lambda: self.free[0]
+        self.addCleanup(setattr, btmic, "hands_free", self.real_hands_free)
+        self.switch = btmic.Switch("/usr/bin/audioctl")
+
+    def audioctl_calls(self):
+        return [argv[1:] for argv in self.pactl.ran
+                if argv and argv[0].endswith("audioctl")]
+
+    def take(self, who="emilia"):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.switch.take(who)
+        return out.getvalue()
+
+    def test_it_takes_the_headset_and_holds_it_for_hours_not_minutes(self):
+        said = self.take()
+        self.assertIn("taking the headset into hands-free", said)
+        self.assertEqual(self.audioctl_calls(),
+                         [["bt-mic", "on", str(btmic.MAX_HOLD_S)]])
+        self.assertTrue(self.switch.ours)
+
+    def test_taking_it_twice_does_nothing_the_second_time(self):
+        self.take()
+        self.take()
+        self.assertEqual(len(self.audioctl_calls()), 1)
+
+    def test_a_headset_already_hands_free_is_left_alone(self):
+        self.free[0] = True
+        said = self.take()
+        self.assertIn("leaving it alone", said)
+        self.assertEqual(self.audioctl_calls(), [])
+        self.assertFalse(self.switch.ours,
+                         "what we did not switch is not ours to undo")
+
+    def test_it_says_that_only_once_per_recording(self):
+        # pactl reports several changes for one recording. Eight identical
+        # lines per memo bury the one line that matters.
+        self.free[0] = True
+        self.take()
+        self.assertEqual(self.take(), "")
+
+    def test_and_says_it_again_for_the_next_recording(self):
+        self.free[0] = True
+        self.take()
+        with redirect_stdout(io.StringIO()):
+            self.switch.release()
+        self.assertIn("leaving it alone", self.take())
+
+    def test_a_failed_switch_leaves_nothing_to_undo(self):
+        self.pactl.run = lambda argv, **kw: (_ for _ in ()).throw(OSError("no"))
+        said = self.take()
+        self.assertIn("keeps the phone microphone", said)
+        self.assertFalse(self.switch.ours)
+
+    def test_giving_it_back_waits_a_moment_first(self):
+        self.take()
+        self.switch.release()
+        self.assertEqual(len(self.audioctl_calls()), 1,
+                         "it must not let go the instant a stream ends")
+        with redirect_stdout(io.StringIO()):
+            self.timers.fire_all()
+        self.assertIn(["bt-mic", "off"], self.audioctl_calls())
+        self.assertFalse(self.switch.ours)
+
+    def test_a_second_memo_inside_the_grace_keeps_the_link(self):
+        # Rebuilding the link costs about 1.5 s of silence at the start of a
+        # recording, measured 2026-09-13. Two memos in a row should not pay it
+        # twice.
+        self.take()
+        self.switch.release()
+        said = self.take("emilia")
+        self.assertIn("keeping the headset", said)
+        self.assertTrue(self.switch.ours)
+        self.assertNotIn(["bt-mic", "off"], self.audioctl_calls())
+
+    def test_letting_go_at_once_when_asked_to(self):
+        self.take()
+        with redirect_stdout(io.StringIO()):
+            self.switch.release(grace=False)
+        self.assertIn(["bt-mic", "off"], self.audioctl_calls())
+
+    def test_a_grace_timer_that_outlives_its_reason_does_nothing(self):
+        # Stopped, or switched off another way, while the two-and-a-half
+        # seconds were still running. The timer fires regardless - it must
+        # not ask a second time and it must not say it did.
+        self.take()
+        self.switch.release()
+        with redirect_stdout(io.StringIO()):
+            self.switch.release(grace=False)
+            before = len(self.audioctl_calls())
+            self.timers.fire_all()
+        self.assertEqual(len(self.audioctl_calls()), before)
+
+    def test_releasing_what_was_never_ours_does_nothing(self):
+        with redirect_stdout(io.StringIO()):
+            self.switch.release()
+        self.assertEqual(self.audioctl_calls(), [])
+
+
+class BtMicChecksThatItReallyWentBack(unittest.TestCase):
+    """Asking is not arriving.
+
+    A card that has lost its A2DP profiles answers "No such entity" and stays
+    hands-free. Every track after the memo then plays mono at 16 kHz with
+    nothing saying why - seen on 2026-09-13 after a WirePlumber restart left
+    the card with only "off" and the two headset profiles.
+    """
+
+    def setUp(self):
+        self.pactl = BtPactl()
+        btmic.subprocess = self.pactl
+        self.addCleanup(setattr, btmic, "subprocess", subprocess_real)
+        self.timers = FakeTimers()
+        self.glib = btmic.GLib
+        btmic.GLib = types.SimpleNamespace(
+            timeout_add=self.timers.timeout_add,
+            source_remove=self.timers.source_remove)
+        self.addCleanup(setattr, btmic, "GLib", self.glib)
+        self.free = [True]
+        self.real = btmic.hands_free
+        btmic.hands_free = lambda: self.free[0]
+        self.addCleanup(setattr, btmic, "hands_free", self.real)
+        self.switch = btmic.Switch("/usr/bin/audioctl")
+
+    def give_back(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.switch.ours = True
+            self.switch._let_go()
+            self.timers.fire_all()
+        return out.getvalue()
+
+    def offs(self):
+        return len([a for a in self.pactl.ran if a[1:3] == ["bt-mic", "off"]])
+
+    def test_a_headset_that_went_back_is_not_asked_again(self):
+        self.free[0] = False
+        self.give_back()
+        self.assertEqual(self.offs(), 1)
+
+    def test_one_that_did_not_is_asked_again_and_then_said_out_loud(self):
+        said = self.give_back()
+        self.assertEqual(self.offs(), 1 + btmic.VERIFY_TRIES)
+        self.assertIn("still in hands-free", said)
+        self.assertIn("mono", said)
+        self.assertIn("bluetoothctl", said,
+                      "a warning without the cure is half a warning")
+
+    def test_a_new_recording_stops_the_checking(self):
+        # Switched on again on purpose while the check was pending. Undoing it
+        # here would take the headset away from a running memo.
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.switch.ours = True
+            self.switch._let_go()
+            self.switch.ours = True
+            self.timers.fire_all()
+        self.assertEqual(self.offs(), 1)
+
+
+class FakeSwitch:
+    """A headset, as far as the decision table can tell."""
+
+    def __init__(self, ours=False):
+        self.ours = ours
+        self.taken = []
+        self.released = 0
+        self.leftovers = 0
+
+    def take(self, who):
+        self.taken.append(who)
+
+    def release(self, grace=True):
+        self.released += 1
+
+    def give_back_leftover(self):
+        self.leftovers += 1
+
+
+class BtMicDecides(unittest.TestCase):
+    """The whole decision table, one line of it at a time."""
+
+    def setUp(self):
+        self.world = dict(recorders=["emilia"], call=False, setting=True,
+                          headset=True, free=False, held=False)
+        originals = {name: getattr(btmic, name) for name in
+                     ("recorders", "call_is_up", "setting_on",
+                      "headset_connected", "hands_free", "hand_held")}
+        self.addCleanup(lambda: [setattr(btmic, k, v)
+                                 for k, v in originals.items()])
+        btmic.recorders = lambda: self.world["recorders"]
+        btmic.call_is_up = lambda: self.world["call"]
+        btmic.setting_on = lambda: self.world["setting"]
+        btmic.headset_connected = lambda: self.world["headset"]
+        btmic.hands_free = lambda: self.world["free"]
+        btmic.hand_held = lambda: self.world["held"]
+        self.switch = FakeSwitch()
+        self.watcher = btmic.Watcher(self.switch)
+
+    def look(self, slow=False):
+        with redirect_stdout(io.StringIO()):
+            self.watcher.look(slow=slow)
+
+    def test_a_recording_takes_the_headset(self):
+        self.look()
+        self.assertEqual(self.switch.taken, ["emilia"])
+
+    def test_two_recorders_are_named_once_each(self):
+        self.world["recorders"] = ["emilia", "emilia", "signal"]
+        self.look()
+        self.assertEqual(self.switch.taken, ["emilia, signal"])
+
+    def test_a_call_is_none_of_this_services_business(self):
+        # droid-bluetooth-call.lua sets these same ports and
+        # furios-audio-sco-hold holds this same link. Two services setting one
+        # card is how a call ends up with no audio in either direction.
+        self.world["call"] = True
+        self.look()
+        self.assertEqual(self.switch.taken, [])
+
+    def test_the_setting_has_to_be_on(self):
+        self.world["setting"] = False
+        self.look()
+        self.assertEqual(self.switch.taken, [])
+
+    def test_no_headset_is_nothing_to_switch(self):
+        self.world["headset"] = False
+        self.look()
+        self.assertEqual(self.switch.taken, [])
+
+    def test_nothing_recording_gives_the_headset_back(self):
+        self.world["recorders"] = []
+        self.look()
+        self.assertEqual(self.switch.released, 1)
+
+    def test_a_forgotten_hands_free_headset_is_put_back(self):
+        # Something left it this way and is no longer around to undo it - a
+        # WirePlumber restart picking the only profile available at that
+        # instant, measured 2026-09-13. Nothing else will ever put it back,
+        # and what the owner notices is that their music has gone mono.
+        self.world.update(recorders=[], free=True)
+        self.look(slow=True)
+        self.assertEqual(self.switch.leftovers, 0, "not on the first look")
+        self.look(slow=True)
+        self.assertEqual(self.switch.leftovers, 1)
+
+    def test_an_event_never_concludes_that_on_its_own(self):
+        # A call routes the headset before callaudiod has set the phone card's
+        # own profile. Undoing that inside the gap would take the call off the
+        # headset it was just put on.
+        self.world.update(recorders=[], free=True)
+        for _ in range(6):
+            self.look()
+        self.assertEqual(self.switch.leftovers, 0)
+
+    def test_a_hold_somebody_started_by_hand_is_left_alone(self):
+        self.world.update(recorders=[], free=True, held=True)
+        self.look(slow=True)
+        self.look(slow=True)
+        self.assertEqual(self.switch.leftovers, 0)
+
+    def test_a_call_on_the_headset_is_left_alone(self):
+        self.world.update(recorders=[], free=True, call=True)
+        self.look(slow=True)
+        self.look(slow=True)
+        self.assertEqual(self.switch.leftovers, 0)
+
+    def test_what_we_switched_ourselves_is_not_a_leftover(self):
+        self.switch.ours = True
+        self.world.update(recorders=[], free=True)
+        self.look(slow=True)
+        self.look(slow=True)
+        self.assertEqual(self.switch.leftovers, 0)
+
+    def test_a_recording_in_between_starts_the_counting_over(self):
+        self.world.update(recorders=[], free=True)
+        self.look(slow=True)
+        self.world["recorders"] = ["emilia"]
+        self.look(slow=True)
+        self.world["recorders"] = []
+        self.look(slow=True)
+        self.assertEqual(self.switch.leftovers, 0)
+
+
+class BtMicNeedsItsTools(unittest.TestCase):
+    """Without them it says so and stops, rather than failing per event."""
+
+    def with_tools(self, missing):
+        which = btmic.shutil.which
+        btmic.shutil.which = lambda tool: None if tool == missing else "/usr/bin/" + tool
+        self.addCleanup(setattr, btmic.shutil, "which", which)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            btmic.main()
+        return out.getvalue()
+
+    def test_without_pactl(self):
+        self.assertIn("pactl is not installed", self.with_tools("pactl"))
+
+    def test_without_wpctl(self):
+        self.assertIn("wpctl is not installed", self.with_tools("wpctl"))
+
+    def test_without_audioctl(self):
+        # The four steps live in audioctl. Without it this service knows when
+        # but not how, and saying so beats switching nothing per event.
+        self.assertIn("audioctl is not installed", self.with_tools("audioctl"))
+
+class BtMicPutsBackWhatNobodyElseWill(unittest.TestCase):
+    """The leftover path, through the real Switch rather than a stand-in."""
+
+    def setUp(self):
+        self.pactl = BtPactl()
+        btmic.subprocess = self.pactl
+        self.addCleanup(setattr, btmic, "subprocess", subprocess_real)
+        self.timers = FakeTimers()
+        glib = btmic.GLib
+        btmic.GLib = types.SimpleNamespace(
+            timeout_add=self.timers.timeout_add,
+            source_remove=self.timers.source_remove)
+        self.addCleanup(setattr, btmic, "GLib", glib)
+        real = btmic.hands_free
+        btmic.hands_free = lambda: False
+        self.addCleanup(setattr, btmic, "hands_free", real)
+
+    def test_it_says_why_and_hands_the_headset_back(self):
+        switch = btmic.Switch("/usr/bin/audioctl")
+        out = io.StringIO()
+        with redirect_stdout(out):
+            switch.give_back_leftover()
+            self.timers.fire_all()
+        said = out.getvalue()
+        self.assertIn("nothing recording", said)
+        self.assertNotIn("recording over", said,
+                         "nothing was recording - saying so would send the "
+                         "next reader looking for a memo that never happened")
+        self.assertIn(["bt-mic", "off"],
+                      [argv[1:] for argv in self.pactl.ran
+                       if argv[0].endswith("audioctl")])
+        self.assertFalse(switch.ours)
+
+
+class BtMicMainWiresItUp(unittest.TestCase):
+    """main() only wires things up; the handlers are what decide."""
+
+    def setUp(self):
+        self.pactl = BtPactl()
+        self.events = types.SimpleNamespace(
+            stdout=types.SimpleNamespace(fileno=lambda: 7), poll=lambda: None,
+            terminate=lambda: self.terminated.append(True))
+        self.terminated = []
+        self.pactl.Popen = lambda argv, **kw: self.events
+        btmic.subprocess = self.pactl
+        self.addCleanup(setattr, btmic, "subprocess", subprocess_real)
+
+        self.quits, self.signals, self.watches, self.timers = [], [], [], []
+        originals = (btmic.GLib.MainLoop, btmic.GLib.io_add_watch,
+                     btmic.GLib.timeout_add, btmic.GLib.IOChannel,
+                     btmic.GLib.IOCondition, btmic.shutil.which,
+                     btmic.unix_signal_add, btmic.os.read)
+
+        def restore():
+            (btmic.GLib.MainLoop, btmic.GLib.io_add_watch,
+             btmic.GLib.timeout_add, btmic.GLib.IOChannel,
+             btmic.GLib.IOCondition, btmic.shutil.which,
+             btmic.unix_signal_add, btmic.os.read) = originals
+        self.addCleanup(restore)
+
+        # The stub fabricates anything asked of it, but these are flags that
+        # get masked together - they have to be numbers, not objects.
+        btmic.GLib.IOCondition = types.SimpleNamespace(IN=1, ERR=8, HUP=16)
+
+        btmic.GLib.MainLoop = lambda: type(
+            "Loop", (), {"run": lambda _s: None,
+                         "quit": lambda _s: self.quits.append(True)})()
+        btmic.GLib.io_add_watch = lambda ch, prio, cond, fn: self.watches.append(fn)
+        btmic.GLib.timeout_add = lambda ms, fn, *a: self.timers.append((ms, fn, a))
+        btmic.GLib.IOChannel = types.SimpleNamespace(
+            unix_new=lambda fd: types.SimpleNamespace(
+                set_encoding=lambda _e: None, set_flags=lambda _f: None,
+                unix_get_fd=lambda: fd))
+        btmic.shutil.which = lambda tool: "/usr/bin/" + tool
+        btmic.unix_signal_add = lambda _p, _s, fn: self.signals.append(fn)
+        self.chunks = [b"Event 'new' on source-output #359\n"]
+        btmic.os.read = lambda _fd, _n: self.chunks.pop(0) if self.chunks else b""
+
+        self.looks = []
+        real = btmic.Watcher.look
+        btmic.Watcher.look = lambda _self, slow=False: self.looks.append(slow)
+        self.addCleanup(setattr, btmic.Watcher, "look", real)
+
+    def run_main(self):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            btmic.main()
+        return out.getvalue()
+
+    def on_event(self, condition=None):
+        condition = btmic.GLib.IOCondition.IN if condition is None else condition
+        with redirect_stdout(io.StringIO()):
+            return self.watches[0](btmic.GLib.IOChannel.unix_new(7), condition)
+
+    def test_it_looks_once_at_the_start(self):
+        # A recording already running when this starts - a restart in the
+        # middle of a memo - is found rather than waited for.
+        self.run_main()
+        self.assertEqual(self.looks, [False])
+
+    def test_a_source_output_event_is_a_reason_to_look(self):
+        self.run_main()
+        self.looks.clear()
+        self.assertTrue(self.on_event())
+        self.assertEqual(self.looks, [False])
+
+    def test_other_events_are_not(self):
+        self.run_main()
+        self.looks.clear()
+        self.chunks = [b"Event 'change' on sink #54\n"]
+        self.on_event()
+        self.assertEqual(self.looks, [])
+
+    def test_half_a_line_waits_for_its_other_half(self):
+        # readline would block the whole loop here, and with it the timer that
+        # gives the headset back.
+        self.run_main()
+        self.looks.clear()
+        self.chunks = [b"Event 'new' on source-", b"output #7\n"]
+        self.on_event()
+        self.assertEqual(self.looks, [])
+        self.on_event()
+        self.assertEqual(self.looks, [False])
+
+    def test_nothing_to_read_is_not_an_error(self):
+        self.run_main()
+        self.chunks = []
+        self.assertTrue(self.on_event())
+
+    def test_a_read_that_fails_keeps_the_watch(self):
+        self.run_main()
+
+        def boom(_fd, _n):
+            raise OSError("try again")
+        btmic.os.read = boom
+        self.assertTrue(self.on_event())
+
+    def test_the_stream_ending_gives_the_headset_back_and_stops(self):
+        # systemd restarts this. A headset left hands-free by a service that
+        # is no longer running is nobody's to fix.
+        self.run_main()
+        gave_back = []
+        btmic.Switch.release = lambda _s, grace=True: gave_back.append(grace)
+        self.addCleanup(setattr, btmic.Switch, "release",
+                        btmic.Switch.__dict__["release"])
+        self.assertFalse(self.on_event(btmic.GLib.IOCondition.HUP))
+        self.assertEqual(gave_back, [False], "no grace period on the way out")
+        self.assertTrue(self.quits)
+
+    def test_the_slow_check_is_the_one_that_may_conclude_things(self):
+        self.run_main()
+        self.looks.clear()
+        slow = [fn for ms, fn, _a in self.timers if ms == btmic.RECHECK_MS]
+        self.assertEqual(len(slow), 1)
+        self.assertTrue(slow[0]())
+        self.assertEqual(self.looks, [True])
+
+    def test_being_stopped_releases_the_headset(self):
+        self.run_main()
+        gave_back = []
+        btmic.Switch.release = lambda _s, grace=True: gave_back.append(grace)
+        self.addCleanup(setattr, btmic.Switch, "release",
+                        btmic.Switch.__dict__["release"])
+        self.assertEqual(len(self.signals), 2, "SIGTERM and SIGINT both")
+        with redirect_stdout(io.StringIO()):
+            self.signals[0]()
+        self.assertEqual(gave_back, [False])
+        self.assertTrue(self.terminated, "pactl subscribe has to be stopped too")
+        self.assertTrue(self.quits)
+
+    def test_it_says_so_when_it_cannot_subscribe_at_all(self):
+        def no(argv, **kw):
+            raise OSError("no pactl")
+        self.pactl.Popen = no
+        self.assertIn("could not subscribe", self.run_main())
+
+    def test_without_the_new_signal_module_the_old_spelling_is_used(self):
+        import gi as gi_mod
+        saved = sys.modules.pop("gi.repository.GLibUnix", None)
+        removed = gi_mod.repository.GLibUnix
+        del gi_mod.repository.GLibUnix
+        try:
+            again = load(ROOT / "tools" / "furios-audio-bt-mic.py", "bt_mic_again")
+            self.assertIs(again.unix_signal_add, again.GLib.unix_signal_add)
+        finally:
+            gi_mod.repository.GLibUnix = removed
+            if saved is not None:
+                sys.modules["gi.repository.GLibUnix"] = saved
 
 if __name__ == "__main__":
     # Built by hand rather than through unittest.main(), which looks for tests

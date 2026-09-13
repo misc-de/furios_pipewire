@@ -618,6 +618,33 @@ STUB
 chmod +x "$STUBDIR/pactl"
 check "and a headset that refuses both is reported" "yes" \
     "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB headset 2>&1 | grep -q "WARNING" && echo yes || echo no')"
+
+# The way back used to be assumed. A card that has lost its A2DP profiles -
+# which happens when WirePlumber restarts while Bluetooth is connected -
+# answers "No such entity" here, and this returned 0 anyway: the headset stays
+# hands-free, every later track plays mono at 16 kHz, and nothing says why.
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+case "$*" in
+*"set-card-profile"*a2dp-sink*) exit 1 ;;
+esac
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+check "a headset that cannot go back to A2DP says so" "yes" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB a2dp 2>&1 | grep -q "stays in hands-free" && echo yes || echo no')"
+check "and names the cure with the address filled in" "yes" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB a2dp 2>&1 | grep -q "bluetoothctl connect AA:BB" && echo yes || echo no')"
+check "and reports the failure rather than a quiet success" "1" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB a2dp >/dev/null 2>&1; echo $?')"
+
+cat > "$STUBDIR/pactl" <<'STUB'
+#!/bin/sh
+exit 0
+STUB
+chmod +x "$STUBDIR/pactl"
+check "a headset that does go back says nothing" "0" \
+    "$(with_audioctl 'bt_headset_profile bluez_card.AA_BB a2dp >/dev/null 2>&1; echo $?')"
 cat > "$STUBDIR/pactl" <<'STUB'
 #!/bin/sh
 case "$*" in
