@@ -254,6 +254,16 @@ remembered or not, what the checks say, and a **Restore shipped state**
 button. That one is styled as the destructive thing it is - the shipped state
 has no route out and no name resolution once Wi-Fi is off.
 
+Where `gpsctl` from [furios_gps](https://github.com/misc-de/furios_gps) is
+installed, a **GPS** tab does the same for location: the filter that refuses
+positions derived from the carrier's IP address, on or off, remembered or not,
+with what the proxy has counted since boot. There is no separate button to turn
+it off with - the switch is the way back, and a second control leading to the
+same place would only be a second way to arrive at the carrier's exit node.
+What that page is careful about is the word "off": it is not an absence of
+location but the phone publishing a point tens of kilometres away as though it
+had been observed there, and every row says so.
+
 While switching, a **pulsing progress bar** shows what audioctl is currently
 reporting - the lines are read while the program is still running. Deliberately
 without a percentage: nobody knows in advance how long it takes, because

@@ -521,11 +521,16 @@ class TheWindow(unittest.TestCase):
             names += ["modem_row", "modem_persist", "modem_progress",
                       "modem_revealer", "mrow_profile", "mrow_health",
                       "mrow_signal", "modem_restore_btn"]
+        if switcher.GPSCTL:
+            names += ["gps_row", "gps_persist", "gps_progress", "gps_revealer",
+                      "grow_profile", "grow_seen", "grow_health"]
         for name in names:
             setattr(self.win, name, Recording())
         if switcher.MODEMCTL:
             self.win.modem_rows = [self.win.modem_row, self.win.modem_persist,
                                    self.win.modem_restore_btn]
+        if switcher.GPSCTL:
+            self.win.gps_rows = [self.win.gps_row, self.win.gps_persist]
         self.ran = []
         self.original = switcher.run_async
         switcher.run_async = lambda argv, done, on_line=None: self.ran.append(
@@ -739,7 +744,8 @@ class TheWindow(unittest.TestCase):
         must not leave one of the others unasked - which is how a window ends
         up showing a state that stopped being true ten minutes ago."""
         self.win.refresh()
-        expected = 2 + (2 if switcher.MODEMCTL else 0)
+        expected = (2 + (2 if switcher.MODEMCTL else 0)
+                    + (2 if switcher.GPSCTL else 0))
         self.assertEqual(expected, len(self.ran))
 
     # --- the modem page ----------------------------------------------------
@@ -814,6 +820,147 @@ class TheWindow(unittest.TestCase):
         self.assertFalse(win.modem_row.sensitive)
         self.assertFalse(win.modem_restore_btn.sensitive,
                          "the restore button came back with nothing behind it")
+
+    # --- the GPS page ------------------------------------------------------
+    #
+    # Built only when gpsctl is installed, same as the modem page. What is
+    # different here is the "off" side: it is not a neutral shipped state but
+    # one that publishes the carrier's exit node as a position, and every row
+    # on this page is checked for saying so.
+
+    def test_without_gpsctl_there_is_no_gps_page(self):
+        real = switcher.GPSCTL
+        try:
+            switcher.GPSCTL = None
+            win = switcher.Window(switcher.Adw.Application())
+            self.assertEqual([], win.gps_rows)
+        finally:
+            switcher.GPSCTL = real
+
+    def gps_win(self):
+        if not switcher.GPSCTL:
+            self.skipTest("no gpsctl on this machine, so no GPS page")
+        return self.win
+
+    def test_the_filter_being_on_reads_as_on(self):
+        win = self.gps_win()
+        win.on_gps_profile(True, "recorded: fixed\nactual:   fixed\n")
+        self.assertTrue(win.gps_row.get_active())
+        self.assertIn("thrown away", win.grow_profile.subtitle)
+
+    def test_the_filter_being_off_says_what_off_means(self):
+        """"Off" here is not an absence of something. It is the carrier's exit
+        node being published as an observation, and a row that said "as
+        shipped" and stopped there would be hiding the only part that
+        matters."""
+        win = self.gps_win()
+        win.on_gps_profile(True, "recorded: shipped\nactual:   shipped\n")
+        self.assertFalse(win.gps_row.get_active())
+        self.assertIn("IP position is published", win.grow_profile.subtitle)
+
+    def test_a_gps_try_says_the_next_boot_will_undo_it(self):
+        win = self.gps_win()
+        win.on_gps_profile(True, "recorded: fixed\nactual:   shipped\n")
+        self.assertIn("next boot", win.grow_profile.subtitle)
+
+    def test_mixed_survives_the_return_code_that_comes_with_it(self):
+        """gpsctl prints recorded/actual and *then* exits 1 when the two halves
+        disagree. Reading the return code first turns the one state somebody
+        most needs to see into "gpsctl did not answer"."""
+        win = self.gps_win()
+        win.on_gps_profile(False, "recorded: fixed\nactual:   mixed\n")
+        self.assertIn("half applied", win.grow_profile.subtitle)
+        self.assertTrue(win.gps_ok, "a failing exit code was read as no answer")
+
+    def test_gpsctl_not_answering_is_said_and_not_guessed(self):
+        win = self.gps_win()
+        win.on_gps_profile(False, "")
+        self.assertIn("did not answer", win.grow_profile.subtitle)
+        self.assertFalse(win.gps_row.sensitive,
+                         "the switch stayed usable with nothing behind it")
+
+    def test_a_gps_page_with_no_answer_stays_unusable(self):
+        win = self.gps_win()
+        win.on_gps_profile(False, "")
+        win.set_busy(True)
+        win.set_busy(False)
+        self.assertFalse(win.gps_row.sensitive)
+        self.assertFalse(win.gps_persist.sensitive)
+
+    def test_the_counters_are_said_back_as_gpsctl_printed_them(self):
+        win = self.gps_win()
+        win.on_gps_status(True,
+                          "  ok    [wifi] enable = true\n"
+                          "  FAIL  furios-gps-proxy.service is not installed\n"
+                          "since boot: 5 asked, 0 located, 5 IP fallbacks rejected\n")
+        self.assertIn("1 in place, 1 not", win.grow_health.subtitle)
+        self.assertIn("5 IP fallbacks rejected", win.grow_seen.subtitle)
+
+    def test_having_counted_nothing_is_not_dressed_up_as_a_fault(self):
+        win = self.gps_win()
+        win.on_gps_status(True, "  ok    [wifi] enable = true\n")
+        self.assertIn("nothing counted yet", win.grow_seen.subtitle)
+        self.assertIn("1 in place", win.grow_health.subtitle)
+
+    def test_no_gps_output_at_all_is_admitted(self):
+        win = self.gps_win()
+        win.on_gps_status(False, "")
+        self.assertIn("did not answer", win.grow_health.subtitle)
+
+    def test_the_gps_switch_asks_for_the_rights_it_needs(self):
+        win = self.gps_win()
+        win.gps_persist.active = True
+        win.gps_row.active = False
+        win.on_gps_switch(win.gps_row, None)
+        argv = self.ran[-1][0]
+        self.assertIn("pkexec", argv[0])
+        self.assertEqual(["set", "shipped"], argv[2:])
+
+    def test_a_gps_try_is_a_try(self):
+        win = self.gps_win()
+        win.gps_persist.active = False
+        win.gps_row.active = True
+        win.on_gps_switch(win.gps_row, None)
+        self.assertEqual(["try", "fixed"], self.ran[-1][0][2:])
+
+    def test_turning_the_filter_off_says_what_was_turned_off(self):
+        """A toast saying "Done" after this switch would be the one moment the
+        app had to tell somebody their phone now reports the carrier's exit
+        node, and spent it on a word that means nothing."""
+        win = self.gps_win()
+        win.gps_row.active = False
+        win.on_gps_switched(True, "")
+        self.assertIn("published again", str(win.toasts.text))
+
+    def test_turning_the_filter_on_says_so_too(self):
+        win = self.gps_win()
+        win.gps_row.active = True
+        win.on_gps_switched(True, "")
+        self.assertIn("refused", str(win.toasts.text))
+
+    def test_a_failed_gps_switch_is_not_reported_as_success(self):
+        win = self.gps_win()
+        win.on_gps_switched(False, "pkexec: refused")
+        self.assertIn("failed", str(win.toasts.text).lower())
+
+    def test_the_gps_switch_needs_pkexec_to_exist(self):
+        win = self.gps_win()
+        real = switcher.PKEXEC
+        try:
+            switcher.PKEXEC = None
+            before = len(self.ran)
+            win.on_gps_switch(win.gps_row, None)
+            self.assertEqual(before, len(self.ran), "ran the switch without pkexec")
+            self.assertIn("pkexec", str(win.toasts.text))
+        finally:
+            switcher.PKEXEC = real
+
+    def test_a_gps_switch_while_busy_is_ignored(self):
+        win = self.gps_win()
+        win.busy = True
+        before = len(self.ran)
+        win.on_gps_switch(win.gps_row, None)
+        self.assertEqual(before, len(self.ran))
 
     def test_the_checks_are_counted_the_way_modemctl_prints_them(self):
         win = self.modem_win()
