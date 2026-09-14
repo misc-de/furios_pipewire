@@ -577,6 +577,41 @@ class TheWindow(unittest.TestCase):
         self.assertNotIn("until the next reboot", self.win.row_profile.subtitle)
         self.assertFalse(self.win.persist_row.active)
 
+    def test_audioctl_not_answering_claims_nothing_about_the_phone(self):
+        """Off is the shipped state, so a switch left at off is not a blank -
+        it is a plausible statement about a phone this window cannot see."""
+        self.win.switch_row.active = True
+        self.win.on_status(False, "Failed to execute child process")
+        self.assertIn("did not answer", self.win.row_profile.subtitle)
+        self.assertIn("did not answer", self.win.persist_row.subtitle)
+        self.assertTrue(self.win.switch_row.active,
+                        "the switch was moved on the strength of no answer")
+        self.assertFalse(self.win.switch_row.sensitive)
+        self.assertFalse(self.win.persist_row.sensitive)
+
+    def test_a_control_with_nothing_behind_it_stays_unusable(self):
+        """set_busy used to be the only hand on the sensitivity, so the next
+        finished action handed back a switch that leads nowhere."""
+        self.win.on_status(False, "")
+        self.win.set_busy(True)
+        self.win.set_busy(False)
+        self.assertFalse(self.win.switch_row.sensitive)
+        self.assertFalse(self.win.persist_row.sensitive)
+        self.assertIn("did not answer", self.win.switch_row.subtitle)
+
+    def test_and_becomes_usable_again_once_audioctl_answers(self):
+        self.win.on_status(False, "")
+        self.win.on_status(True, self.PERMANENT)
+        self.assertTrue(self.win.switch_row.sensitive)
+        self.assertIn("PipeWire", self.win.switch_row.subtitle)
+
+    def test_an_echo_switch_with_no_script_behind_it_stays_off_limits(self):
+        self.win.on_dmnr_status(False, "")
+        self.win.set_busy(True)
+        self.win.set_busy(False)
+        self.assertFalse(self.win.dmnr_row.sensitive)
+        self.assertIn("not available", self.win.dmnr_row.subtitle)
+
     def test_the_shipped_state_is_named_as_such(self):
         self.win.on_status(True, "Profile (active):   standard\nSinks:              x\n")
         self.assertIn("as shipped", self.win.row_profile.subtitle)
@@ -770,6 +805,15 @@ class TheWindow(unittest.TestCase):
         self.assertIn("did not answer", win.mrow_profile.subtitle)
         self.assertFalse(win.modem_row.sensitive,
                          "the switch stayed usable with nothing behind it")
+
+    def test_a_modem_page_with_no_modemctl_answer_stays_unusable(self):
+        win = self.modem_win()
+        win.on_modem_profile(False, "")
+        win.set_busy(True)
+        win.set_busy(False)
+        self.assertFalse(win.modem_row.sensitive)
+        self.assertFalse(win.modem_restore_btn.sensitive,
+                         "the restore button came back with nothing behind it")
 
     def test_the_checks_are_counted_the_way_modemctl_prints_them(self):
         win = self.modem_win()
