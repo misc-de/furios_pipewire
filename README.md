@@ -264,6 +264,12 @@ What that page is careful about is the word "off": it is not an absence of
 location but the phone publishing a point tens of kilometres away as though it
 had been observed there, and every row says so.
 
+**Every call to a helper is bounded** (90 seconds). systemctl can block on a
+job that is itself waiting and pkexec inherits that, and without a bound a
+helper that never answered left the window greyed out with a pulsing bar and no
+way back except killing it. A bound turns that into an error message, which is
+a state somebody can act on.
+
 While switching, a **pulsing progress bar** shows what audioctl is currently
 reporting - the lines are read while the program is still running. Deliberately
 without a percentage: nobody knows in advance how long it takes, because

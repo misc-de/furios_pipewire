@@ -290,6 +290,7 @@ class FakeProcess:
         self.ok = ok
         self.fail_at = fail_at
         self.waited = False
+        self.killed = False
 
     def get_stdout_pipe(self):
         return self
@@ -303,10 +304,17 @@ class FakeProcess:
         return True, "\n".join(self.lines), None
 
     def communicate_utf8_async(self, _stdin, _cancellable, callback):
+        if self.fail_at == "hang":
+            return                      # never calls back
         callback(self, None)
 
     def wait_async(self, _cancellable, callback):
+        if self.fail_at == "hang":
+            return                      # never calls back - the case with a watchdog
         callback(self, None)
+
+    def force_exit(self):
+        self.killed = True
 
     def wait_finish(self, _res):
         self.waited = True
@@ -395,6 +403,76 @@ class RunsAudioctl(unittest.TestCase):
         switcher.run_async(["audioctl"], lambda ok, out: seen.append((ok, out)),
                            on_line=lambda _l: None)
         self.assertEqual(seen[0][0], False)
+
+    # --- the watchdog ------------------------------------------------------
+    #
+    # systemctl can block on a job that is itself waiting, and pkexec inherits
+    # that. Without a bound, a helper that never answers meant set_busy(True)
+    # with nothing left to set it back: switches grey, progress bar pulsing,
+    # and the only way out is killing the window.
+
+    def catch_timer(self):
+        """Holds on to what run_async scheduled, so a test can fire it."""
+        fired = []
+        original = switcher.GLib.timeout_add_seconds
+        switcher.GLib.timeout_add_seconds = lambda secs, fn: (
+            fired.append((secs, fn)) or 4711)
+        self.addCleanup(lambda: setattr(switcher.GLib, "timeout_add_seconds",
+                                        original))
+        return fired
+
+    def test_a_helper_that_never_answers_is_given_up_on(self):
+        process = self.arrange(lines=[], fail_at="hang")
+        fired = self.catch_timer()
+        seen = []
+        switcher.run_async(["audioctl", "status"],
+                           lambda ok, out: seen.append((ok, out)))
+        self.assertEqual([], seen, "answered before the helper did")
+        self.assertEqual(1, len(fired), "nothing was scheduled to give up")
+        fired[0][1]()                                   # the watchdog fires
+        self.assertEqual(False, seen[0][0])
+        self.assertIn("did not answer", seen[0][1])
+        self.assertTrue(process.killed, "gave up without stopping the process")
+
+    def test_the_watchdog_waits_long_enough_for_an_honest_answer(self):
+        """audioctl alone may wait 15 seconds for a sink, and a switch behind
+        pkexec runs several systemctl calls after that. A bound that cuts off
+        real work would be worse than none."""
+        self.arrange(lines=[], fail_at="hang")
+        fired = self.catch_timer()
+        switcher.run_async(["audioctl"], lambda ok, out: None)
+        self.assertGreaterEqual(fired[0][0], 60)
+
+    def test_an_answer_that_arrives_is_not_answered_twice(self):
+        """Both the reader and the watchdog can reach the callback. Calling it
+        twice would refresh the window on top of a switch already in flight."""
+        self.arrange(lines=["done"])
+        fired = self.catch_timer()
+        seen = []
+        switcher.run_async(["audioctl"], lambda ok, out: seen.append((ok, out)))
+        self.assertEqual(1, len(seen))
+        fired[0][1]()                                   # late watchdog
+        self.assertEqual(1, len(seen), "the watchdog answered after the helper")
+
+    def test_the_watchdog_does_not_call_itself(self):
+        """run_async swaps the callback it hands to its readers. Swapping the
+        name the wrapper itself calls would be endless recursion, and the stub
+        would not notice - the recursion limit would."""
+        self.arrange(lines=["fine"])
+        self.catch_timer()
+        seen = []
+        switcher.run_async(["audioctl"], lambda ok, out: seen.append(out))
+        self.assertEqual(["fine"], seen)
+
+    def test_a_line_reading_call_is_bounded_too(self):
+        process = self.arrange(lines=["step one"], fail_at="hang")
+        fired = self.catch_timer()
+        seen = []
+        switcher.run_async(["audioctl"], lambda ok, out: seen.append((ok, out)),
+                           on_line=lambda _l: None)
+        fired[0][1]()
+        self.assertIn("did not answer", seen[0][1])
+        self.assertTrue(process.killed)
 
     def test_a_broken_pipe_without_a_line_callback_is_reported(self):
         self.arrange(lines=["x"], fail_at="communicate")
