@@ -603,20 +603,27 @@ class TheWindow(unittest.TestCase):
             names += ["modem_row", "modem_persist", "modem_progress",
                       "modem_revealer", "mrow_profile", "mrow_health",
                       "mrow_signal", "modem_restore_btn"]
+        names.append("rescue_btn")
         if switcher.GPSCTL:
             names += ["gps_row", "gps_persist", "gps_progress", "gps_revealer",
-                      "grow_profile", "grow_seen", "grow_health"]
+                      "grow_profile", "grow_seen", "grow_health",
+                      "gps_restore_btn"]
         if switcher.KILLSWITCH:
             names += ["sw_row", "sw_persist", "sw_wifi", "sw_bt", "sw_modem",
                       "srow_cam", "srow_cam_hal", "srow_cams", "srow_net",
-                      "srow_mic"]
+                      "srow_mic", "sw_restore_btn"]
         for name in names:
             setattr(self.win, name, Recording())
         if switcher.MODEMCTL:
             self.win.modem_rows = [self.win.modem_row, self.win.modem_persist,
                                    self.win.modem_restore_btn]
         if switcher.GPSCTL:
-            self.win.gps_rows = [self.win.gps_row, self.win.gps_persist]
+            self.win.gps_rows = [self.win.gps_row, self.win.gps_persist,
+                                 self.win.gps_restore_btn]
+        if switcher.KILLSWITCH:
+            self.win.sw_rows = [self.win.sw_row, self.win.sw_persist,
+                                self.win.sw_wifi, self.win.sw_bt,
+                                self.win.sw_restore_btn]
         self.ran = []
         self.original = switcher.run_async
         switcher.run_async = lambda argv, done, on_line=None: self.ran.append(
@@ -983,6 +990,129 @@ class TheWindow(unittest.TestCase):
         knoepfe = [str(c[2].get("label", "")).lower()
                    for c in recorder.calls if c[0] == "Gtk.Button"]
         self.assertEqual([], [b for b in knoepfe if "listen" in b], knoepfe)
+
+    # --- the way back, on every page ---------------------------------------
+    #
+    # One idea, one shape. Before this it was a blue "Restore sound" here, a
+    # red "Restore shipped state" there and nothing at all on the other two -
+    # and the colours made a claim ("do this" / "careful") that is not true
+    # in general. What differs between the pages is the price, and that is
+    # what the description says.
+
+    def test_every_page_offers_the_same_way_back(self):
+        """Counted, not named: adding a page must not quietly add a fifth
+        shape of this."""
+        recorder.reset()
+        switcher.Window(switcher.Adw.Application())
+        erwartet = (1 + bool(switcher.MODEMCTL) + bool(switcher.GPSCTL)
+                    + bool(switcher.KILLSWITCH))
+        knoepfe = [c for c in recorder.calls if c[0] == "Gtk.Button"
+                   and c[2].get("label") == switcher.Window.RESTORE_LABEL]
+        gruppen = [c for c in recorder.calls if c[0] == "Adw.PreferencesGroup"
+                   and c[2].get("title") == switcher.Window.RESTORE_TITLE]
+        self.assertEqual(erwartet, len(knoepfe))
+        self.assertEqual(erwartet, len(gruppen))
+
+    def test_no_way_back_is_painted_louder_than_another(self):
+        recorder.reset()
+        switcher.Window(switcher.Adw.Application())
+        klassen = [a for c in recorder.calls
+                   if c[0] == "Gtk.Button.add_css_class()" for a in c[1]]
+        self.assertEqual([], [k for k in klassen if k.endswith("-action")])
+        self.assertIn("pill", klassen)
+
+    def test_each_way_back_says_what_it_costs(self):
+        """The same button four times is only honest if the text next to it is
+        not the same four times."""
+        recorder.reset()
+        switcher.Window(switcher.Adw.Application())
+        texte = {str(c[2].get("description", ""))
+                 for c in recorder.calls if c[0] == "Adw.PreferencesGroup"
+                 and c[2].get("title") == switcher.Window.RESTORE_TITLE}
+        erwartet = (1 + bool(switcher.MODEMCTL) + bool(switcher.GPSCTL)
+                    + bool(switcher.KILLSWITCH))
+        self.assertEqual(erwartet, len(texte))
+
+    def test_a_way_back_asks_before_it_acts(self):
+        """Nothing here is a tap to take back, so none of them acts on the tap
+        alone."""
+        gerufen = []
+        self.ran.clear()
+        self.win.confirm_restore("what it costs", gerufen.append, "btn")
+        self.assertEqual([], gerufen)
+        self.assertEqual([], self.ran)
+
+    def test_cancelling_is_the_default_and_does_nothing(self):
+        gerufen = []
+        recorder.reset()
+        self.win.confirm_restore("what it costs", gerufen.append, "btn")
+        # c[1] filtered: the stub records the call AND the object it hands
+        # back, and the second one carries no arguments.
+        vorgabe = [c[1] for c in recorder.calls
+                   if c[0] == "Adw.AlertDialog.set_default_response()" and c[1]]
+        schliessen = [c[1] for c in recorder.calls
+                      if c[0] == "Adw.AlertDialog.set_close_response()" and c[1]]
+        self.assertEqual([("cancel",)], vorgabe)
+        self.assertEqual([("cancel",)], schliessen)
+        self.win.on_restore_response(None, "cancel")
+        self.assertEqual([], gerufen)
+
+    def test_answering_restore_is_what_runs_it(self):
+        gerufen = []
+        self.win.confirm_restore("what it costs", gerufen.append, "btn")
+        self.win.on_restore_response(None, "restore")
+        self.assertEqual(["btn"], gerufen)
+        # Answering twice must not run it twice - the pending one is cleared.
+        self.win.on_restore_response(None, "restore")
+        self.assertEqual(["btn"], gerufen)
+
+    def test_the_location_way_back_switches_and_remembers(self):
+        """"set", not "try": what it restores is what the next boot comes back
+        to, the same promise the other pages make."""
+        win = self.gps_win()
+        self.ran.clear()
+        win.busy = False
+        win.on_gps_restore(None)
+        self.assertEqual(["set", "shipped"], list(self.ran[-1][0][-2:]))
+        win.on_gps_restored(True, "")
+        self.assertIn("IP position", str(win.toasts.text))
+
+    def test_the_switches_way_back_undoes_what_this_page_added(self):
+        """Three commands, because two owners: the tool holds the extra
+        radios, systemd holds the unit. The sliders are not among them - they
+        are hardware and nothing here reaches them."""
+        win = self.switches_win()
+        self.ran.clear()
+        win.busy = False
+        win.on_switches_restore(None)
+        gelaufen = []
+        for _ in range(3):
+            argv, done, _on_line = self.ran.pop(0)
+            gelaufen.append(" ".join(argv))
+            done(True, "")
+        self.assertTrue(any("config wifi off" in c for c in gelaufen), gelaufen)
+        self.assertTrue(any("config bluetooth off" in c for c in gelaufen), gelaufen)
+        self.assertTrue(any("disable --now killswitch-indicator" in c
+                            for c in gelaufen), gelaufen)
+
+    def test_a_step_that_fails_stops_the_rest(self):
+        """Half done is reported, never passed off as success."""
+        win = self.switches_win()
+        self.ran.clear()
+        win.busy = False
+        win.on_switches_restore(None)
+        _argv, done, _on_line = self.ran.pop(0)
+        done(False, "nope")
+        self.assertEqual([], [r for r in self.ran if "config" in r[0]])
+        self.assertIn("Could not", str(win.toasts.text))
+
+    def test_the_question_repeats_the_words_the_page_carries(self):
+        """Nothing new to read at the moment of deciding."""
+        recorder.reset()
+        self.win.confirm_restore("it takes the repairs out", lambda _b: None, None)
+        dialoge = [c for c in recorder.calls if c[0] == "Adw.AlertDialog"]
+        self.assertEqual(1, len(dialoge))
+        self.assertEqual("it takes the repairs out", dialoge[0][2].get("body"))
 
     # --- the modem page ----------------------------------------------------
     #
