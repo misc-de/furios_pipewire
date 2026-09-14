@@ -498,11 +498,12 @@ class TheWindow(unittest.TestCase):
         if switcher.MODEMCTL:
             names += ["modem_row", "modem_persist", "modem_progress",
                       "modem_revealer", "mrow_profile", "mrow_health",
-                      "mrow_signal"]
+                      "mrow_signal", "modem_restore_btn"]
         for name in names:
             setattr(self.win, name, Recording())
         if switcher.MODEMCTL:
-            self.win.modem_rows = [self.win.modem_row, self.win.modem_persist]
+            self.win.modem_rows = [self.win.modem_row, self.win.modem_persist,
+                                   self.win.modem_restore_btn]
         self.ran = []
         self.original = switcher.run_async
         switcher.run_async = lambda argv, done, on_line=None: self.ran.append(
@@ -738,6 +739,37 @@ class TheWindow(unittest.TestCase):
         argv = self.ran[-1][0]
         self.assertIn("pkexec", argv[0])
         self.assertEqual(["set", "shipped"], argv[2:])
+
+    def test_the_restore_button_asks_for_the_shipped_state_for_good(self):
+        """The counterpart to "Restore sound": what it restores has to be what
+        the phone comes back to, so "set" and never "try"."""
+        win = self.modem_win()
+        win.on_modem_restore(None)
+        argv = self.ran[-1][0]
+        self.assertIn("pkexec", argv[0])
+        self.assertEqual(["set", "shipped"], argv[2:])
+
+    def test_the_restore_button_ignores_the_remember_switch(self):
+        win = self.modem_win()
+        win.modem_persist.active = False
+        win.on_modem_restore(None)
+        self.assertEqual(["set", "shipped"], self.ran[-1][0][2:])
+
+    def test_restoring_says_what_the_phone_is_now(self):
+        win = self.modem_win()
+        win.on_modem_restored(True, "")
+        self.assertIn("no network without Wi-Fi", str(win.toasts.text))
+
+    def test_a_failed_restore_is_not_reported_as_done(self):
+        win = self.modem_win()
+        win.on_modem_restored(False, "revert failed")
+        self.assertIn("Could not restore", str(win.toasts.text))
+
+    def test_the_restore_button_does_nothing_while_busy(self):
+        win = self.modem_win()
+        win.busy = True
+        win.on_modem_restore(None)
+        self.assertEqual([], self.ran)
 
     def test_not_remembering_is_a_try_and_not_a_set(self):
         win = self.modem_win()
