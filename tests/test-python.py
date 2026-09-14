@@ -900,6 +900,10 @@ class TheWindow(unittest.TestCase):
         self.assertTrue(modem, "no row for the mobile network")
         self.assertIs(True, modem[-1][2].get("active"))
         self.assertIsNotNone(gebaut)
+        # And it must not read as "mobile data cannot be turned off at all",
+        # which is how the first wording landed: Settings switches it off
+        # through NetworkManager any time, a path this switch never touches.
+        self.assertIn("settings", str(modem[-1][2].get("subtitle", "")).lower())
 
     def test_a_radio_that_is_not_reachable_is_not_called_off(self):
         """null is not false: bluetoothd being away must not read as
