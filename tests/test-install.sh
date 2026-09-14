@@ -69,4 +69,14 @@ while read -r quelle; do
 done < <(grep -oE '^install -Dm[0-9]+ [^ "]+' packaging/build-deb.sh | awk '{print $3}')
 check "the package installs only files that exist here" 0 "$fehlend"
 
+# The same for the two install scripts. A source path that is one letter off
+# fails in the middle of an install, with half the stack in place - and on a
+# phone, half a stack is a phone without sound.
+fehlend=0
+while read -r quelle; do
+    case "$quelle" in *'$'*) continue ;; esac
+    [ -e "$quelle" ] || { fehlend=$((fehlend + 1)); echo "       not in this repo: $quelle"; }
+done < <(grep -hoE 'sudo install -[Dm0-9]+ +[^ "$]+' install.sh install-hal.sh | awk '{print $4}')
+check "both install scripts copy only files that exist here" 0 "$fehlend"
+
 summary
