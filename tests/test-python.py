@@ -479,6 +479,28 @@ class FindsItsTools(unittest.TestCase):
             switcher.os.access, switcher.shutil.which = original_access, original_which
 
 
+    def test_a_tool_that_is_nowhere_is_admitted_rather_than_invented(self):
+        """_tool_maybe decides whether the modem page exists at all. Guessing a
+        path here would build a whole tab around a program that is not
+        installed, and every row in it would report a failure of its own."""
+        original_access, original_which = switcher.os.access, switcher.shutil.which
+        switcher.os.access = lambda path, mode: False
+        switcher.shutil.which = lambda name: None
+        try:
+            self.assertIsNone(switcher._tool_maybe("modemctl"))
+        finally:
+            switcher.os.access, switcher.shutil.which = original_access, original_which
+
+    def test_a_tool_only_on_the_search_path_is_still_found(self):
+        original_access, original_which = switcher.os.access, switcher.shutil.which
+        switcher.os.access = lambda path, mode: False
+        switcher.shutil.which = lambda name: "/opt/bin/" + name
+        try:
+            self.assertEqual("/opt/bin/modemctl", switcher._tool_maybe("modemctl"))
+        finally:
+            switcher.os.access, switcher.shutil.which = original_access, original_which
+
+
 class TheWindow(unittest.TestCase):
     """The window, driven through its own callbacks.
 
@@ -739,6 +761,87 @@ class TheWindow(unittest.TestCase):
         argv = self.ran[-1][0]
         self.assertIn("pkexec", argv[0])
         self.assertEqual(["set", "shipped"], argv[2:])
+
+    def test_modemctl_not_answering_is_said_and_not_guessed(self):
+        """A profile row that invents "shipped" when it was told nothing would
+        make a repaired phone look untouched."""
+        win = self.modem_win()
+        win.on_modem_profile(False, "")
+        self.assertIn("did not answer", win.mrow_profile.subtitle)
+        self.assertFalse(win.modem_row.sensitive,
+                         "the switch stayed usable with nothing behind it")
+
+    def test_the_checks_are_counted_the_way_modemctl_prints_them(self):
+        win = self.modem_win()
+        win.on_modem_status(True,
+                            "  ok    utils.py\n"
+                            "  ok    mobile default route: ccmni0\n"
+                            "  FAIL  resolv.conf -> systemd-resolved\n"
+                            "  ok    signal quality 26% (recent)\n")
+        self.assertIn("3 in place, 1 not", win.mrow_health.subtitle)
+        self.assertIn("26%", win.mrow_signal.subtitle)
+
+    def test_everything_in_place_is_not_dressed_up_with_a_zero(self):
+        win = self.modem_win()
+        win.on_modem_status(True, "  ok    utils.py\n  ok    main.py\n")
+        self.assertEqual("2 in place", win.mrow_health.subtitle)
+
+    def test_a_status_without_a_signal_line_says_so(self):
+        win = self.modem_win()
+        win.on_modem_status(True, "  ok    utils.py\n")
+        self.assertIn("not readable", win.mrow_signal.subtitle)
+
+    def test_a_status_that_failed_but_printed_is_still_read(self):
+        """modemctl exits non-zero when a check fails - and then its output is
+        exactly the thing worth showing."""
+        win = self.modem_win()
+        win.on_modem_status(False, "  ok    utils.py\n  FAIL  mobile default route\n")
+        self.assertIn("1 in place, 1 not", win.mrow_health.subtitle)
+
+    def test_a_status_with_no_output_at_all_claims_nothing(self):
+        win = self.modem_win()
+        win.on_modem_status(False, "")
+        self.assertIn("did not answer", win.mrow_health.subtitle)
+
+    def test_without_pkexec_the_switch_says_so_and_runs_nothing(self):
+        win = self.modem_win()
+        real = switcher.PKEXEC
+        try:
+            switcher.PKEXEC = None
+            win.modem_row.active = False
+            win.on_modem_switch(win.modem_row, None)
+            self.assertEqual([], self.ran, "it tried to switch without rights")
+            self.assertIn("pkexec", str(win.toasts.text))
+        finally:
+            switcher.PKEXEC = real
+
+    def test_without_pkexec_the_restore_button_says_so_and_runs_nothing(self):
+        win = self.modem_win()
+        real = switcher.PKEXEC
+        try:
+            switcher.PKEXEC = None
+            win.on_modem_restore(None)
+            self.assertEqual([], self.ran, "it tried to restore without rights")
+            self.assertIn("pkexec", str(win.toasts.text))
+        finally:
+            switcher.PKEXEC = real
+
+    def test_a_finished_switch_repeats_modemctls_last_word(self):
+        win = self.modem_win()
+        win.on_modem_switched(True, "Recorded: shipped. This survives a reboot.\n\n")
+        self.assertIn("Recorded: shipped", str(win.toasts.text))
+
+    def test_a_switch_that_printed_nothing_still_says_something(self):
+        win = self.modem_win()
+        win.on_modem_switched(True, "")
+        self.assertIn("Done", str(win.toasts.text))
+
+    def test_a_refused_switch_is_reported_as_a_failure(self):
+        """polkit saying no looks like any other failure from here, and on a
+        phone where this is not authorised it is the likely one."""
+        win = self.modem_win()
+        win.on_modem_switched(False, "Error executing command as another user")
+        self.assertIn("failed", str(win.toasts.text).lower())
 
     def test_the_restore_button_asks_for_the_shipped_state_for_good(self):
         """The counterpart to "Restore sound": what it restores has to be what
