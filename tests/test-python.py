@@ -1208,6 +1208,25 @@ class TheWindow(unittest.TestCase):
             self.skipTest("no gpsctl on this machine, so no GPS page")
         return self.win
 
+    def test_the_row_names_whose_ip_address_it_is(self):
+        """Not "this phone's" - the position comes from the carrier's exit
+        node, and calling it the phone's reads as if it sat in the device."""
+        win = self.gps_win()
+        win.on_gps_profile(True, "recorded: fixed\nactual:   fixed\n")
+        self.assertIn("carrier's IP address", win.gps_row.subtitle)
+        win.on_gps_profile(True, "recorded: shipped\nactual:   shipped\n")
+        self.assertIn("carrier's IP address", win.gps_row.subtitle)
+
+    def test_the_location_group_carries_no_essay(self):
+        """The switch's own subtitle says what on and off mean; the paragraph
+        above it said the same thing a third time."""
+        recorder.reset()
+        switcher.Window(switcher.Adw.Application())
+        ort = [c for c in recorder.calls if c[0] == "Adw.PreferencesGroup"
+               and c[2].get("title") == "Location"]
+        self.assertTrue(ort, "no Location group")
+        self.assertNotIn("description", ort[0][2])
+
     def test_the_filter_being_on_reads_as_on(self):
         win = self.gps_win()
         win.on_gps_profile(True, "recorded: fixed\nactual:   fixed\n")
