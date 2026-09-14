@@ -1,16 +1,60 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
-# Installs the switching infrastructure. Changes nothing about the running
-# audio stack - after installation the 'standard' profile is still active.
+# Installs the whole stack: the SPA plugin (built here if it is not built
+# yet), the WirePlumber monitor, audioctl and every unit audioctl knows about.
+#
+# Changes NOTHING about the running audio - afterwards the shipped profile is
+# still active and the switch is one press away.
+#
+# It used to install half of this: audioctl and three units, while the plugin
+# that makes PipeWire talk to the HAL was four commands in the README. A phone
+# where somebody pressed Install got a switch with nothing behind it.
 set -e
 cd "$(dirname "$0")"
+
+# The four newer units name /usr/bin, because that is where the package puts
+# their programs. This install goes to /usr/local, so the path is rewritten on
+# the way in - the same thing the modem and GPS installers do. The two older
+# ones (apply, verify) look in both places themselves and are copied as they
+# are.
+# Unit file, then the program it starts. The unit is named in full rather
+# than built from the program name: a name that only exists as a shell
+# variable cannot be grepped for, and tests/test-install.sh compares these
+# three scripts by reading them.
+WERKZEUGE=(
+    "furios-audio-pause-on-disconnect.service tools/furios-audio-pause-on-disconnect.py"
+    "furios-audio-callaudio-refresh.service   tools/furios-audio-callaudio-refresh"
+    "furios-audio-sco-hold.service            tools/furios-audio-sco-hold.py"
+    "furios-audio-bt-mic.service              tools/furios-audio-bt-mic.py"
+)
+
+echo "== the plugin PipeWire needs to reach the HAL"
+./tools/build-plugin.sh
+
+echo "== audioctl, its units and its state"
 sudo mkdir -p /usr/local/share/furios-audio /usr/local/bin
 sudo install -m755 audioctl                  /usr/local/bin/audioctl
 sudo install -m644 tunnel.conf               /usr/local/share/furios-audio/tunnel.conf
 sudo install -m644 furios-pw-tunnel.service  /etc/systemd/user/furios-pw-tunnel.service
 sudo install -m644 furios-audio-apply.service /etc/systemd/user/furios-audio-apply.service
 sudo install -m644 furios-audio-verify.service /etc/systemd/user/furios-audio-verify.service
+
+# Bluetooth calls, Bluetooth microphone, the podcast that must not resume in
+# somebody's pocket, and the routing refresh callaudiod needs. audioctl
+# enables each of them itself when a profile is applied - but only if the file
+# is here, and until now it never was on a script install.
+for eintrag in "${WERKZEUGE[@]}"; do
+    # shellcheck disable=SC2086
+    set -- $eintrag
+    unit=$1
+    quelle=$2
+    sudo install -m755 "$quelle" "/usr/local/bin/${unit%.service}"
+    sed "s|^ExecStart=/usr/bin/|ExecStart=/usr/local/bin/|" "$unit" \
+        | sudo tee "/etc/systemd/user/$unit" >/dev/null
+    sudo chmod 644 "/etc/systemd/user/$unit"
+done
+
 # The state directory has to be WRITABLE by this user, not merely present:
 # "mkdir -p" succeeds on a directory that already exists and belongs to root,
 # and then the write below fails and takes the whole install down with it.
@@ -24,6 +68,9 @@ sudo chmod 0755 /var/lib/furios-audio
 [ -e /var/lib/furios-audio/profile ] || echo standard > /var/lib/furios-audio/profile
 systemctl --user daemon-reload
 systemctl --user enable furios-audio-apply.service furios-audio-verify.service
+
+echo "== plugin, monitor and configuration into the system"
+./install-hal.sh
+
 echo
 echo "Done. Active profile unchanged: $(cat /var/lib/furios-audio/profile)"
-echo "Check with:  audioctl status"

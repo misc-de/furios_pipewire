@@ -4,11 +4,23 @@
 # Removes everything and restores the shipped state.
 set -e
 /usr/local/bin/audioctl revert 2>/dev/null || true
-systemctl --user disable --now furios-audio-apply.service furios-audio-verify.service furios-pw-tunnel.service 2>/dev/null || true
+systemctl --user disable --now furios-audio-apply.service furios-audio-verify.service \
+    furios-pw-tunnel.service furios-audio-pause-on-disconnect.service \
+    furios-audio-callaudio-refresh.service furios-audio-sco-hold.service \
+    furios-audio-bt-mic.service 2>/dev/null || true
 sudo rm -f /usr/local/bin/audioctl \
+           /usr/local/bin/furios-audio-dmnr \
+           /usr/local/bin/furios-audio-pause-on-disconnect \
+           /usr/local/bin/furios-audio-callaudio-refresh \
+           /usr/local/bin/furios-audio-sco-hold \
+           /usr/local/bin/furios-audio-bt-mic \
            /etc/systemd/user/furios-pw-tunnel.service \
            /etc/systemd/user/furios-audio-apply.service \
            /etc/systemd/user/furios-audio-verify.service \
+           /etc/systemd/user/furios-audio-pause-on-disconnect.service \
+           /etc/systemd/user/furios-audio-callaudio-refresh.service \
+           /etc/systemd/user/furios-audio-sco-hold.service \
+           /etc/systemd/user/furios-audio-bt-mic.service \
            /etc/systemd/user/pipewire.service.d/50-furios-audio.conf
 sudo rm -rf /usr/local/share/furios-audio /var/lib/furios-audio
 sudo rm -rf /usr/lib/aarch64-linux-gnu/spa-0.2/droid
@@ -26,6 +38,9 @@ sudo rm -f /usr/local/bin/misc-de \
 
 # WirePlumber monitor and Bluetooth configuration
 sudo rm -f /usr/local/share/wireplumber/scripts/monitors/droid.lua \
+           /usr/local/share/wireplumber/scripts/monitors/droid-input-follows-output.lua \
+           /usr/local/share/wireplumber/scripts/monitors/droid-default-sink-policy.lua \
+           /usr/local/share/wireplumber/scripts/monitors/droid-bluetooth-call.lua \
            /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf \
            /usr/local/share/wireplumber/wireplumber.conf.d/51-bluez-ofono.conf
 sudo rm -f /etc/systemd/system/ofono.service.d/30-furios-audio-hfp.conf

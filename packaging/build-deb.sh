@@ -51,7 +51,6 @@ install -Dm644 "$PLUGIN" "$STAGE/usr/lib/$TRIPLET/spa-0.2/droid/libspa-droid.so"
 printf '%s\n' "$PWVER" > "$STAGE/usr/lib/$TRIPLET/spa-0.2/droid/built-against"
 
 install -Dm755 audioctl                       "$STAGE/usr/bin/audioctl"
-install -Dm755 gui/misc-de.py                 "$STAGE/usr/bin/misc-de"
 install -Dm755 experiments/dmnr-handsfree.sh  "$STAGE/usr/bin/furios-audio-dmnr"
 # The AAC codec module is deliberately NOT shipped as a binary: it links
 # fdk-aac, and building it locally is a different thing from redistributing
@@ -99,10 +98,11 @@ install -Dm644 furios-audio-sco-hold.service \
 install -Dm644 furios-audio-bt-mic.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-bt-mic.service"
 
-install -Dm644 gui/de.misc-de.tools.desktop \
-    "$STAGE/usr/share/applications/de.misc-de.tools.desktop"
-install -Dm644 gui/de.misc-de.tools.svg \
-    "$STAGE/usr/share/icons/hicolor/scalable/apps/de.misc-de.tools.svg"
+# No app in here any more. It moved to its own repository with its own
+# installer (github.com/misc-de/furios_app) when it grew from an audio switch
+# into four tabs - and this script went on installing gui/misc-de.py for one
+# commit longer than the directory existed, so the package could not be built
+# at all. Measured 14.9.2026: "install: cannot stat 'gui/misc-de.py'".
 install -Dm644 README.md   "$STAGE/usr/share/doc/$PKG/README.md"
 install -Dm644 FINDINGS.md "$STAGE/usr/share/doc/$PKG/FINDINGS.md"
 
@@ -174,7 +174,7 @@ Section: sound
 Priority: optional
 Depends: pipewire (>= $PWVER), pipewire (<< $(echo "$PWVER" | cut -d. -f1).$(( $(echo "$PWVER" | cut -d. -f2) + 1 ))),
  pipewire-pulse, wireplumber, pulseaudio, libhardware2, libexpat1,
- python3-gi, gir1.2-adw-1, gir1.2-gtk-4.0,
+ python3-gi,
  pulseaudio-utils
 Recommends: libspa-0.2-bluetooth
 Description: PipeWire talks directly to the Android audio HAL
@@ -182,9 +182,9 @@ Description: PipeWire talks directly to the Android audio HAL
  PipeWire - with no PulseAudio in between. Playback, capture and telephony all
  run through it, including earpiece/speaker switching during a call.
  .
- Ships audioctl for switching between the shipped state and the new stack
- (reversible at any time, with a safety net) plus a small GTK4 front end for
- it.
+ Ships audioctl for switching between the shipped state and the new stack,
+ reversible at any time and with a safety net. The GTK4 front end for it is
+ its own package (github.com/misc-de/furios_app).
  .
  The version bound on pipewire is deliberate: the plugin is built against a
  specific SPA interface. If an update breaks it, the sound would otherwise
@@ -231,8 +231,6 @@ if [ -n "$owner" ] && [ "$owner" != root ] && getent passwd "$owner" >/dev/null 
             && chown "$owner" "/var/lib/furios-audio/$f" || true
     done
 fi
-gtk-update-icon-cache -qtf /usr/share/icons/hicolor 2>/dev/null || true
-update-desktop-database -q /usr/share/applications 2>/dev/null || true
 echo "Installed. Active profile unchanged - switch with: audioctl toggle"
 EOF
 chmod 755 "$STAGE/DEBIAN/postinst"

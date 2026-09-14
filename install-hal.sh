@@ -70,8 +70,3 @@ sudo install -m755 audioctl /usr/local/bin/audioctl
 echo
 echo "Done. Active profile unchanged:"
 audioctl status | head -4
-echo
-echo "Next step - a dry run with no risk:"
-echo "   audioctl --dry-run set pw-hal"
-echo "And then the real test (falls back to standard on reboot):"
-echo "   audioctl try pw-hal"
