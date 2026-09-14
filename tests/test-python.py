@@ -488,6 +488,7 @@ class Recording:
         self.subtitle = None
         self.sensitive = True
         self.active = active
+        self.label = None
         self.text = None
         self.fraction = None
         self.revealed = None
@@ -503,6 +504,9 @@ class Recording:
 
     def get_active(self):
         return self.active
+
+    def set_label(self, text):
+        self.label = text
 
     def set_text(self, text):
         self.text = text
@@ -602,6 +606,10 @@ class TheWindow(unittest.TestCase):
         if switcher.GPSCTL:
             names += ["gps_row", "gps_persist", "gps_progress", "gps_revealer",
                       "grow_profile", "grow_seen", "grow_health"]
+        if switcher.KILLSWITCH:
+            names += ["sw_row", "sw_persist", "sw_wifi", "sw_bt", "sw_modem",
+                      "srow_cam", "srow_cam_hal", "srow_cams", "srow_net",
+                      "srow_mic", "mic_button"]
         for name in names:
             setattr(self.win, name, Recording())
         if switcher.MODEMCTL:
@@ -823,8 +831,132 @@ class TheWindow(unittest.TestCase):
         up showing a state that stopped being true ten minutes ago."""
         self.win.refresh()
         expected = (2 + (2 if switcher.MODEMCTL else 0)
-                    + (2 if switcher.GPSCTL else 0))
+                    + (2 if switcher.GPSCTL else 0)
+                    # status --json, plus is-active and is-enabled for the unit
+                    + (3 if switcher.KILLSWITCH else 0))
         self.assertEqual(expected, len(self.ran))
+
+    def test_the_switches_page_asks_for_json_and_for_the_unit(self):
+        """The page needs both: the tool knows the switches, systemd knows
+        whether the indicator runs and whether it survives a boot."""
+        if not switcher.KILLSWITCH:
+            self.skipTest("killswitch-indicator not installed")
+        self.win.refresh()
+        aufrufe = [" ".join(a[0]) for a in self.ran]
+        self.assertTrue(any("status --json" in a for a in aufrufe), aufrufe)
+        self.assertTrue(any("is-active killswitch-indicator" in a for a in aufrufe), aufrufe)
+        self.assertTrue(any("is-enabled killswitch-indicator" in a for a in aufrufe), aufrufe)
+
+
+    # --- the switches page -------------------------------------------------
+    #
+    # Three sliders that look alike and work nothing alike. What matters here
+    # is that the page never claims more than the hardware does: the modem
+    # cannot be opted out of, and a reading that failed must not be shown as
+    # a state.
+
+    def switches_win(self):
+        if not switcher.KILLSWITCH:
+            self.skipTest("killswitch-indicator not installed")
+        return self.win
+
+    JSON = """{
+      "switches": {"cam_switch": "0", "nwk_switch": "1"},
+      "network_extras": {"wifi": true, "bluetooth": false},
+      "radios": {"wifi": true, "bluetooth": null},
+      "we_disabled": [],
+      "cameras": ["Back", "Front", "Back"],
+      "camera_hal": false,
+      "mic": {"median": 2.9, "peak": 34, "verdict": "GESPERRT",
+              "when": 1789400000, "reason": "Start"}
+    }"""
+
+    def test_the_page_reads_both_switch_positions(self):
+        win = self.switches_win()
+        win.on_switches_status(True, self.JSON)
+        self.assertEqual("engaged", win.srow_cam.subtitle)
+        self.assertEqual("free", win.srow_net.subtitle)
+
+    def test_the_camera_row_says_all_of_them(self):
+        """The switch stops one service every camera goes through, so picking
+        a single one is not a thing that exists."""
+        win = self.switches_win()
+        win.on_switches_status(True, self.JSON)
+        self.assertIn("all 3", win.srow_cams.subtitle)
+        self.assertIn("never one alone", win.srow_cams.subtitle)
+
+    def test_the_modem_row_cannot_be_switched_off(self):
+        """Firmware stops the RIL before any program here hears about it, so
+        the row is shown switched on and cannot be touched. Checked against
+        what the page actually built, not against a stand-in a test wrote."""
+        self.switches_win()
+        gebaut = switcher.Window(switcher.Adw.Application())
+        angelegt = [c for c in recorder.calls if c[0] == "Adw.SwitchRow"]
+        modem = [c for c in angelegt
+                 if "mobile network" in str(c[2].get("title", "")).lower()]
+        self.assertTrue(modem, "no row for the mobile network")
+        self.assertIs(True, modem[-1][2].get("active"))
+        self.assertIsNotNone(gebaut)
+
+    def test_a_radio_that_is_not_reachable_is_not_called_off(self):
+        """null is not false: bluetoothd being away must not read as
+        'Bluetooth is off', which would be a claim about the hardware."""
+        win = self.switches_win()
+        win.on_switches_status(True, self.JSON)
+        self.assertIn("not reachable", win.sw_bt.subtitle)
+        self.assertIn("currently on", win.sw_wifi.subtitle)
+
+    def test_choosing_a_radio_is_written_through_the_tool(self):
+        win = self.switches_win()
+        self.ran.clear()
+        win._loading = False
+        win.sw_wifi.set_active(True)
+        win.on_extra_wifi(win.sw_wifi, None)
+        self.assertEqual(["config", "wifi", "on"], list(self.ran[-1][0][1:]))
+
+    def test_the_indicator_switch_drives_the_user_unit(self):
+        win = self.switches_win()
+        self.ran.clear()
+        win._loading = False
+        win.sw_row.set_active(False)
+        win.on_indicator_switch(win.sw_row, None)
+        self.assertIn("stop", self.ran[-1][0])
+        self.assertIn("killswitch-indicator", self.ran[-1][0])
+
+    def test_remembering_the_choice_enables_the_unit(self):
+        win = self.switches_win()
+        self.ran.clear()
+        win._loading = False
+        win.sw_persist.set_active(True)
+        win.on_indicator_persist(win.sw_persist, None)
+        self.assertIn("enable", self.ran[-1][0])
+
+    def test_a_reading_while_loading_does_not_write_anything_back(self):
+        """Filling the switches from a status must not look like a user
+        touching them - that would write the state back at itself."""
+        win = self.switches_win()
+        self.ran.clear()
+        win.on_switches_status(True, self.JSON)
+        self.assertEqual([], [r for r in self.ran if "config" in r[0]])
+
+    def test_an_unreadable_answer_is_not_shown_as_a_position(self):
+        win = self.switches_win()
+        win.on_switches_status(True, "not json at all")
+        self.assertNotIn("engaged", win.srow_cam.subtitle)
+        self.assertNotIn("free", win.srow_cam.subtitle)
+
+    def test_the_microphone_row_shows_the_last_measurement(self):
+        """And in this window's language: the tool answers in German."""
+        win = self.switches_win()
+        win.on_switches_status(True, self.JSON)
+        self.assertIn("engaged", win.srow_mic.subtitle)
+        self.assertNotIn("GESPERRT", win.srow_mic.subtitle)
+        self.assertIn("2.9", win.srow_mic.subtitle)
+
+    def test_a_failed_microphone_check_says_so(self):
+        win = self.switches_win()
+        win.after_mic_check(False, "")
+        self.assertIn("failed", win.srow_mic.subtitle)
 
     # --- the modem page ----------------------------------------------------
     #
