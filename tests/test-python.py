@@ -843,6 +843,19 @@ class TheWindow(unittest.TestCase):
                     + (3 if switcher.KILLSWITCH else 0))
         self.assertEqual(expected, len(self.ran))
 
+    def test_the_tabs_sit_under_the_header_not_at_the_foot(self):
+        """Where they switch from, not where a page ends: at the foot the bar
+        sat a thumb's width from "Restore shipped state"."""
+        recorder.reset()
+        switcher.Window(switcher.Adw.Application())
+        oben = [c for c in recorder.calls
+                if c[0] == "Adw.ToolbarView.add_top_bar()" and c[1]]
+        unten = [c for c in recorder.calls
+                 if c[0] == "Adw.ToolbarView.add_bottom_bar()" and c[1]]
+        self.assertEqual([], unten)
+        # header bar plus the switcher
+        self.assertEqual(2, len(oben), oben)
+
     def test_the_switches_page_asks_for_json_and_for_the_unit(self):
         """The page needs both: the tool knows the switches, systemd knows
         whether the indicator runs and whether it survives a boot."""
