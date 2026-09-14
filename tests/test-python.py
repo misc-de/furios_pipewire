@@ -609,7 +609,7 @@ class TheWindow(unittest.TestCase):
         if switcher.KILLSWITCH:
             names += ["sw_row", "sw_persist", "sw_wifi", "sw_bt", "sw_modem",
                       "srow_cam", "srow_cam_hal", "srow_cams", "srow_net",
-                      "srow_mic", "mic_button"]
+                      "srow_mic"]
         for name in names:
             setattr(self.win, name, Recording())
         if switcher.MODEMCTL:
@@ -870,6 +870,9 @@ class TheWindow(unittest.TestCase):
       "mic": {"median": 2.9, "peak": 34, "verdict": "GESPERRT",
               "when": 1789400000, "reason": "Start"}
     }"""
+    # The "mic" field is what an OLDER killswitch-indicator still sends. It is
+    # kept in this fixture on purpose: the page must ignore it rather than put
+    # a three-second-old verdict on screen as if it were the position.
 
     def test_the_page_reads_both_switch_positions(self):
         win = self.switches_win()
@@ -945,18 +948,37 @@ class TheWindow(unittest.TestCase):
         self.assertNotIn("engaged", win.srow_cam.subtitle)
         self.assertNotIn("free", win.srow_cam.subtitle)
 
-    def test_the_microphone_row_shows_the_last_measurement(self):
-        """And in this window's language: the tool answers in German."""
+    def test_the_microphone_row_says_it_is_not_read(self):
+        """The one switch that cuts the line is also the one nothing here can
+        see. Saying so is the whole content of the row - checked against what
+        the page actually built, not against a stand-in a test wrote."""
+        self.switches_win()
+        switcher.Window(switcher.Adw.Application())
+        zeilen = [c for c in recorder.calls if c[0] == "Adw.ActionRow"]
+        mic = [c for c in zeilen
+               if "not readable" in str(c[2].get("subtitle", ""))]
+        self.assertTrue(mic, "no row saying the microphone is not read")
+
+    def test_an_old_tools_verdict_does_not_reach_the_row(self):
+        """Older killswitch-indicators still send a measurement. Putting it on
+        screen would turn a three-second-old guess into a position."""
         win = self.switches_win()
         win.on_switches_status(True, self.JSON)
-        self.assertIn("engaged", win.srow_mic.subtitle)
-        self.assertNotIn("GESPERRT", win.srow_mic.subtitle)
-        self.assertIn("2.9", win.srow_mic.subtitle)
+        self.assertIsNone(win.srow_mic.subtitle)
 
-    def test_a_failed_microphone_check_says_so(self):
+    def test_the_page_never_opens_the_microphone_itself(self):
+        """Measuring means listening, and listening is what the switch is
+        flipped to prevent. There is no button for it, and a status reaching
+        the page must not start one behind the user's back."""
         win = self.switches_win()
-        win.after_mic_check(False, "")
-        self.assertIn("failed", win.srow_mic.subtitle)
+        self.ran.clear()
+        win.refresh()
+        win.on_switches_status(True, self.JSON)
+        self.assertEqual([], [r for r in self.ran if "mic-check" in r[0]])
+        switcher.Window(switcher.Adw.Application())
+        knoepfe = [str(c[2].get("label", "")).lower()
+                   for c in recorder.calls if c[0] == "Gtk.Button"]
+        self.assertEqual([], [b for b in knoepfe if "listen" in b], knoepfe)
 
     # --- the modem page ----------------------------------------------------
     #
