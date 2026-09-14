@@ -168,7 +168,7 @@ Everything reachable without hardware is at **100 %**:
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
 | `audioctl` | 100 % of 463 |
 | `tools/furios-audio-callaudio-refresh` | 100 % of 9 |
-| `gui/furios-audio-switch.py` | 100 % of 273 |
+| `gui/misc-de.py` | 93.7 % of 411 - the modem page's callbacks are the gap |
 | `tools/furios-audio-pause-on-disconnect.py` | 100 % of 115 |
 | `tools/furios-audio-sco-hold.py` | 100 % of 184 |
 | `gen-pipewire-hal-conf.py` | 100 % of 28 |

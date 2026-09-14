@@ -517,13 +517,42 @@ class TheWindow(unittest.TestCase):
               "Pulse server:       PulseAudio (on PipeWire 1.6.6)\n"
               "Sinks:              droid-sink,droid-voip-sink\n")
 
+    PERMANENT = ("Profile (active):   pw-hal\n"
+                 "Profile (persistent): pw-hal\n"
+                 "Pulse server:       PulseAudio (on PipeWire 1.6.6)\n"
+                 "Sinks:              droid-sink\n")
+
     def test_status_is_turned_into_something_a_person_can_read(self):
         self.win.on_status(True, self.STATUS)
         self.assertIn("PipeWire owns the HAL", self.win.row_profile.subtitle)
-        self.assertIn("until reboot", self.win.row_profile.subtitle)
+        self.assertIn("until the next reboot", self.win.row_profile.subtitle)
         self.assertIn("older apps", self.win.row_server.subtitle)
         self.assertEqual("droid-sink, droid-voip-sink", self.win.row_sinks.subtitle)
         self.assertTrue(self.win.switch_row.active)
+
+    def test_a_profile_that_survives_a_reboot_says_so(self):
+        """The state the phone had for two days while this window said nothing.
+
+        "Profile (persistent)" was never read, so the remembered-switch sat at
+        its default - off - on a phone that was on pw-hal for good.
+        """
+        self.win.on_status(True, self.PERMANENT)
+        self.assertIn("permanent", self.win.row_profile.subtitle)
+        self.assertTrue(self.win.persist_row.active,
+                        "a permanent profile was shown as not remembered")
+        self.assertIn("comes back to", self.win.persist_row.subtitle)
+
+    def test_a_profile_that_only_holds_until_the_reboot_says_what_returns(self):
+        self.win.on_status(True, self.STATUS)
+        self.assertFalse(self.win.persist_row.active)
+        self.assertIn("PulseAudio", self.win.persist_row.subtitle)
+
+    def test_a_status_without_the_persistent_line_claims_nothing(self):
+        """An audioctl too old to print it must not produce an invented state."""
+        self.win.on_status(True, "Profile (active):   pw-hal\nSinks:              x\n")
+        self.assertNotIn("permanent", self.win.row_profile.subtitle)
+        self.assertNotIn("until the next reboot", self.win.row_profile.subtitle)
+        self.assertFalse(self.win.persist_row.active)
 
     def test_the_shipped_state_is_named_as_such(self):
         self.win.on_status(True, "Profile (active):   standard\nSinks:              x\n")
