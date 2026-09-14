@@ -168,7 +168,6 @@ Everything reachable without hardware is at **100 %**:
 | `wireplumber/droid-input-follows-output.lua` | 100 % of 51 |
 | `audioctl` | 100 % of 463 |
 | `tools/furios-audio-callaudio-refresh` | 100 % of 9 |
-| `gui/misc-de.py` | 100 % of 457 |
 | `tools/furios-audio-pause-on-disconnect.py` | 100 % of 115 |
 | `tools/furios-audio-sco-hold.py` | 100 % of 184 |
 | `gen-pipewire-hal-conf.py` | 100 % of 28 |
@@ -230,51 +229,21 @@ That is the only thing in `audioctl` that wants root, and it is run once.
 
 ## Switching at the push of a button
 
-    ./gui/install.sh
+The GTK4/libadwaita app that drives `audioctl` (and `modemctl`, `gpsctl` and
+`killswitch-indicator` where they are installed) has its own repository:
+**[furios_app](https://github.com/misc-de/furios_app)**. It used to live here
+under `gui/`; the history moved with it.
 
-Installs a small GTK4/libadwaita switcher with its icon and launcher entry
-(**misc-de** in the app grid). Three switches for the audio stack - who owns
-the HAL, whether that survives a reboot, and MediaTek's dual-mic echo
-suppression for calls - underneath them what is actually running, and a
-**Restore sound** button, which returns to the shipped state, switches to the
-speaker, unmutes and sets an audible volume. Exactly the combination that
-looks like "nothing works any more" after a failed test.
+What stays here is the seam it reads: `audioctl status` prints labels the app
+waits for, and `furios-audio-dmnr` dispatches on words the app sends. Renaming
+one of them breaks a window nobody opens until later, so the test suite checks
+this repository's words against the INSTALLED app and says so when there is
+none.
 
-The switches report before they decide: `audioctl` keeps two profiles, the one
-that is running and the one that survives a reboot, and the window reads both.
-So "Remember this choice" shows whether the phone comes back to what it is
-doing now, and the status row says `permanent` or names what returns instead.
-A window that cannot reach `audioctl` says so and greys its switches out
-rather than showing them off - which is a state, not a blank.
-
-Where `modemctl` from
-[furios_modem_fixes](https://github.com/misc-de/furios_modem_fixes) is
-installed, a second tab does the same for the modem: repairs on or off,
-remembered or not, what the checks say, and a **Restore shipped state**
-button. That one is styled as the destructive thing it is - the shipped state
-has no route out and no name resolution once Wi-Fi is off.
-
-Where `gpsctl` from [furios_gps](https://github.com/misc-de/furios_gps) is
-installed, a **GPS** tab does the same for location: the filter that refuses
-positions derived from the carrier's IP address, on or off, remembered or not,
-with what the proxy has counted since boot. There is no separate button to turn
-it off with - the switch is the way back, and a second control leading to the
-same place would only be a second way to arrive at the carrier's exit node.
-What that page is careful about is the word "off": it is not an absence of
-location but the phone publishing a point tens of kilometres away as though it
-had been observed there, and every row says so.
-
-**Every call to a helper is bounded** (90 seconds). systemctl can block on a
-job that is itself waiting and pkexec inherits that, and without a bound a
-helper that never answered left the window greyed out with a pulsing bar and no
-way back except killing it. A bound turns that into an error message, which is
-a state somebody can act on.
-
-While switching, a **pulsing progress bar** shows what audioctl is currently
-reporting - the lines are read while the program is still running. Deliberately
-without a percentage: nobody knows in advance how long it takes, because
-audioctl waits up to 15 seconds for a sink. An invented number stuck at 90 %
-would be worse than none at all.
+**Every call the app makes to a helper is bounded** (90 seconds). systemctl can
+block on a job that is itself waiting and pkexec inherits that; without a bound
+a helper that never answered left the window greyed out with a pulsing bar and
+no way back except killing it.
 
 ## Bluetooth
 

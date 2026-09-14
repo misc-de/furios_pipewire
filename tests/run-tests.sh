@@ -90,7 +90,7 @@ fi
 
 # --- shell syntax, cheap and worth it ---------------------------------------
 printf '\n\033[1m== shell scripts parse\033[0m\n'
-for f in "$ROOT"/*.sh "$ROOT"/audioctl "$ROOT"/gui/*.sh "$ROOT"/tools/*.sh \
+for f in "$ROOT"/*.sh "$ROOT"/audioctl "$ROOT"/tools/*.sh \
          "$ROOT"/experiments/*.sh "$ROOT"/packaging/*.sh "$ROOT"/tests/*.sh; do
     [ -e "$f" ] || continue
     if bash -n "$f" 2>/dev/null; then
@@ -117,7 +117,7 @@ else
 fi
 
 printf '\n\033[1m== python scripts parse\033[0m\n'
-for f in "$ROOT"/*.py "$ROOT"/gui/*.py "$ROOT"/tools/*.py "$ROOT"/poc/spa-droid/tools/*.py; do
+for f in "$ROOT"/*.py "$ROOT"/tools/*.py "$ROOT"/poc/spa-droid/tools/*.py; do
     [ -e "$f" ] || continue
     if python3 -m py_compile "$f" 2>/dev/null; then
         printf '  \033[32mok\033[0m   %s\n' "${f#$ROOT/}"

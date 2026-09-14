@@ -20,7 +20,6 @@ import os, re, sys
 root, out = sys.argv[1], sys.argv[2]
 wanted = ["gen-pipewire-hal-conf.py",
           "furios-audio-pause-on-disconnect.py",
-          "misc-de.py",
           "furios-audio-sco-hold.py",
           "furios-audio-bt-mic.py"]
 
@@ -43,7 +42,7 @@ for want in wanted:
     # that is imported never runs it. Counting it would leave every file short
     # by the same two lines, for a reason that has nothing to do with testing.
     path = None
-    for where in ("", "tools", "gui"):
+    for where in ("", "tools"):
         candidate = os.path.join(root, where, want)
         if os.path.exists(candidate):
             path = candidate
