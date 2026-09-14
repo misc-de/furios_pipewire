@@ -959,6 +959,20 @@ class TheWindow(unittest.TestCase):
         self.assertNotIn("engaged", win.srow_cam.subtitle)
         self.assertNotIn("free", win.srow_cam.subtitle)
 
+    def test_the_switches_page_explains_itself_in_rows_not_paragraphs(self):
+        """The four groups on this page carry a title and nothing else. What
+        needs saying sits in the row it is about - the way back keeps its
+        description, because that text is also the question it asks."""
+        self.switches_win()
+        recorder.reset()
+        switcher.Window(switcher.Adw.Application())
+        titel = ("Indicator", "1 · Camera", "2 · Network", "3 · Microphone")
+        mit_absatz = [c[2].get("title") for c in recorder.calls
+                      if c[0] == "Adw.PreferencesGroup"
+                      and c[2].get("title") in titel
+                      and c[2].get("description")]
+        self.assertEqual([], mit_absatz)
+
     def test_the_microphone_row_says_it_is_not_read(self):
         """The one switch that cuts the line is also the one nothing here can
         see. Saying so is the whole content of the row - checked against what
