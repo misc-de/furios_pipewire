@@ -11,6 +11,20 @@
 # that makes PipeWire talk to the HAL was four commands in the README. A phone
 # where somebody pressed Install got a switch with nothing behind it.
 set -e
+
+# Not with sudo, and this has to be caught here rather than halfway through.
+# Every line below that needs root asks for it itself, and two of them must NOT
+# have it: "systemctl --user" reaches the session bus through $XDG_RUNTIME_DIR,
+# which root does not have, and the chown further down takes its owner from
+# "id -un" - as root that is root, and the state directory would end up owned
+# by a user audioctl never runs as. Started with sudo this used to build the
+# plugin, copy half the files and then stop at the first --user call, leaving
+# the units in place but never reloaded.
+if [ "$(id -u)" = 0 ]; then
+    echo "Please run this WITHOUT sudo - it asks for root where it needs it." >&2
+    echo "  ./install.sh" >&2
+    exit 1
+fi
 cd "$(dirname "$0")"
 
 # The four newer units name /usr/bin, because that is where the package puts

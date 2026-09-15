@@ -40,6 +40,18 @@ echo "-- every program a unit starts is installed, removed and packaged"
 # program rather than a missing one.
 programme=$(grep -h "^ExecStart=/usr/bin/furios" furios-*.service \
             | sed 's|^ExecStart=/usr/bin/||' | sort -u)
+# Started with sudo, install.sh used to build the plugin, copy half the files
+# and then stop at the first "systemctl --user" - root has no session bus. The
+# chown further down is worse than the abort: it takes its owner from "id -un",
+# so as root the state directory would end up owned by root and audioctl, which
+# never runs as root, could not write its profile. The guard has to sit before
+# any of that happens, so this checks that it is in the first few lines.
+check "install.sh weist root ab" "yes" \
+    "$(grep -q 'id -u.*= *0' "$ROOT/install.sh" && echo yes || echo no)"
+check "und zwar bevor irgendetwas installiert wird" "yes" \
+    "$(awk '/id -u.*= *0/{guard=NR} /^[[:space:]]*sudo /{if(!guard){print "no"; exit}} END{if(guard)print "yes"}' \
+        "$ROOT/install.sh")"
+
 for prog in $programme; do
     check "install.sh installs $prog"  yes "$(enthalten install.sh "$prog")"
     check "uninstall.sh removes $prog" yes "$(enthalten uninstall.sh "$prog")"
