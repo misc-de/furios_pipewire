@@ -35,54 +35,54 @@ ROOT=$(dirname "$HERE")
 
 UNITS="$ROOT"
 
-wert() { sed -n "s/^$2=//p" "$1" | tail -1; }
+value() { sed -n "s/^$2=//p" "$1" | tail -1; }
 
-gefunden=0
+found=0
 for u in "$UNITS"/*.service; do
     [ -f "$u" ] || continue
     name=$(basename "$u")
 
     # Nothing to check where nothing restarts.
     grep -qE '^Restart=(always|on-failure|on-abnormal)' "$u" || continue
-    gefunden=$((gefunden + 1))
+    found=$((found + 1))
 
     # [Unit] only, so a key sitting in [Service] reads as absent - which is
     # exactly what systemd makes of it.
-    unit_teil=$(sed -n '/^\[Unit\]/,/^\[Service\]/p' "$u")
-    fenster=$(printf '%s\n' "$unit_teil" | sed -n 's/^StartLimitIntervalSec=//p' | tail -1)
-    burst=$(printf '%s\n' "$unit_teil" | sed -n 's/^StartLimitBurst=//p' | tail -1)
+    unit_part=$(sed -n '/^\[Unit\]/,/^\[Service\]/p' "$u")
+    window=$(printf '%s\n' "$unit_part" | sed -n 's/^StartLimitIntervalSec=//p' | tail -1)
+    burst=$(printf '%s\n' "$unit_part" | sed -n 's/^StartLimitBurst=//p' | tail -1)
 
-    verzug=$(wert "$u" RestartSec)
-    stufen=$(wert "$u" RestartSteps)
-    maxverzug=$(wert "$u" RestartMaxDelaySec)
+    delay=$(value "$u" RestartSec)
+    steps=$(value "$u" RestartSteps)
+    maxdelay=$(value "$u" RestartMaxDelaySec)
 
-    check "$name: StartLimit* steht in [Unit], nicht in [Service]" "0" \
-        "$(if grep -q '^StartLimit' "$u" && [ -z "$fenster$burst" ]; then echo 1; else echo 0; fi)"
+    check "$name: StartLimit* is in [Unit], not in [Service]" "0" \
+        "$(if grep -q '^StartLimit' "$u" && [ -z "$window$burst" ]; then echo 1; else echo 0; fi)"
 
-    check "$name: RestartSec ist gesetzt" "ja" \
-        "$([ -n "$verzug" ] && echo ja || echo nein)"
+    check "$name: RestartSec is set" "yes" \
+        "$([ -n "$delay" ] && echo yes || echo no)"
 
-    if [ "$fenster" = "0" ]; then
-        check "$name: kein Limit, dafuer Backoff (RestartSteps)" "ja" \
-            "$([ -n "$stufen" ] && echo ja || echo nein)"
-        check "$name: und eine Obergrenze dafuer (RestartMaxDelaySec)" "ja" \
-            "$([ -n "$maxverzug" ] && echo ja || echo nein)"
+    if [ "$window" = "0" ]; then
+        check "$name: no limit, backoff instead (RestartSteps)" "yes" \
+            "$([ -n "$steps" ] && echo yes || echo no)"
+        check "$name: and a ceiling for it (RestartMaxDelaySec)" "yes" \
+            "$([ -n "$maxdelay" ] && echo yes || echo no)"
     else
-        check "$name: eine Neustart-Politik ist ueberhaupt gesetzt" "ja" \
-            "$([ -n "$fenster" ] && [ -n "$burst" ] && echo ja || echo nein)"
-        if [ -n "$fenster" ] && [ -n "$burst" ] && [ -n "$verzug" ]; then
-            check "$name: die Grenze ist erreichbar ($burst x ${verzug}s < ${fenster}s)" "ja" \
-                "$([ $((burst * verzug)) -lt "$fenster" ] && echo ja || echo nein)"
+        check "$name: a restart policy is set at all" "yes" \
+            "$([ -n "$window" ] && [ -n "$burst" ] && echo yes || echo no)"
+        if [ -n "$window" ] && [ -n "$burst" ] && [ -n "$delay" ]; then
+            check "$name: the limit is reachable ($burst x ${delay}s < ${window}s)" "yes" \
+                "$([ $((burst * delay)) -lt "$window" ] && echo yes || echo no)"
         fi
     fi
 
     # systemd: "Service has RestartMaxDelaySec= but no RestartSteps= setting.
     # Ignoring." - silently, in the journal, once.
-    check "$name: RestartMaxDelaySec nicht ohne RestartSteps" "0" \
-        "$(if [ -n "$maxverzug" ] && [ -z "$stufen" ]; then echo 1; else echo 0; fi)"
+    check "$name: RestartMaxDelaySec not without RestartSteps" "0" \
+        "$(if [ -n "$maxdelay" ] && [ -z "$steps" ]; then echo 1; else echo 0; fi)"
 done
 
-check "es wurden ueberhaupt Units geprueft" "ja" \
-    "$([ "$gefunden" -gt 0 ] && echo ja || echo nein)"
+check "units were checked at all" "yes" \
+    "$([ "$found" -gt 0 ] && echo yes || echo no)"
 
 summary

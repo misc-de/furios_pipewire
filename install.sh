@@ -63,8 +63,8 @@ for eintrag in "${WERKZEUGE[@]}"; do
     # shellcheck disable=SC2086
     set -- $eintrag
     unit=$1
-    quelle=$2
-    sudo install -m755 "$quelle" "/usr/local/bin/${unit%.service}"
+    source_file=$2
+    sudo install -m755 "$source_file" "/usr/local/bin/${unit%.service}"
     sed "s|^ExecStart=/usr/bin/|ExecStart=/usr/local/bin/|" "$unit" \
         | sudo tee "/etc/systemd/user/$unit" >/dev/null
     sudo chmod 644 "/etc/systemd/user/$unit"

@@ -48,7 +48,7 @@ programme=$(grep -h "^ExecStart=/usr/bin/furios" furios-*.service \
 # any of that happens, so this checks that it is in the first few lines.
 check "install.sh weist root ab" "yes" \
     "$(grep -q 'id -u.*= *0' "$ROOT/install.sh" && echo yes || echo no)"
-check "und zwar bevor irgendetwas installiert wird" "yes" \
+check "and before anything at all is installed" "yes" \
     "$(awk '/id -u.*= *0/{guard=NR} /^[[:space:]]*sudo /{if(!guard){print "no"; exit}} END{if(guard)print "yes"}' \
         "$ROOT/install.sh")"
 
@@ -75,20 +75,20 @@ check "the plugin build pins its upstream commit" yes \
     "$(enthalten tools/build-plugin.sh 'COMMIT=')"
 # Nothing the package ships may come from a directory that is not here any
 # more: that is how build-deb.sh broke without anybody noticing.
-fehlend=0
-while read -r quelle; do
-    [ -e "$quelle" ] || { fehlend=$((fehlend + 1)); echo "       not in this repo: $quelle"; }
+missing=0
+while read -r source_file; do
+    [ -e "$source_file" ] || { missing=$((missing + 1)); echo "       not in this repo: $source_file"; }
 done < <(grep -oE '^install -Dm[0-9]+ [^ "]+' packaging/build-deb.sh | awk '{print $3}')
-check "the package installs only files that exist here" 0 "$fehlend"
+check "the package installs only files that exist here" 0 "$missing"
 
 # The same for the two install scripts. A source path that is one letter off
 # fails in the middle of an install, with half the stack in place - and on a
 # phone, half a stack is a phone without sound.
-fehlend=0
-while read -r quelle; do
-    case "$quelle" in *'$'*) continue ;; esac
-    [ -e "$quelle" ] || { fehlend=$((fehlend + 1)); echo "       not in this repo: $quelle"; }
+missing=0
+while read -r source_file; do
+    case "$source_file" in *'$'*) continue ;; esac
+    [ -e "$source_file" ] || { missing=$((missing + 1)); echo "       not in this repo: $source_file"; }
 done < <(grep -hoE 'sudo install -[Dm0-9]+ +[^ "$]+' install.sh install-hal.sh | awk '{print $4}')
-check "both install scripts copy only files that exist here" 0 "$fehlend"
+check "both install scripts copy only files that exist here" 0 "$missing"
 
 summary

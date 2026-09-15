@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
 [Unit]
-Description=FuriOS Audio: nach dem Start pruefen, ob das Profil Ton liefert
+Description=FuriOS Audio: after boot, check that the profile makes sound
 Documentation=https://github.com/misc-de/furios_pipewire
 # The other half of furios-audio-apply.service. That one runs Before= the
 # stack, because a test profile must not outlive a reboot - and therefore
