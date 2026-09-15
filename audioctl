@@ -2,9 +2,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
 # SPDX-License-Identifier: MIT
 # audioctl - switch between the stock FuriOS audio stack and our own profiles.
-# Nothing owned by dpkg is touched; everything works through masks in
-# /etc/systemd/user and additive units under /usr/local. The way back is always
-# 'audioctl revert'.
+# Nothing owned by dpkg is touched; everything works through masks and a
+# drop-in in ~/.config/systemd/user and additive units under /usr/local, so
+# none of it needs root. The way back is always 'audioctl revert'.
+#
+# This line used to say /etc/systemd/user, which stopped being true with
+# f230cb3 and then sent somebody looking in the wrong place for a mask that
+# an OLDER version had left there - see "An upgrade that took the switch with
+# it" in FINDINGS.md.
 
 set -u
 
@@ -164,21 +169,76 @@ dropin_remove() { rm -f "$DROPIN"; }
 # turn migrate into a way of deleting arbitrary files.
 LEGACY_ETCU=${AUDIOCTL_LEGACY_ETCU:-/etc/systemd/user}
 LEGACY_WP=${AUDIOCTL_LEGACY_WP:-"/usr/local/share/wireplumber /usr/share/wireplumber"}
-legacy_leftovers() {
+legacy_masked() {
+    [ -L "$LEGACY_ETCU/$1" ] && [ "$(readlink "$LEGACY_ETCU/$1")" = /dev/null ]
+}
+legacy_dropin() {
+    f="$LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf"
+    [ -e "$f" ] && printf '%s' "$f"
+    return 0
+}
+legacy_droid_off() {
     out=
-    for u in pipewire-pulse.service pipewire-pulse.socket wireplumber.service \
-             pulseaudio.service pulseaudio.socket; do
-        if [ -L "$LEGACY_ETCU/$u" ] && [ "$(readlink "$LEGACY_ETCU/$u")" = /dev/null ]; then
-            out="$out $LEGACY_ETCU/$u"
-        fi
-    done
-    [ -e "$LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf" ] \
-        && out="$out $LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf"
     for d in $LEGACY_WP; do
         f="$d/wireplumber.conf.d/50-droid.conf.off"
         [ -e "$f" ] && out="$out $f"
     done
     printf '%s' "${out# }"
+}
+legacy_leftovers() {
+    out=
+    for u in pipewire-pulse.service pipewire-pulse.socket wireplumber.service \
+             pulseaudio.service pulseaudio.socket; do
+        legacy_masked "$u" && out="$out $LEGACY_ETCU/$u"
+    done
+    f=$(legacy_dropin);    [ -n "$f" ] && out="$out $f"
+    f=$(legacy_droid_off); [ -n "$f" ] && out="$out $f"
+    printf '%s' "${out# }"
+}
+
+# Which units a profile needs to be able to START. Read by apply(), which
+# unmasks exactly these, and by blocking_leftovers(), which asks whether an
+# old mask in /etc covers one of them.
+#
+# Both from one place on purpose. The two lists were going to be written out
+# twice, and a check that believes a switch needs pulseaudio while the switch
+# actually needs wireplumber is worse than no check: it passes, and then the
+# switch fails anyway.
+profile_unmasks() {
+    case "$1" in
+    standard)  printf 'pulseaudio.service pulseaudio.socket' ;;
+    pw-tunnel) printf 'pulseaudio.service pulseaudio.socket wireplumber.service' ;;
+    pw-hal)    printf 'pipewire-pulse.service pipewire-pulse.socket wireplumber.service' ;;
+    esac
+}
+
+# Of the leftovers, the ones that would defeat a switch to THIS profile.
+#
+# Not simply "is there anything left over". standard masks pipewire-pulse and
+# wireplumber itself, so those leftovers are what standard wants anyway -
+# refusing over them would block "audioctl revert" and "audioctl rescue", the
+# two commands whose whole job is to get sound back. What matters is only
+# whether something we cannot reach masks a unit this profile has to start.
+#
+# The drop-in is the other way round: standard and pw-tunnel REMOVE it, so the
+# copy in /etc would go on applying to pipewire. pw-hal writes its own under
+# $HOME, which systemd reads first, so for pw-hal it is harmless. And a droid
+# monitor renamed to .off is missing for pw-hal alone - the other two profiles
+# do not want it running.
+# Underscored throughout: bash scopes dynamically, so a plain "p=$1" here
+# would assign to the caller's "local p" - and switch_to's p is the profile
+# being switched to.
+blocking_leftovers() {
+    _p=$1 _out= _u= _f=
+    for _u in $(profile_unmasks "$_p"); do
+        legacy_masked "$_u" && _out="$_out $LEGACY_ETCU/$_u"
+    done
+    case "$_p" in
+    standard|pw-tunnel) _f=$(legacy_dropin) ;;
+    pw-hal)             _f=$(legacy_droid_off) ;;
+    esac
+    [ -n "$_f" ] && _out="$_out $_f"
+    printf '%s' "${_out# }"
 }
 
 warn_about_legacy() {
@@ -189,6 +249,34 @@ warn_about_legacy() {
     warn "  audioctl no longer needs root and cannot clear these itself. Once:"
     warn "    sudo audioctl migrate"
     return 0
+}
+
+# Say something whatever the situation - but REFUSE only when this particular
+# switch cannot work.
+#
+# It used to warn and carry on. The warning was true and the switch was
+# doomed: enable bounced off the mask, verify waited its fifteen seconds for a
+# sink that could not appear, and the last line said "standard restored". A
+# dozen lines of fallout with the cause buried at the top reads like a broken
+# switch, not like a leftover from an older version. Stopping at the cause is
+# both shorter and the only honest answer.
+#
+# Never at boot. furios-audio-apply.service runs this at every login, it must
+# write the configuration for the stored profile whatever else is lying
+# around, and a phone that refuses to set itself up until someone has run a
+# command over ssh is worse off than one that warns.
+check_legacy() {
+    _p=$1 _mode=$2 _blocking=
+    [ "$_mode" = boot ] && { warn_about_legacy; return 0; }
+    _blocking=$(blocking_leftovers "$_p")
+    [ -z "$_blocking" ] && { warn_about_legacy; return 0; }
+    warn "not switching to \"$_p\": an older version left state behind that"
+    warn "this version cannot clear, and that would defeat the switch:"
+    for f in $_blocking; do warn "    $f"; done
+    warn "  Clear it once - this is the only thing that still wants root:"
+    warn "    sudo audioctl migrate"
+    warn "  Then try again. Nothing has been changed."
+    return 1
 }
 
 # Clear exactly those leftovers, and nothing else. The only thing in audioctl
@@ -380,7 +468,8 @@ apply() {
         # pw-hal branch below for why it is there at all.
         run uctl disable wireplumber.service 2>/dev/null
         mask   pipewire-pulse.service pipewire-pulse.socket wireplumber.service
-        unmask pulseaudio.service pulseaudio.socket
+        # shellcheck disable=SC2046  # the list is deliberately split
+        unmask $(profile_unmasks "$p")
         run dropin_remove
         run uctl daemon-reload
         # A failed pw-hal leaves pipewire in 'failed' - without reset-failed
@@ -401,7 +490,8 @@ apply() {
         # otherwise it would reach for the HAL that PulseAudio holds.
         droid_monitor off
         mask   pipewire-pulse.service pipewire-pulse.socket
-        unmask pulseaudio.service pulseaudio.socket wireplumber.service
+        # shellcheck disable=SC2046
+        unmask $(profile_unmasks "$p")
         run dropin_remove
         run uctl daemon-reload
         run uctl start pulseaudio.socket pulseaudio.service
@@ -417,7 +507,8 @@ apply() {
         run uctl disable furios-pw-tunnel.service 2>/dev/null
         run uctl stop pulseaudio.service pulseaudio.socket
         mask   pulseaudio.service pulseaudio.socket
-        unmask pipewire-pulse.service pipewire-pulse.socket wireplumber.service
+        # shellcheck disable=SC2046
+        unmask $(profile_unmasks "$p")
         # The drop-in is generated rather than a fixed file linked into place:
         # the path to the configuration depends on whether the install came
         # from the source tree (/usr/local) or from the package (/usr). The
@@ -634,7 +725,7 @@ ensure_safety_net() {
 
 switch_to() {
     local p=$1 mode=$2 prev
-    warn_about_legacy
+    check_legacy "$p" "$mode" || return 1
     prev=$(current_profile)
     ensure_safety_net
     ensure_boot_check

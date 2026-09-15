@@ -948,6 +948,77 @@ unconditionally is what discards it.
 
 ---
 
+## An upgrade that took the switch with it
+
+Getting rid of root left one thing behind, and it took two days and a
+screenshot to notice: nobody clears what the old version wrote.
+
+The switch in the app did nothing. The dialog was fifteen lines long and
+ended with `FAILED - no sink after 15s. Falling back to standard.` and
+`standard restored.` - which reads like a switch that is broken. The cause was
+the first line, above twelve lines of fallout:
+
+    audioctl: an older version left system-wide state behind, and it still wins:
+    audioctl:     /etc/systemd/user/pipewire-pulse.service
+    audioctl:     /etc/systemd/user/pipewire-pulse.socket
+    audioctl:     /etc/systemd/user/wireplumber.service
+
+Three symlinks to `/dev/null`, written by the root-based audioctl the last
+time it applied `standard`. systemd reads `~/.config/systemd/user` first, but
+only for units that are there at all: a mask in `/etc` goes on masking
+whatever this version writes under `$HOME`. So `enable` bounced off it,
+`verify` waited its fifteen seconds for a sink that could not appear, and the
+fallback wrote the closing line.
+
+**It was not one phone.** `migrate` appeared nowhere but in the tests and in
+this file - not in `install.sh`, not in the `postinst`, which only ever
+touched `/var/lib/furios-audio`. Every profile the old version could leave
+somebody on masks something (`standard` masks pipewire-pulse and wireplumber,
+`pw-hal` masks pulseaudio), so **everyone** who had run audioctl before
+`f230cb3` was one switch away from this. Only a first-time install of the new
+version was clean - which is why it was never seen while the switch was being
+built.
+
+Two changes:
+
+**The installers run it.** `install.sh` and the generated `postinst` both
+already have root, so `audioctl migrate` runs there. It starts and stops
+nothing - unmasking a unit does not run it - and
+`furios-audio-apply.service` is ordered `Before=pulseaudio.service
+pipewire.service`, so the stored profile's masks are back under `$HOME`
+before anything starts at the next login.
+
+**A doomed switch is refused instead of attempted.** `warn_about_legacy` was
+the first line of `switch_to` and returned 0 regardless. Warning and then
+walking into a guaranteed failure is worse than either warning or stopping: it
+buries the cause under the consequences.
+
+The refusal had to be **per profile**, and that is the part worth keeping.
+"Is there anything left over" is the wrong question. `standard` masks
+pipewire-pulse and wireplumber itself, so finding exactly those masked in
+`/etc` is what `standard` wants anyway - refusing over them would block
+`audioctl revert` and `audioctl rescue`, the two commands whose entire job is
+to get sound back, on precisely the phone that has a leftover and no sound.
+What matters is only whether something unreachable masks a unit *this* profile
+has to start. The drop-in runs the other way (`standard` and `pw-tunnel`
+remove theirs and would be left with `/etc`'s; `pw-hal` writes its own, which
+systemd reads first), and a droid monitor renamed to `.off` is missing for
+`pw-hal` alone.
+
+That meant two lists of units per profile - one in `apply()`, one in the
+check. A check that believes a switch needs pulseaudio while the switch
+actually needs wireplumber is worse than no check at all: it passes, and the
+switch fails anyway. So there is one list, `profile_unmasks()`, and `apply()`
+reads it too. A test greps `audioctl` for a literal `unmask` list in `apply()`
+and expects to find none.
+
+**And a stale comment nearly sent the fix the wrong way.** The file header
+still said everything worked "through masks in `/etc/systemd/user`". It had
+been wrong since `f230cb3`, it was the first thing read while chasing this,
+and it described exactly the directory the bug was about.
+
+---
+
 ## The boot that never finished, and a phone with no sound
 
 Applying the stored profile unconditionally was right, and it made a deadlock
@@ -1498,12 +1569,16 @@ nothing for a sudoers line to allow. The switcher app handles no passwords
 either. Why it is built this way:
 [FINDINGS.md](FINDINGS.md#getting-rid-of-root-entirely).
 
-If masks or a drop-in sit in `/etc/systemd/user`, they win and `audioctl`
-cannot remove them. It says so when it matters, with the command that can:
+If masks or a drop-in sit in `/etc/systemd/user` - left by a version older
+than `f230cb3` - they win and `audioctl` cannot remove them. `install.sh` and
+the package's `postinst` clear them on the way in, so an upgrade handles it
+without being asked. By hand, if it is ever needed:
 
     sudo audioctl migrate
 
-That is the only thing in `audioctl` that wants root, and it is run once.
+That is the only thing in `audioctl` that wants root, and it is run once. A
+switch that one of those leftovers would defeat is refused up front rather
+than attempted - see "An upgrade that took the switch with it" above.
 
 ## Switching at the push of a button
 

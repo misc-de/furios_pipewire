@@ -359,6 +359,101 @@ check "with nothing left over it says so" "yes" \
         migrate_legacy 2>&1 | grep -q "already migrated" && echo yes || echo no')"
 rm -f "$STUBDIR/id"
 
+# --- which leftovers actually defeat WHICH switch ---------------------------
+#
+# The distinction the first version of this did not make. "Is there anything
+# left over" is the wrong question: standard masks pipewire-pulse and
+# wireplumber itself, so finding those masked in /etc is what standard wants
+# anyway. Refusing over them would block "audioctl revert" and "audioctl
+# rescue" - the two commands that exist to get sound back - on a phone that
+# had a leftover and no sound. The list below is therefore per profile.
+lg_mask() {
+    # lg_mask <dir> <unit>...  - a stub /etc/systemd/user with those masks
+    local d=$1; shift
+    mkdir -p "$d"
+    local u; for u in "$@"; do ln -sf /dev/null "$d/$u"; done
+}
+lg_mask "$STUBDIR/b_std" pipewire-pulse.service pipewire-pulse.socket wireplumber.service
+lg_mask "$STUBDIR/b_pul" pulseaudio.service pulseaudio.socket
+lg_mask "$STUBDIR/b_none"
+
+check "standard is not blocked by the masks standard sets itself" "" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_std"; blocking_leftovers standard')"
+check "but pw-hal is - those are the units it has to start" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_std"
+        blocking_leftovers pw-hal | grep -q wireplumber.service && echo yes || echo no')"
+check "a masked pulseaudio blocks standard" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_pul"
+        blocking_leftovers standard | grep -q pulseaudio.service && echo yes || echo no')"
+check "and does not block pw-hal, which masks it anyway" "" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_pul"; blocking_leftovers pw-hal')"
+check "a clean /etc blocks nothing" "" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_none"; blocking_leftovers pw-hal')"
+
+# The drop-in keeps applying to pipewire from /etc. standard and pw-tunnel
+# remove theirs and would be left with it; pw-hal writes its own under $HOME,
+# which systemd reads first.
+check "the drop-in in /etc blocks standard" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_dropin"
+        mkdir -p "$LEGACY_ETCU/pipewire.service.d"
+        : > "$LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf"
+        blocking_leftovers standard | grep -q 50-furios-audio && echo yes || echo no')"
+check "and not pw-hal, which writes its own over it" "" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_dropin"; blocking_leftovers pw-hal')"
+
+# A monitor renamed to .off is missing for pw-hal alone.
+check "a droid monitor moved aside blocks pw-hal" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_none"
+        d="$STUBDIR/wp-off/wireplumber.conf.d"; mkdir -p "$d"
+        : > "$d/50-droid.conf.off"
+        LEGACY_WP="$STUBDIR/wp-off"
+        blocking_leftovers pw-hal | grep -q 50-droid && echo yes || echo no')"
+check "and not standard, which masks wireplumber" "" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_none"
+        d="$STUBDIR/wp-off/wireplumber.conf.d"; mkdir -p "$d"
+        : > "$d/50-droid.conf.off"
+        LEGACY_WP="$STUBDIR/wp-off"
+        blocking_leftovers standard')"
+
+# One source of truth: the check asks for the same list apply() unmasks. If
+# these ever came apart, the check would pass and the switch would still fail.
+check "every profile names the units it has to be able to start" "yes" \
+    "$(with_audioctl 'ok=yes
+        for p in $PROFILES; do [ -n "$(profile_unmasks "$p")" ] || ok=no; done
+        echo $ok')"
+check "and apply() takes its unmask list from there, not a second copy" "0" \
+    "$(grep -c "^        unmask [a-z]" "$HERE/../audioctl")"
+
+# --- and what a blocked switch does ----------------------------------------
+#
+# It used to warn and go ahead anyway: fifteen seconds of waiting for a sink
+# that could not appear, then "standard restored" as the closing line. The
+# cause was in the output, twelve lines above the part that looked like the
+# verdict.
+check "a blocked switch refuses" "1" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_std"
+        check_legacy pw-hal sticky >/dev/null 2>&1; echo $?')"
+check "and says what to run" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_std"
+        check_legacy pw-hal sticky 2>&1 | grep -q "sudo audioctl migrate" && echo yes || echo no')"
+check "and that it changed nothing" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_std"
+        check_legacy pw-hal sticky 2>&1 | grep -q "Nothing has been changed" && echo yes || echo no')"
+check "an unblocked switch is let through" "0" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_none"
+        check_legacy pw-hal sticky >/dev/null 2>&1; echo $?')"
+
+# Never at boot. This runs at every login from furios-audio-apply.service and
+# has to write the stored profile whatever is lying around - a phone that
+# refuses to configure itself until somebody runs a command over ssh is worse
+# off than one that warns.
+check "boot is never refused, only warned" "0" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_std"
+        check_legacy pw-hal boot >/dev/null 2>&1; echo $?')"
+check "and it does warn" "yes" \
+    "$(with_audioctl 'LEGACY_ETCU="$STUBDIR/b_std"
+        check_legacy pw-hal boot 2>&1 | grep -q "still wins" && echo yes || echo no')"
+
 # --- the safety net --------------------------------------------------------
 stub_systemctl none none
 check "the safety net is enabled on the first switch" "yes" \

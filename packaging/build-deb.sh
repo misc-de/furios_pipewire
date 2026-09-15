@@ -233,6 +233,19 @@ if [ -n "$owner" ] && [ "$owner" != root ] && getent passwd "$owner" >/dev/null 
             && chown "$owner" "/var/lib/furios-audio/$f" || true
     done
 fi
+# Masks an older, root-based audioctl left in /etc/systemd/user. They outrank
+# everything this version writes under $HOME and it cannot remove them itself,
+# so without this the first switch after an upgrade fails and falls back to
+# standard - which reads like a broken switch. Clearing them is the one thing
+# that needs root, and a postinst has it.
+#
+# Nothing is started or stopped by this: unmasking a unit does not run it, and
+# furios-audio-apply.service re-applies the stored profile's masks under $HOME
+# at the next login, before pulseaudio and pipewire.
+if [ -x /usr/bin/audioctl ]; then
+    /usr/bin/audioctl migrate || true
+fi
+
 echo "Installed. Active profile unchanged - switch with: audioctl toggle"
 EOF
 chmod 755 "$STAGE/DEBIAN/postinst"
