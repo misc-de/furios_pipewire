@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 [Unit]
 # Pauses playback when a Bluetooth audio device disconnects, instead of
 # letting the audio fall back to the loudspeaker.

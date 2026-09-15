@@ -1,3 +1,5 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
 #pragma once
 #define PACKAGE_VERSION "spa-port"
 #define STRING_ENTRY_IF_AUDIO_DEVICE_IN_FM_RX

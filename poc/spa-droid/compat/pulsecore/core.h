@@ -1,3 +1,9 @@
+/* SPDX-FileCopyrightText: Copyright (c) 2026 misc-de */
+/* SPDX-License-Identifier: MIT */
+/* Re-declares the PulseAudio interface the ported code expects, so it
+ * compiles without libpulse. The names and signatures are dictated by
+ * PulseAudio (LGPL-2.1+); the implementations behind them are ours.
+ */
 #pragma once
 /* pa_core is only passed around by the ported code as an opaque pointer
  * (registry key). In the SPA plugin it is NULL. */

@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
 [Unit]
 # Puts the Bluetooth headset into its hands-free profile while something is
 # recording, so that a voice memo uses the microphone on your ears instead of
