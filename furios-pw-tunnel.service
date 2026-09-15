@@ -5,6 +5,12 @@ Description=FuriOS Audio: PipeWire-Tunnel nach PulseAudio (Profil pw-tunnel)
 After=pipewire.service pulseaudio.service
 BindsTo=pipewire.service
 
+# Five starts 2 s apart need 10 s, and the default window is ten - so the
+# limit could never be reached and a permanent fault meant restarting every
+# 2 s for the uptime of the phone. Giving up is right here: it belongs to one profile, and audioctl has its own net under that.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
 [Service]
 Type=simple
 ExecStart=/usr/bin/pipewire -c /usr/local/share/furios-audio/tunnel.conf

@@ -6,11 +6,27 @@
 Description=Pause playback when Bluetooth audio disconnects
 PartOf=graphical-session.target
 
+# The rate limit is off on purpose. With the backoff below, a supervisor that
+# gives up is the expensive failure here, not one that keeps trying slowly:
+# whatever it is watching goes unwatched until the next boot. The default
+# limit could not fire anyway - five starts 5 s apart need 25 s and the
+# window is ten - so this states the intent instead of leaving it to arithmetic.
+StartLimitIntervalSec=0
+
 [Service]
 Type=simple
 ExecStart=/usr/bin/furios-audio-pause-on-disconnect
 Restart=on-failure
 RestartSec=5
+
+# Backoff instead of giving up: RestartSteps stretches the delay from
+# RestartSec up to RestartMaxDelaySec, so a permanent fault settles at one
+# start every five minutes rather than one every 5 seconds, while a
+# transient one still recovers on its own. Needs systemd 254 or newer; older
+# versions ignore both keys with a warning and restart as before.
+RestartSteps=5
+RestartMaxDelaySec=300
+
 
 [Install]
 WantedBy=default.target

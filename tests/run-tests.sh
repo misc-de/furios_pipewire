@@ -30,6 +30,7 @@ run "audioctl" bash "$HERE/test-audioctl.sh"
 run "install, uninstall and package still agree" bash "$HERE/test-install.sh"
 run "wireplumber configuration" bash "$HERE/test-wireplumber-conf.sh"
 run "callaudiod refresh" bash "$HERE/test-callaudio-refresh.sh"
+run "the restart policy of every unit" bash "$HERE/test-restart-policy.sh"
 run "python: config generator, app/audioctl seam, bluetooth watcher" \
     python3 "$HERE/test-python.py"
 
