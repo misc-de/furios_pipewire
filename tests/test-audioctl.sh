@@ -861,13 +861,20 @@ check "the help lists every profile" "yes" \
 run_audioctl() {
     # -x only when a trace is being collected: a new bash does not inherit it,
     # and without it the dispatcher would run untraced and read as uncovered.
+    # The legacy paths are stubbed too. Without that the dispatcher reads the
+    # real /etc/systemd/user while the test believes it set everything through
+    # AUDIOCTL_ETCU - and "migrate" then reports whatever leftovers the machine
+    # running the suite happens to have, which is a verdict about the phone and
+    # not about the code.
     AUDIOCTL_STATE_DIR="$STUBDIR/state" AUDIOCTL_ETCU="$STUBDIR/etc" \
+        AUDIOCTL_LEGACY_ETCU="$STUBDIR/legacy-etc" \
+        AUDIOCTL_LEGACY_WP="$STUBDIR/legacy-wp" \
         VERIFY_TRIES=1 BT_HOLD_INTERVAL=0 bash ${AUDIOCTL_TRACE:+-x} "$HERE/../audioctl" "$@" 2>&1
 }
 # Earlier tests wrote profiles into this directory; the dispatcher reads them,
 # so it starts clean.
-rm -rf "$STUBDIR/state"
-mkdir -p "$STUBDIR/state" "$STUBDIR/etc"
+rm -rf "$STUBDIR/state" "$STUBDIR/legacy-etc" "$STUBDIR/legacy-wp"
+mkdir -p "$STUBDIR/state" "$STUBDIR/etc" "$STUBDIR/legacy-etc" "$STUBDIR/legacy-wp"
 
 stub_systemctl pulseaudio.service furios-audio-apply.service
 stub pactl 0 "60	droid-sink	PipeWire	s16le 2ch 48000Hz	SUSPENDED"
@@ -1191,10 +1198,20 @@ case "${1:-}" in
 esac
 IDEOF
 chmod +x "$STUBDIR/id"
-check "root is allowed in for exactly this one command" "yes" \
-    "$(run_audioctl migrate 2>&1 | grep -q 'already migrated' && echo yes || echo no)"
-check "and turned away from everything else" "yes" \
+# migrate is the one command root is let in for, and it deletes files. That
+# combination is why every AUDIOCTL_* override is refused as root: with one
+# honoured, migrate would delete whatever it was pointed at. The consequence
+# for this suite is that the root path cannot be exercised with stubs at all -
+# the same reason the sibling gps project runs its tests unprivileged - so what
+# is checked here is the judgement, not the deletion.
+check "root with an override is refused, naming the variable" "yes" \
+    "$(run_audioctl migrate 2>&1 | grep -q 'refusing to honour AUDIOCTL_' && echo yes || echo no)"
+check "and turned away from every other command" "yes" \
     "$(run_audioctl status 2>&1 | grep -q 'not as root' && echo yes || echo no)"
+# Without the guard the previous check would pass for the wrong reason, so
+# make sure the refusal is about the override and not about the command.
+check "the refusal says what it is protecting" "yes" \
+    "$(run_audioctl migrate 2>&1 | grep -q 'deleting arbitrary files' && echo yes || echo no)"
 rm -f "$STUBDIR/id"
 
 summary

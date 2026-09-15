@@ -156,7 +156,14 @@ dropin_remove() { rm -f "$DROPIN"; }
 # actually there: a mask still sitting in /etc/systemd/user keeps masking, and
 # a drop-in there keeps applying. So say so, once, with the command that clears
 # it - rather than silently fighting a state we cannot reach.
-LEGACY_ETCU=/etc/systemd/user
+# Overridable so the tests can point this at a stub. Without that they read
+# the real /etc while believing they read AUDIOCTL_ETCU, and "audioctl migrate"
+# then passes or fails depending on what the phone happens to have lying
+# around - which is how this check failed on a machine whose code was fine.
+# As root every AUDIOCTL_* override is refused further down, so this cannot
+# turn migrate into a way of deleting arbitrary files.
+LEGACY_ETCU=${AUDIOCTL_LEGACY_ETCU:-/etc/systemd/user}
+LEGACY_WP=${AUDIOCTL_LEGACY_WP:-"/usr/local/share/wireplumber /usr/share/wireplumber"}
 legacy_leftovers() {
     out=
     for u in pipewire-pulse.service pipewire-pulse.socket wireplumber.service \
@@ -167,8 +174,8 @@ legacy_leftovers() {
     done
     [ -e "$LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf" ] \
         && out="$out $LEGACY_ETCU/pipewire.service.d/50-furios-audio.conf"
-    for f in /usr/local/share/wireplumber/wireplumber.conf.d/50-droid.conf.off \
-             /usr/share/wireplumber/wireplumber.conf.d/50-droid.conf.off; do
+    for d in $LEGACY_WP; do
+        f="$d/wireplumber.conf.d/50-droid.conf.off"
         [ -e "$f" ] && out="$out $f"
     done
     printf '%s' "${out# }"
@@ -1193,6 +1200,20 @@ fi
 # in an exit.
 if [ "$(id -un)" = root ] && [ "${1:-}" != migrate ]; then
     die "please run as the furios user, not as root - nothing here needs it (except 'audioctl migrate', once)."
+fi
+
+# migrate is the one thing here that runs as root, and it deletes files. An
+# environment variable that moves where it looks would make it a way of
+# deleting any file at all, under a friendly name. The tests need those
+# overrides and therefore run unprivileged - which works because everything
+# else in here tests whether it can write rather than testing id -u.
+if [ "$(id -u)" -eq 0 ]; then
+    for _v in AUDIOCTL_ETCU AUDIOCTL_LIB AUDIOCTL_STATE_DIR AUDIOCTL_WPCONF_DIR \
+              AUDIOCTL_LEGACY_ETCU AUDIOCTL_LEGACY_WP; do
+        if [ -n "${!_v:-}" ]; then
+            die "refusing to honour $_v as root - that would make this a way of deleting arbitrary files."
+        fi
+    done
 fi
 
 args=(); for a in "$@"; do [ "$a" = --dry-run ] && DRY=1 || args+=("$a"); done
