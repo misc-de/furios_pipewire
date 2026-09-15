@@ -7,7 +7,8 @@ set -e
 systemctl --user disable --now furios-audio-apply.service furios-audio-verify.service \
     furios-pw-tunnel.service furios-audio-pause-on-disconnect.service \
     furios-audio-callaudio-refresh.service furios-audio-sco-hold.service \
-    furios-audio-bt-mic.service 2>/dev/null || true
+    furios-audio-bt-mic.service furios-audio-bt-reconnect.service \
+    2>/dev/null || true
 # The echo suppression first, and in this order: take the mount down and drop
 # the marker while the tool is still there to do it. Removing the binary first
 # would leave a marker nothing reads and a mount nothing undoes.
@@ -23,6 +24,7 @@ sudo rm -f /usr/local/bin/audioctl \
            /usr/local/bin/furios-audio-callaudio-refresh \
            /usr/local/bin/furios-audio-sco-hold \
            /usr/local/bin/furios-audio-bt-mic \
+           /usr/local/bin/furios-audio-bt-reconnect \
            /etc/systemd/user/furios-pw-tunnel.service \
            /etc/systemd/user/furios-audio-apply.service \
            /etc/systemd/user/furios-audio-verify.service \
@@ -30,6 +32,7 @@ sudo rm -f /usr/local/bin/audioctl \
            /etc/systemd/user/furios-audio-callaudio-refresh.service \
            /etc/systemd/user/furios-audio-sco-hold.service \
            /etc/systemd/user/furios-audio-bt-mic.service \
+           /etc/systemd/user/furios-audio-bt-reconnect.service \
            /etc/systemd/user/pipewire.service.d/50-furios-audio.conf
 sudo rm -rf /usr/local/share/furios-audio /var/lib/furios-audio
 sudo rm -rf /usr/lib/aarch64-linux-gnu/spa-0.2/droid

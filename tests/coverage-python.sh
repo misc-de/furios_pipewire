@@ -21,7 +21,8 @@ root, out = sys.argv[1], sys.argv[2]
 wanted = ["gen-pipewire-hal-conf.py",
           "furios-audio-pause-on-disconnect.py",
           "furios-audio-sco-hold.py",
-          "furios-audio-bt-mic.py"]
+          "furios-audio-bt-mic.py",
+          "furios-audio-bt-reconnect.py"]
 
 covers = {}
 for name in os.listdir(out):

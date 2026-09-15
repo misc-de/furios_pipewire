@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+# Dials a Bluetooth audio device back when nobody else will. BlueZ only
+# reconnects after a powered-on adapter or a lost radio link; earbuds that
+# simply hung up are never called again, and on phosh nothing else calls them.
+Description=Reconnect a Bluetooth audio device that hung up
+
+# Runs alongside pause-on-disconnect, and the pair is deliberate: one keeps
+# the music off the loudspeaker when the earbuds go, the other brings the
+# earbuds back. Neither is much use without the other.
+PartOf=graphical-session.target
+
+# Same reasoning as the other watchers: a supervisor that gives up is the
+# expensive failure, because what it watches then goes unwatched until the
+# next boot. No limit, and the backoff below is what keeps that from costing
+# anything.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/furios-audio-bt-reconnect
+Restart=on-failure
+RestartSec=5
+
+# Backoff instead of giving up - see furios-audio-pause-on-disconnect.service.
+# Needs systemd 254 or newer; older versions ignore both keys and restart as
+# before.
+RestartSteps=5
+RestartMaxDelaySec=300
+
+[Install]
+WantedBy=default.target

@@ -705,6 +705,22 @@ ensure_bt_mic() {
     return 0
 }
 
+# The other side of pause-on-disconnect: that one keeps the music off the
+# loudspeaker when a headset goes, this one brings the headset back. BlueZ
+# only ever dials a paired device itself when the adapter powers on or when a
+# link was lost to radio trouble - earbuds that simply hung up are nobody's
+# job, and on 2026-09-15 a pair sat in range and awake for over an hour while
+# the phone played through its speaker. Like the others, only the user can
+# enable their own unit.
+ensure_bt_reconnect() {
+    uctl is-enabled furios-audio-bt-reconnect.service >/dev/null 2>&1 && return 0
+    if uctl cat furios-audio-bt-reconnect.service >/dev/null 2>&1; then
+        run uctl enable --now furios-audio-bt-reconnect.service >/dev/null 2>&1 \
+            && info "a headset that hangs up is now dialled back"
+    fi
+    return 0
+}
+
 ensure_boot_check() {
     uctl is-enabled furios-audio-verify.service >/dev/null 2>&1 && return 0
     if uctl cat furios-audio-verify.service >/dev/null 2>&1; then
@@ -733,6 +749,7 @@ switch_to() {
     ensure_callaudio_refresh
     ensure_sco_hold
     ensure_bt_mic
+    ensure_bt_reconnect
     preflight "$p"
     printf 'switching: %s -> %s (%s)\n' "$prev" "$p" "$mode"
     apply "$p"

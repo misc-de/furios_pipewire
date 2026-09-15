@@ -46,6 +46,8 @@ gen = load(ROOT / "gen-pipewire-hal-conf.py", "gen_hal_conf")
 watcher = load(ROOT / "tools" / "furios-audio-pause-on-disconnect.py", "watcher")
 sco = load(ROOT / "tools" / "furios-audio-sco-hold.py", "sco_hold")
 btmic = load(ROOT / "tools" / "furios-audio-bt-mic.py", "bt_mic")
+reconnect = load(ROOT / "tools" / "furios-audio-bt-reconnect.py",
+                 "bt_reconnect")
 hands_free_sink_real = sco.hands_free_sink
 os_real = sco.os
 
@@ -1923,6 +1925,669 @@ class BtMicMainWiresItUp(unittest.TestCase):
             gi_mod.repository.GLibUnix = removed
             if saved is not None:
                 sys.modules["gi.repository.GLibUnix"] = saved
+
+
+class ReconnectBus:
+    """A system bus that answers for BlueZ and logind, and records Connect().
+
+    Connect() is asynchronous in the watcher, because it blocks for a page
+    timeout and a main loop that waits ten seconds is a main loop that misses
+    the next signal. So `call` records the attempt and hands back a token; the
+    test decides afterwards whether it succeeded, by calling `answer`.
+    """
+
+    def __init__(self, uuids=("0000110b-0000-1000-8000-00805f9b34fb",),
+                 trusted=True, idle=False, locked=False, fail_get=False):
+        self.uuids = uuids if uuids is None else list(uuids)
+        self.trusted = trusted
+        self.idle = idle
+        self.locked = locked
+        self.fail_get = fail_get
+        self.connects = []       # every Connect() that went out
+        self.pending = []        # (callback, user_data) not answered yet
+        self.subscriptions = []
+
+    def call_sync(self, dest, path, iface, method, args, reply, flags,
+                  timeout, cancellable):
+        if method == "GetSession":
+            return FakeVariant(["/org/freedesktop/login1/session/_31"])
+        if method != "Get":
+            raise AssertionError("unexpected call: %s" % method)
+        if self.fail_get:
+            raise reconnect.GLib.Error("no such device")
+        # The stub's GLib.Variant keeps what it was built with, so the
+        # property name is readable here: ("(ss)", (interface, property)).
+        wanted = args._args[1][1]
+        if wanted == "UUIDs":
+            return FakeVariant([self.uuids])
+        if wanted == "Trusted":
+            return FakeVariant([self.trusted])
+        if wanted == "IdleHint":
+            return FakeVariant([self.idle])
+        if wanted == "LockedHint":
+            return FakeVariant([self.locked])
+        raise AssertionError("unexpected property: %r" % (wanted,))
+
+    def call(self, dest, path, iface, method, args, reply, flags, timeout,
+             cancellable, callback, user_data):
+        assert method == "Connect", method
+        self.connects.append(path)
+        self.pending.append((callback, user_data))
+
+    def answer(self, ok=True, message="Host is down"):
+        """Let the outstanding Connect() succeed or fail."""
+        callback, data = self.pending.pop(0)
+        self.result = ok
+        self.message = message
+        with redirect_stdout(io.StringIO()):
+            callback(self, "result-token", data)
+
+    def call_finish(self, _result):
+        if not self.result:
+            raise reconnect.GLib.Error(self.message)
+        return None
+
+    def signal_subscribe(self, *args):
+        self.subscriptions.append(args)
+        return 1
+
+
+class CallAudioBus:
+    """A session bus standing in for callaudiod."""
+
+    def __init__(self, mode=0, error=None):
+        self.mode = mode
+        self.error = error
+
+    def call_sync(self, *_args, **_kwargs):
+        if self.error is not None:
+            raise reconnect.GLib.Error(self.error)
+        return FakeVariant([self.mode])
+
+
+class BluetoothReconnect(unittest.TestCase):
+    """The watcher that dials a headset back.
+
+    BlueZ reconnects a paired device on its own in two cases only: the adapter
+    powering on, and a link lost to radio trouble. Earbuds that simply hung up
+    are nobody's job. Measured 2026-09-15: disconnected at 12:05, still awake
+    and answering a name request at 13:44, no connection, both sides idle -
+    because nothing on the phone had any reason to dial.
+
+    What is checked here is not that it can connect - that is one D-Bus call -
+    but WHEN it decides to, because every attempt is a page and a page is
+    seconds of radio on a phone that never suspends.
+    """
+
+    def setUp(self):
+        self.timers = []       # (id, seconds, callback)
+        self.removed = []
+        self.next_id = 1
+        self.now = 1000.0
+        self.saved = (reconnect.GLib.timeout_add_seconds,
+                      reconnect.GLib.source_remove,
+                      reconnect.GLib.get_monotonic_time)
+
+        def add(seconds, fn):
+            self.next_id += 1
+            self.timers.append((self.next_id, seconds, fn))
+            return self.next_id
+
+        def remove(tid):
+            # Really drop it, the way GLib does. A stub that only noted the
+            # call would leave a cancelled timer in the list and the test
+            # would be watching something the phone never does.
+            self.removed.append(tid)
+            self.timers[:] = [t for t in self.timers if t[0] != tid]
+
+        reconnect.GLib.timeout_add_seconds = add
+        reconnect.GLib.source_remove = remove
+        reconnect.GLib.get_monotonic_time = lambda: self.now * 1e6
+
+    def tearDown(self):
+        (reconnect.GLib.timeout_add_seconds, reconnect.GLib.source_remove,
+         reconnect.GLib.get_monotonic_time) = self.saved
+
+    # -- helpers ----------------------------------------------------------
+
+    def build(self, system=None, session=None, active=False):
+        rc = reconnect.Reconnector(system or ReconnectBus(),
+                                   session or CallAudioBus())
+        rc.active = active
+        return rc
+
+    def drop(self, rc, path="/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66"):
+        with redirect_stdout(io.StringIO()):
+            rc.on_disconnected(path)
+
+    def fire_next_timer(self, rc):
+        """Run the timer the watcher is waiting on, like the main loop would."""
+        _tid, seconds, fn = self.timers.pop(0)
+        with redirect_stdout(io.StringIO()):
+            fn()
+        return seconds
+
+    # -- who is worth dialling -------------------------------------------
+
+    def test_a_device_without_audio_is_not_dialled(self):
+        """A watch, a keyboard, the OBD adapter in the car.
+
+        Those are on this phone's paired list and they drop off constantly.
+        Paging them because something disconnected would be noise on the air
+        for nothing.
+        """
+        system = ReconnectBus(uuids=["00001124-0000-1000-8000-00805f9b34fb"])
+        rc = self.build(system)
+        self.drop(rc)
+        self.assertIsNone(rc.candidate)
+        self.assertEqual(system.connects, [])
+
+    def test_an_untrusted_device_is_left_alone(self):
+        """Trusted is BlueZ's own word for "may connect unasked".
+
+        Dialling a device that was deliberately not trusted would decide
+        something the pairing left open.
+        """
+        system = ReconnectBus(trusted=False)
+        rc = self.build(system)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc.on_disconnected("/org/bluez/hci0/dev_AA")
+        self.assertIsNone(rc.candidate)
+        self.assertIn("not trusted", out.getvalue())
+
+    def test_a_device_it_never_saw_disconnect_is_never_dialled(self):
+        """Waking up dials the candidate, and only ever a candidate.
+
+        There is no "connect everything paired" here on purpose: this phone
+        has a car kit and an OBD adapter paired, and dialling those on every
+        unlock would switch a car radio on in a car park.
+        """
+        rc = self.build()
+        with redirect_stdout(io.StringIO()):
+            rc.on_wakeup()
+        self.assertEqual(rc.system.connects, [])
+
+    # -- the occasions ----------------------------------------------------
+
+    def test_a_disconnect_while_the_phone_was_idle_starts_a_series(self):
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.assertIsNotNone(rc.candidate)
+        self.assertEqual(len(self.timers), 1, "one attempt has to be pending")
+        self.assertEqual(self.timers[0][1], reconnect.RETRY_DELAYS_S[0])
+        self.assertEqual(system.connects, [], "not before the first delay")
+
+        self.fire_next_timer(rc)
+        self.assertEqual(system.connects,
+                         ["/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66"])
+
+    def test_a_disconnect_while_the_phone_was_in_use_only_remembers(self):
+        """Because that was probably you, in the settings.
+
+        BlueZ does not pass the disconnect reason to D-Bus, so there is no way
+        to ask who hung up. Whether the phone was in someone's hand is the
+        closest thing to an answer, and dialling straight back over somebody
+        who just pressed Disconnect is the one failure that would make this
+        service worse than nothing.
+        """
+        system = ReconnectBus()
+        rc = self.build(system, active=True)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc.on_disconnected("/org/bluez/hci0/dev_AA")
+        self.assertIsNotNone(rc.candidate, "still remembered for later")
+        self.assertEqual(self.timers, [], "but no series")
+        self.assertEqual(system.connects, [])
+        self.assertIn("not dialling back", out.getvalue())
+
+    def test_waking_up_dials_what_was_remembered(self):
+        """The occasion that fixes the case this was written for.
+
+        The earbuds went at 12:05 and were still there at 13:44. Nothing in
+        between was an occasion - but picking the phone up is one.
+        """
+        system = ReconnectBus()
+        rc = self.build(system, active=True)
+        self.drop(rc)
+        self.assertEqual(system.connects, [])
+
+        with redirect_stdout(io.StringIO()):
+            rc.on_session_props(None, None, None, None, None,
+                                FakeVariant(["org.freedesktop.login1.Session",
+                                             {"IdleHint": True}, []]))
+            rc.on_session_props(None, None, None, None, None,
+                                FakeVariant(["org.freedesktop.login1.Session",
+                                             {"IdleHint": False}, []]))
+        self.assertEqual(system.connects,
+                         ["/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66"])
+
+    def test_going_idle_is_not_an_occasion(self):
+        """Only coming back is. A phone going to sleep dials nothing."""
+        system = ReconnectBus()
+        rc = self.build(system, active=True)
+        self.drop(rc)
+        with redirect_stdout(io.StringIO()):
+            rc.on_session_props(None, None, None, None, None,
+                                FakeVariant(["org.freedesktop.login1.Session",
+                                             {"IdleHint": True}, []]))
+        self.assertEqual(system.connects, [])
+
+    def test_a_property_change_that_says_nothing_about_idling_is_ignored(self):
+        rc = self.build(active=False)
+        self.drop(rc)
+        before = list(rc.system.connects)
+        with redirect_stdout(io.StringIO()):
+            rc.on_session_props(None, None, None, None, None,
+                                FakeVariant(["org.freedesktop.login1.Session",
+                                             {"Active": True}, []]))
+        self.assertEqual(rc.system.connects, before)
+
+    # -- how hard it tries ------------------------------------------------
+
+    def test_the_series_uses_the_growing_delays_and_then_stops(self):
+        """Four attempts over a quarter of an hour, then silence.
+
+        A page costs about ten seconds of radio whether it is the first or the
+        fiftieth. A service that kept trying every thirty seconds would spend
+        the night finding a pair of earbuds switched off, and the battery this
+        repository exists to protect.
+        """
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+
+        seen = []
+        while self.timers:
+            seen.append(self.fire_next_timer(rc))
+            system.answer(ok=False)
+            self.assertLess(len(seen), 50, "this must not go on forever")
+
+        self.assertEqual(seen, list(reconnect.RETRY_DELAYS_S))
+        self.assertEqual(len(system.connects), len(reconnect.RETRY_DELAYS_S))
+
+    def test_a_connection_ends_the_series(self):
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.fire_next_timer(rc)
+        system.answer(ok=True)
+        with redirect_stdout(io.StringIO()):
+            rc.on_connected("/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66")
+
+        self.assertTrue(self.removed, "the pending attempt has to be dropped")
+        self.assertEqual(rc.candidate.attempts_left, 0)
+
+    def test_a_connected_device_is_not_dialled_again(self):
+        """Connect() on a connected device is an error, not a no-op."""
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        with redirect_stdout(io.StringIO()):
+            rc.on_connected("/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66")
+        system.connects.clear()
+        with redirect_stdout(io.StringIO()):
+            rc.on_wakeup()
+        self.assertEqual(system.connects, [])
+
+    def test_earbuds_that_drop_us_again_at_once_are_left_to_settle(self):
+        """Multipoint, and the tug of war it would otherwise become.
+
+        Earbuds with two hosts hand themselves to a laptop and drop the phone
+        a second later. Dialling them straight back takes them off the laptop
+        again, and the music jumps between two machines until somebody
+        switches something off.
+        """
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.fire_next_timer(rc)
+        system.answer(ok=True)
+        with redirect_stdout(io.StringIO()):
+            rc.on_connected("/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66")
+
+        self.now += reconnect.KEPT_S / 2.0
+        system.connects.clear()
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc.on_disconnected("/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66")
+
+        self.assertIn("leaving it to settle", out.getvalue())
+        self.assertEqual(self.timers, [], "no new series")
+        self.assertEqual(system.connects, [])
+
+    def test_a_connection_that_lasted_is_dialled_back_normally(self):
+        """The other side of the same rule: earbuds that worked for an hour
+        and then went flat are exactly what this service is for."""
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.fire_next_timer(rc)
+        system.answer(ok=True)
+        with redirect_stdout(io.StringIO()):
+            rc.on_connected("/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66")
+
+        self.now += 3600
+        self.timers.clear()
+        self.drop(rc)
+        self.assertEqual(len(self.timers), 1, "a fresh series")
+
+    # -- what it stays out of ---------------------------------------------
+
+    def test_nothing_is_dialled_during_a_call(self):
+        """callaudiod is the most fragile thing in this stack.
+
+        It looks a card up once and keeps the index; a card appearing
+        underneath it mid-call is how a call ends up silent in both
+        directions. A headset can wait until the call is over.
+        """
+        system = ReconnectBus()
+        rc = self.build(system, CallAudioBus(mode=1), active=False)
+        self.drop(rc)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertFalse(rc.try_connect("test"))
+        self.assertEqual(system.connects, [])
+        self.assertIn("during a call", out.getvalue())
+
+    def test_a_callaudiod_that_is_not_installed_is_not_a_call(self):
+        """Otherwise a phone without callaudiod would never reconnect
+        anything, and never say why."""
+        saved = reconnect.Gio.DBusError
+        reconnect.Gio.DBusError = type("E", (), {
+            "is_remote_error": staticmethod(lambda _e: True),
+            "get_remote_error": staticmethod(
+                lambda _e: "org.freedesktop.DBus.Error.ServiceUnknown"),
+        })
+        try:
+            bus = CallAudioBus(error="no such service")
+            self.assertFalse(reconnect.in_a_call(bus))
+        finally:
+            reconnect.Gio.DBusError = saved
+
+    def test_a_callaudiod_that_will_not_answer_counts_as_a_call(self):
+        """Present but not answering is precisely the state to stay out of."""
+        saved = reconnect.Gio.DBusError
+        reconnect.Gio.DBusError = type("E", (), {
+            "is_remote_error": staticmethod(lambda _e: False),
+            "get_remote_error": staticmethod(lambda _e: ""),
+        })
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertTrue(reconnect.in_a_call(
+                    CallAudioBus(error="timeout")))
+            self.assertIn("did not answer", out.getvalue())
+        finally:
+            reconnect.Gio.DBusError = saved
+
+    def test_a_failed_attempt_says_what_went_wrong(self):
+        """"Host is down" and "Connection refused" are different stories -
+        switched off, versus busy with another phone - and whoever reads the
+        journal later needs to be able to tell them apart."""
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.fire_next_timer(rc)
+        callback, data = system.pending.pop(0)
+        system.result, system.message = False, "Host is down"
+        out = io.StringIO()
+        with redirect_stdout(out):
+            callback(system, "token", data)
+        self.assertIn("Host is down", out.getvalue())
+
+    def test_a_device_removed_from_bluez_is_forgotten(self):
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc.on_removed(None, None, None, None, None, FakeVariant(
+                ["/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66", []]))
+        self.assertIsNone(rc.candidate)
+        self.assertIn("nothing to reconnect", out.getvalue())
+
+    def test_a_device_that_cannot_be_read_is_left_alone(self):
+        """The opposite default to the pause watcher, and deliberately so.
+
+        There, doubt means pause, because not pausing puts a podcast on a
+        loudspeaker. Here, doubt means do nothing, because the cost of
+        guessing wrong is paging a stranger's car.
+        """
+        system = ReconnectBus(fail_get=True)
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.assertIsNone(rc.candidate)
+        self.assertEqual(system.connects, [])
+
+    # -- the wiring -------------------------------------------------------
+
+    def test_main_keeps_the_bus_it_subscribed_on(self):
+        """A subscription made on a connection that Python then frees is
+        collected with it: service running, signal never arriving, nothing
+        logged. That bug cost two days in the killswitch indicator on
+        2026-09-14, and this is the shape of it."""
+        buses = []
+
+        def bus_get_sync(_kind, _cancellable):
+            bus = ReconnectBus()
+            buses.append(bus)
+            return bus
+
+        saved = (reconnect.Gio.bus_get_sync, reconnect.GLib.MainLoop)
+        reconnect.Gio.bus_get_sync = bus_get_sync
+        reconnect.GLib.MainLoop = lambda: type(
+            "L", (), {"run": lambda self: None})()
+        try:
+            with redirect_stdout(io.StringIO()):
+                reconnect.main()
+        finally:
+            (reconnect.Gio.bus_get_sync, reconnect.GLib.MainLoop) = saved
+
+        system = buses[0]
+        signals = [sub[2] for sub in system.subscriptions]
+        self.assertIn("PropertiesChanged", signals)
+        self.assertIn("InterfacesRemoved", signals)
+        self.assertEqual(len(system.subscriptions), 3,
+                         "BlueZ properties, BlueZ removals, logind")
+
+
+
+    # -- the brake the phone asked for ------------------------------------
+
+    def test_waking_up_again_straight_away_dials_nothing(self):
+        """Measured on the phone, first run: the service connected through the
+        waking-up path within seconds of a disconnect, because IdleHint had
+        gone false. That occasion has no natural end - a phone is picked up and
+        put down all day - and every attempt is a page. Without this gap the
+        occasion would be a poller with extra steps.
+        """
+        system = ReconnectBus()
+        rc = self.build(system, active=True)
+        self.drop(rc)
+        with redirect_stdout(io.StringIO()):
+            rc.on_wakeup()
+        self.assertEqual(len(system.connects), 1)
+
+        self.now += reconnect.WAKE_MIN_GAP_S / 2.0
+        with redirect_stdout(io.StringIO()):
+            rc.on_wakeup()
+        self.assertEqual(len(system.connects), 1, "too soon to page again")
+
+    def test_waking_up_after_the_gap_tries_again(self):
+        system = ReconnectBus()
+        rc = self.build(system, active=True)
+        self.drop(rc)
+        with redirect_stdout(io.StringIO()):
+            rc.on_wakeup()
+        system.answer(ok=False)
+
+        self.now += reconnect.WAKE_MIN_GAP_S + 1
+        with redirect_stdout(io.StringIO()):
+            rc.on_wakeup()
+        self.assertEqual(len(system.connects), 2)
+
+    def test_the_gap_does_not_hold_up_the_series(self):
+        """The series after a disconnect is four attempts and then over. It
+        sets its own pace and must not be throttled on top of it, or a pair of
+        earbuds that came back into range would wait five minutes."""
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.fire_next_timer(rc)
+        system.answer(ok=False)
+        self.now += 1
+        self.fire_next_timer(rc)
+        self.assertEqual(len(system.connects), 2)
+
+    def test_a_device_gone_for_a_day_is_forgotten(self):
+        """Earbuds left in a drawer over a weekend must not be paged on every
+        unlock for the rest of the month."""
+        system = ReconnectBus()
+        rc = self.build(system, active=True)
+        self.drop(rc)
+        self.now += reconnect.CANDIDATE_TTL_S + 1
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc.on_wakeup()
+        self.assertIsNone(rc.candidate)
+        self.assertEqual(system.connects, [])
+        self.assertIn("gone for a day", out.getvalue())
+
+    # -- the edges, where a watcher that runs for weeks actually fails -----
+
+    def test_the_signal_handler_sorts_out_what_it_is_looking_at(self):
+        """BlueZ sends PropertiesChanged for everything it owns.
+
+        Adapters, media transports, battery levels. Only Device1 with a
+        Connected key means anything here, and the rest has to fall through
+        without doing any of it.
+        """
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        props = "org.freedesktop.DBus.Properties"
+
+        def send(iface, changed):
+            with redirect_stdout(io.StringIO()):
+                rc.on_bluez_props(None, None, "/org/bluez/hci0/dev_AA",
+                                  props, "PropertiesChanged",
+                                  FakeVariant([iface, changed, []]))
+
+        send("org.bluez.Adapter1", {"Connected": False})
+        self.assertIsNone(rc.candidate, "an adapter is not a device")
+
+        send("org.bluez.Device1", {"RSSI": -60})
+        self.assertIsNone(rc.candidate, "a signal strength is not a state")
+
+        send("org.bluez.Device1", {"Connected": False})
+        self.assertIsNotNone(rc.candidate)
+
+        send("org.bluez.Device1", {"Connected": True})
+        self.assertTrue(rc.candidate.connected)
+
+    def test_a_connection_of_some_other_device_changes_nothing(self):
+        """Somebody's car kit connecting says nothing about the earbuds."""
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        pending = list(self.timers)
+        with redirect_stdout(io.StringIO()):
+            rc.on_connected("/org/bluez/hci0/dev_SOMETHING_ELSE")
+        self.assertFalse(rc.candidate.connected)
+        self.assertEqual(self.timers, pending, "the series goes on")
+
+    def test_a_removal_of_some_other_device_changes_nothing(self):
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        with redirect_stdout(io.StringIO()):
+            rc.on_removed(None, None, None, None, None,
+                          FakeVariant(["/org/bluez/hci0/dev_SOMETHING", []]))
+        self.assertIsNotNone(rc.candidate)
+
+    def test_an_attempt_already_out_is_not_doubled(self):
+        """Connect() blocks for a page timeout - up to ten seconds during
+        which the retry timer can fire. Two Connect() calls in flight for one
+        device is how a headset ends up being paged twice for nothing."""
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.fire_next_timer(rc)
+        self.assertEqual(len(system.connects), 1)
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(rc.try_connect("while one is out"))
+        self.assertEqual(len(system.connects), 1)
+
+    def test_a_timer_that_outlives_its_candidate_does_nothing(self):
+        """The device was unpaired between the timer being set and firing."""
+        system = ReconnectBus()
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        _tid, _seconds, fire = self.timers[0]
+        rc.candidate = None
+        with redirect_stdout(io.StringIO()):
+            self.assertFalse(fire())
+        self.assertEqual(system.connects, [])
+
+    def test_uuids_that_are_not_a_list_are_not_audio(self):
+        """BlueZ answering with something unexpected is not a reason to dial."""
+        system = ReconnectBus(uuids=None)
+        rc = self.build(system, active=False)
+        self.drop(rc)
+        self.assertIsNone(rc.candidate)
+
+    def test_a_device_whose_trust_cannot_be_read_is_left_alone(self):
+        system = ReconnectBus()
+
+        def only_trusted_fails(dest, path, iface, method, args, *rest):
+            if args._args[1][1] == "Trusted":
+                raise reconnect.GLib.Error("device vanished")
+            return ReconnectBus.call_sync(system, dest, path, iface, method,
+                                          args, *rest)
+
+        system.call_sync = only_trusted_fails
+        rc = self.build(system, active=False)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc.on_disconnected("/org/bluez/hci0/dev_AA")
+        self.assertIsNone(rc.candidate)
+        self.assertIn("could not read whether", out.getvalue())
+
+    def test_without_logind_it_still_watches_for_disconnects(self):
+        """One occasion instead of two is worth saying out loud, not worth
+        failing over: the series after a disconnect works either way."""
+        system = ReconnectBus()
+
+        def no_session(*_args, **_kwargs):
+            raise reconnect.GLib.Error("no session for this process")
+
+        system.call_sync = no_session
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertIsNone(reconnect.session_path(system))
+        self.assertIn("waking the phone will not reconnect", out.getvalue())
+
+    def test_an_unreadable_idle_hint_counts_as_in_use(self):
+        """Which is the careful way round: "in use" is the state in which a
+        disconnect is treated as deliberate and nothing is dialled back."""
+        system = ReconnectBus()
+
+        def no_hints(*_args, **_kwargs):
+            raise reconnect.GLib.Error("no such property")
+
+        system.call_sync = no_hints
+        self.assertTrue(reconnect.session_in_use(system, "/session/_31"))
+
+    def test_the_idle_state_is_read_at_startup_not_assumed(self):
+        """The signals only ever say what CHANGED. Starting while the screen
+        is off and assuming otherwise makes the next unlock look like no
+        change at all, and the whole waking-up occasion goes missing."""
+        system = ReconnectBus(idle=True)
+        self.assertFalse(reconnect.session_in_use(
+            system, "/org/freedesktop/login1/session/_31"))
+        self.assertTrue(reconnect.session_in_use(
+            ReconnectBus(), "/org/freedesktop/login1/session/_31"))
 
 if __name__ == "__main__":
     # Built by hand rather than through unittest.main(), which looks for tests

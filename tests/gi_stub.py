@@ -43,6 +43,12 @@ class Fake:
     def __init__(self, _name="fake", *args, **kwargs):
         object.__setattr__(self, "_name", _name)
         object.__setattr__(self, "_props", dict(kwargs))
+        # Kept, not only recorded: a GLib.Variant is built at the call site
+        # and read by whatever answers the call, so a fake bus that wants to
+        # know WHICH property was asked for has nowhere else to look. Reading
+        # it out of the recorder would work by call order, which is a test
+        # that breaks when an unrelated line moves.
+        object.__setattr__(self, "_args", args)
         recorder.add(_name, args, kwargs)
 
     def __getattr__(self, item):
@@ -133,7 +139,11 @@ def install():
         sys.modules["gi.repository." + name] = module
 
     # The few things the code treats as values rather than as constructors.
-    repository.GLib.Error = type("Error", (Exception,), {})
+    # The real GLib.Error carries the D-Bus error text in .message, and code
+    # that reads it must not fail here where it would not fail on the phone.
+    repository.GLib.Error = type("Error", (Exception,), {
+        "message": property(lambda self: str(self)),
+    })
     repository.GLib.PRIORITY_DEFAULT = 0
     repository.GLib.MainLoop = lambda *a, **k: Fake("GLib.MainLoop")
     repository.GLib.Variant = lambda *a, **k: Fake("GLib.Variant", *a)

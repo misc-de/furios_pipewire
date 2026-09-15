@@ -66,6 +66,8 @@ install -Dm755 tools/furios-audio-sco-hold.py \
     "$STAGE/usr/bin/furios-audio-sco-hold"
 install -Dm755 tools/furios-audio-bt-mic.py \
     "$STAGE/usr/bin/furios-audio-bt-mic"
+install -Dm755 tools/furios-audio-bt-reconnect.py \
+    "$STAGE/usr/bin/furios-audio-bt-reconnect"
 
 install -Dm644 tunnel.conf                    "$STAGE/usr/share/furios-audio/tunnel.conf"
 ./gen-pipewire-hal-conf.py /usr/share/pipewire/pipewire-droid.conf "$STAGE/tmp-hal.conf" >/dev/null
@@ -99,6 +101,8 @@ install -Dm644 furios-audio-sco-hold.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-sco-hold.service"
 install -Dm644 furios-audio-bt-mic.service \
     "$STAGE/usr/lib/systemd/user/furios-audio-bt-mic.service"
+install -Dm644 furios-audio-bt-reconnect.service \
+    "$STAGE/usr/lib/systemd/user/furios-audio-bt-reconnect.service"
 
 # No app in here any more. It moved to its own repository with its own
 # installer (github.com/misc-de/furios_app) when it grew from an audio switch

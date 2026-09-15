@@ -820,6 +820,87 @@ Proven on the device, the morning reconstructed:
 
 ---
 
+## Nobody dials a headset that hung up
+
+Earbuds disconnected at 12:05:21 and were still not connected at 13:44, with
+the phone playing through its own loudspeaker. Nothing was broken, and that is
+the finding: both sides were ready the whole time.
+
+    $ hcitool name F4:9D:8A:7C:5C:66
+    soundcore Liberty 4 Pro          # answered in under a second
+    $ hcitool con
+    Connections:                     # nothing
+    $ hciconfig hci0
+    UP RUNNING PSCAN                 # the phone was reachable throughout
+
+**BlueZ dials a paired device on its own in exactly two situations:** when the
+adapter is powered on (`AutoEnable`, which is why every boot comes up
+connected - measured the same day, connected 2 s after `bluetoothd` started),
+and when a link was lost to radio trouble (`ReconnectAttempts` in the policy
+plugin). A device that simply hung up falls under neither, and nothing else on
+phosh dials one either. On Android something does.
+
+So the gap is not in the audio stack at all. It is that the phone never places
+the call.
+
+`furios-audio-bt-reconnect` places it - but by occasion, never by polling,
+because every attempt is a page and a page is around ten seconds of radio on
+a phone that never suspends (see "What Bluetooth audio actually costs"). Two
+occasions:
+
+- **a disconnect**, followed by four attempts at 20, 60, 180 and 600 seconds
+  and then silence. That covers walking out of range and coming back.
+- **waking up**, one attempt when the phone comes back from idle or the lock
+  screen. You picked the phone up, so you are there, and probably so are the
+  earbuds.
+
+**The first run on the phone found the flaw in the second one.** It connected
+through the waking-up path within seconds, because `IdleHint` had gone false -
+and that occasion has no natural end. A phone is picked up and put down all
+day, so without a limit this would have been a poller with extra steps and a
+better name. Hence `WAKE_MIN_GAP_S` (300 s between attempts) and
+`CANDIDATE_TTL_S` (a day, after which earbuds left in a drawer stop being
+paged on every unlock). Sampled afterwards over three minutes, `IdleHint` and
+`LockedHint` held steady; how often they really flap over a day is NOT
+measured, and the gap is what makes that safe not to know.
+
+Three things it deliberately does not do:
+
+- **It never dials a device it did not watch disconnect.** This phone has a
+  car kit, an OBD adapter and a keyboard paired. Paging those on every unlock
+  would switch a car radio on in a car park.
+- **It stays out of calls.** callaudiod looks a card up once and keeps the
+  index; a card appearing underneath it mid-call is how a call goes silent in
+  both directions.
+- **It does not argue with its owner.** BlueZ does not pass the disconnect
+  reason over D-Bus, so there is no way to ask who hung up - but if the phone
+  was in your hand when it happened, it was probably you, in the settings. A
+  disconnect while the session is active is remembered and not dialled back;
+  the next time the phone wakes, it tries.
+
+Proven on the device, both occasions, the headset connected each time and the
+sink came back as the default:
+
+    dev_F4_9D_8A_7C_5C_66 disconnected
+    phone back in use: connecting dev_F4_9D_8A_7C_5C_66
+    connected dev_F4_9D_8A_7C_5C_66
+
+    dev_F4_9D_8A_7C_5C_66 disconnected      # phone idle AND locked
+    retry: connecting dev_F4_9D_8A_7C_5C_66 # 20 s later
+    connected dev_F4_9D_8A_7C_5C_66
+
+That first line also settles something that cost two days elsewhere: the
+logind subscription really does deliver. A signal subscription made on a bus
+connection that Python then frees is collected with it - service running,
+signal never arriving, nothing logged - which is why the connections are held
+on the object and not in a local.
+
+**Not measured:** the "disconnect while the phone is in use" path was only
+exercised in tests, not on the device - reaching it needs the screen on, and
+these runs were all made over SSH with the phone locked.
+
+---
+
 ## What Bluetooth audio actually costs
 
 Measured during playback, CPU of `bluebinder` plus the codec:

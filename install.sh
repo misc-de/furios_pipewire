@@ -41,6 +41,7 @@ WERKZEUGE=(
     "furios-audio-callaudio-refresh.service   tools/furios-audio-callaudio-refresh"
     "furios-audio-sco-hold.service            tools/furios-audio-sco-hold.py"
     "furios-audio-bt-mic.service              tools/furios-audio-bt-mic.py"
+    "furios-audio-bt-reconnect.service        tools/furios-audio-bt-reconnect.py"
 )
 
 echo "== the plugin PipeWire needs to reach the HAL"
