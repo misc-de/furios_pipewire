@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 misc-de
+# SPDX-License-Identifier: MIT
+[Unit]
+# A bind mount does not survive a reboot - that is what makes it a safe way to
+# change a dm-verity protected vendor file, and it is also why remembering the
+# setting needs this unit. It lays the modified tuning file over again, but
+# only if "furios-audio-dmnr set on" left its marker behind.
+Description=Lay MediaTek's handsfree echo suppression over the vendor tuning file
+Documentation=file:/usr/share/doc/furios-audio-pipewire/README.md
+# The HAL reads that file when the audio stack starts, and the stack starts
+# with the session. Before graphical.target, therefore - afterwards the mount
+# would be in place but nothing would have read it until the next restart.
+Before=graphical.target
+# No hard dependency on the path: on a device without this vendor file the
+# tool exits 0 and nothing here should fail because of it.
+ConditionPathExists=/android/vendor/etc/audio_param/AudioParamOptions.xml
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'd=/usr/local/bin/furios-audio-dmnr; test -x "$$d" || d=/usr/bin/furios-audio-dmnr; "$$d" boot'
+# Undoing it on shutdown is pointless - the mount goes with the boot anyway -
+# but it makes "systemctl stop" mean what it says.
+ExecStop=/bin/sh -c 'd=/usr/local/bin/furios-audio-dmnr; test -x "$$d" || d=/usr/bin/furios-audio-dmnr; "$$d" off >/dev/null 2>&1 || true'
+
+[Install]
+WantedBy=multi-user.target

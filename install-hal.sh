@@ -63,6 +63,13 @@ sudo systemctl daemon-reload
 
 echo "4) echo experiment (DMNR)"
 sudo install -m755 experiments/dmnr-handsfree.sh /usr/local/bin/furios-audio-dmnr
+# The unit that puts it back after a reboot. Enabled unconditionally: it does
+# nothing at all unless "furios-audio-dmnr set on" has left its marker, so
+# enabling it costs a ConditionPathExists and one exit 0 per boot.
+sudo install -m644 systemd/furios-audio-dmnr.service \
+    /etc/systemd/system/furios-audio-dmnr.service
+sudo systemctl daemon-reload
+sudo systemctl enable furios-audio-dmnr.service >/dev/null 2>&1 || true
 
 echo "5) updating audioctl (plugin path)"
 sudo install -m755 audioctl /usr/local/bin/audioctl

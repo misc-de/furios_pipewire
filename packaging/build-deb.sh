@@ -52,6 +52,8 @@ printf '%s\n' "$PWVER" > "$STAGE/usr/lib/$TRIPLET/spa-0.2/droid/built-against"
 
 install -Dm755 audioctl                       "$STAGE/usr/bin/audioctl"
 install -Dm755 experiments/dmnr-handsfree.sh  "$STAGE/usr/bin/furios-audio-dmnr"
+install -Dm644 systemd/furios-audio-dmnr.service \
+    "$STAGE/usr/lib/systemd/system/furios-audio-dmnr.service"
 # The AAC codec module is deliberately NOT shipped as a binary: it links
 # fdk-aac, and building it locally is a different thing from redistributing
 # it. The script that builds it comes along instead.

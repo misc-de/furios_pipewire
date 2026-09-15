@@ -8,6 +8,15 @@ systemctl --user disable --now furios-audio-apply.service furios-audio-verify.se
     furios-pw-tunnel.service furios-audio-pause-on-disconnect.service \
     furios-audio-callaudio-refresh.service furios-audio-sco-hold.service \
     furios-audio-bt-mic.service 2>/dev/null || true
+# The echo suppression first, and in this order: take the mount down and drop
+# the marker while the tool is still there to do it. Removing the binary first
+# would leave a marker nothing reads and a mount nothing undoes.
+sudo systemctl disable --now furios-audio-dmnr.service >/dev/null 2>&1 || true
+[ -x /usr/local/bin/furios-audio-dmnr ] && \
+    /usr/local/bin/furios-audio-dmnr set off >/dev/null 2>&1 || true
+sudo rm -f /etc/systemd/system/furios-audio-dmnr.service \
+           /etc/furios-audio-dmnr.persistent
+
 sudo rm -f /usr/local/bin/audioctl \
            /usr/local/bin/furios-audio-dmnr \
            /usr/local/bin/furios-audio-pause-on-disconnect \
