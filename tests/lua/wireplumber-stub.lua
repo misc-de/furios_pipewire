@@ -146,6 +146,21 @@ function Manager:lookup(constraints)
   return nil
 end
 
+-- Every match, not just the first: a Bluetooth card has an output node and an
+-- input node, and which of the two carries the codec is not something the
+-- script may assume.
+function Manager:iterate(constraints)
+  local objs, i = M.objects[self.kind], 0
+  return function ()
+    while true do
+      i = i + 1
+      local obj = objs[i]
+      if obj == nil then return nil end
+      if matches(obj, constraints) then return obj end
+    end
+  end
+end
+
 -- --- the globals the scripts expect ---------------------------------------
 
 -- State the scripts keep between events. It lives in Lua globals, which
@@ -156,6 +171,7 @@ local script_state = {
   "last_route", "last_route_volume", "last_mode", "last_volume",
   "in_bt_call", "saved_routes", "mixer", "device", "log",
   "gave_up", "defends", "quiet_token", "took_over",
+  "announced_wbs", "codec_token",
 }
 
 -- Run every timer callback that is waiting, the way the main loop would.

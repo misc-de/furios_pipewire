@@ -1024,6 +1024,44 @@ bt_node_id() {
         index($0, "node.name = \"" want "\"") { print id; exit }'
 }
 
+# What the Bluetooth link really runs, as BlueZ negotiated it.
+#
+# The headset's own nodes carry it in api.bluez5.codec, and after the profile
+# switch that is the agreed codec rather than anyone's preference. It is the
+# only reading here that can tell one headset from another.
+bt_link_codec() {
+    pw-cli ls Node 2>/dev/null | awk '
+        /^[[:space:]]*id [0-9]+,/ { isbt = 0; codec = ""; next }
+        index($0, "node.name = \"bluez_") > 0 { isbt = 1 }
+        index($0, "api.bluez5.codec") > 0 {
+            codec = $0
+            sub(/.*api\.bluez5\.codec = "?/, "", codec)
+            sub(/"?[[:space:]]*$/, "", codec)
+        }
+        isbt == 1 && codec != "" { print codec; exit }'
+}
+
+# What a card profile stands for, from the description PipeWire builds for it:
+# "Headset Head Unit (HSP/HFP, codec CVSD)". Second best, because it says what
+# the profile is for rather than what the link agreed - but it is there before
+# the link is.
+bt_profile_codec() {
+    local card=${1:-} profile=${2:-}
+    [ -n "$card" ] && [ -n "$profile" ] || return 0
+    pactl list cards 2>/dev/null | sed -n "/Name: $card\$/,/^\$/p" \
+        | sed -n "s/^[[:space:]]*$profile: .*codec \([A-Za-z0-9_-]*\).*/\1/p" | head -1
+}
+
+# Turn a codec name into the yes-or-no the HAL takes. Only mSBC and CVSD have
+# an answer: bt_wbs cannot say LC3-SWB, and an A2DP node still carrying "sbc"
+# is not an answer about a call at all.
+bt_wbs_of_codec() {
+    case "$(printf '%s' "$1" | tr 'A-Z' 'a-z')" in
+    msbc) printf 'on' ;;
+    cvsd) printf 'off' ;;
+    esac
+}
+
 # Tell both phone nodes which codec the Bluetooth link runs.
 #
 # The HAL reads bt_wbs when it opens a stream, and it is the route that makes
@@ -1032,17 +1070,33 @@ bt_node_id() {
 # either of them may be the next to open one. droid-bluetooth-call.lua says
 # the same thing to the same two nodes; this is the path for everything that
 # is not a call.
+#
+# This used to read the codec off the profile NAME, and that is wrong: the
+# plain headset-head-unit is whichever codec the two ends agreed on, and only
+# the per-codec profiles carry it in their name. Every hands-free device was
+# therefore announced as wide-band, which is silence on a narrow-band one -
+# see droid-bluetooth-call.lua for the car that paid for it.
 bt_tell_codec() {
-    local profile=$1 wbs name id told=0
-    case "$profile" in
-    headset-head-unit)      wbs=on ;;
-    headset-head-unit-cvsd) wbs=off ;;
-    # Anything else and we do not know. Guessing here is a coin toss between
+    # The card is optional: without it only the link and the profile name can
+    # answer, which is what the callers outside a call have.
+    local profile=${1:-} card=${2:-} wbs codec from name id told=0
+    codec=$(bt_link_codec)
+    wbs=$(bt_wbs_of_codec "$codec"); from="the link"
+    if [ -z "$wbs" ]; then
+        codec=$(bt_profile_codec "$card" "$profile")
+        wbs=$(bt_wbs_of_codec "$codec"); from="the profile"
+    fi
+    if [ -z "$wbs" ]; then
+        case "$profile" in
+        *-msbc) wbs=on;  codec=msbc; from="the profile name" ;;
+        *-cvsd) wbs=off; codec=cvsd; from="the profile name" ;;
+        esac
+    fi
+    # Still nothing, and we do not guess. Guessing here is a coin toss between
     # working audio and silence, so say nothing and let the HAL keep its
-    # default - the node writes a line when it opens Bluetooth without a
-    # codec, which is better than a wrong guess nobody can see.
-    *) btlog "$BTTAG: unknown profile \"${profile:-none}\" - the HAL keeps its default codec"; return 1 ;;
-    esac
+    # narrow-band default - the node writes a line when it opens Bluetooth
+    # without a codec, which is better than a wrong guess nobody can see.
+    [ -n "$wbs" ] || { btlog "$BTTAG: codec unknown for profile \"${profile:-none}\" - the HAL keeps its default"; return 1; }
     for name in droid-sink droid-source; do
         id=$(bt_node_id "$name")
         [ -n "$id" ] || continue
@@ -1050,7 +1104,7 @@ bt_tell_codec() {
             && told=$((told+1))
     done
     [ "$told" -gt 0 ] || { btlog "$BTTAG: WARNING no node took the codec - the HAL stays on narrow-band"; return 1; }
-    btlog "$BTTAG: codec bt_wbs=$wbs (told $told nodes)"
+    btlog "$BTTAG: codec bt_wbs=$wbs, $codec from $from (told $told nodes)"
     return 0
 }
 
@@ -1185,7 +1239,7 @@ bt_mic() {
         prof=$(bt_active_profile "$card")
         # Before the route: the route is what makes the HAL open a stream, and
         # the codec has to be in place by then.
-        bt_tell_codec "$prof"
+        bt_tell_codec "$prof" "$card"
         bt_sco_hold_start "${arg:-600}"
         pactl set-source-port droid-source input-bluetooth_sco_headset 2>/dev/null \
             && btlog "bt-mic: input input-bluetooth_sco_headset set" \

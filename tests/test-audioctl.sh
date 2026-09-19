@@ -758,6 +758,9 @@ check "setting a port that will not take is reported too" "yes" \
 # there before the route, because the route is what makes the HAL open the
 # stream and read it.
 
+# The Bluetooth node carries the codec BlueZ negotiated; $BT_CODEC is what
+# this stub says it is, so a test can be a wide-band headset or a narrow-band
+# car without either being present.
 cat > "$STUBDIR/pw-cli" <<'STUB'
 #!/bin/sh
 case "$*" in
@@ -767,7 +770,8 @@ case "$*" in
  		node.name = "droid-source"
 	id 62, type PipeWire:Interface:Node/3
  		node.name = "bluez_output.AA_BB.1"
-' ;;
+ 		api.bluez5.codec = "%s"
+' "${BT_CODEC:-}" ;;
 *"set-param"*) printf '%s\n' "$*" >> "$STUBDIR/setparam.log" ;;
 esac
 exit 0
@@ -780,19 +784,37 @@ check "and a name that is not there comes back empty" "" \
     "$(with_audioctl 'bt_node_id droid-nothing')"
 
 rm -f "$STUBDIR/setparam.log"
-check "the wideband profile tells the HAL bt_wbs=on" "yes" \
+export BT_CODEC=msbc
+check "a wide-band link tells the HAL bt_wbs=on" "yes" \
     "$(with_audioctl 'bt_tell_codec headset-head-unit 2>&1 | grep -q "bt_wbs=on" && echo yes || echo no')"
 check "and it tells both nodes, because either may open the stream" "2" \
     "$(grep -c 'droid.bt-wbs' "$STUBDIR/setparam.log" 2>/dev/null || echo 0)"
-check "the narrowband profile tells it off instead" "yes" \
+BT_CODEC=cvsd
+check "a narrow-band link tells it off instead" "yes" \
+    "$(with_audioctl 'bt_tell_codec headset-head-unit 2>&1 | grep -q "bt_wbs=off" && echo yes || echo no')"
+unset BT_CODEC
+
+# The name of the plain hands-free profile says nothing about the codec - it
+# is whichever one the two ends agreed on. Reading it as wide-band is what
+# left a call in a car silent in both directions on 2026-09-18.
+rm -f "$STUBDIR/setparam.log"
+check "the plain profile name alone is not read as wide-band" "yes" \
+    "$(with_audioctl 'bt_tell_codec headset-head-unit 2>&1 | grep -q "keeps its default" && echo yes || echo no')"
+check "and nothing is sent when the codec is unknown" "0" \
+    "$(grep -c 'droid.bt-wbs' "$STUBDIR/setparam.log" 2>/dev/null || echo 0)"
+
+# A per-codec profile does carry it in its name, and that is the last resort
+# when the link cannot be read.
+check "a profile that names its codec is read from its name" "yes" \
     "$(with_audioctl 'bt_tell_codec headset-head-unit-cvsd 2>&1 | grep -q "bt_wbs=off" && echo yes || echo no')"
 
-# A guess here is a coin toss between working audio and silence, so an unknown
-# profile says nothing at all and lets the HAL keep its default.
+# A codec bt_wbs has no word for is not rounded to the nearest one.
 rm -f "$STUBDIR/setparam.log"
-check "an unknown profile is not guessed at" "yes" \
-    "$(with_audioctl 'bt_tell_codec a2dp-sink 2>&1 | grep -q "keeps its default" && echo yes || echo no')"
-check "and nothing is sent when it is unknown" "0" \
+export BT_CODEC=lc3_swb
+check "a codec bt_wbs cannot express is not guessed at" "yes" \
+    "$(with_audioctl 'bt_tell_codec headset-head-unit 2>&1 | grep -q "keeps its default" && echo yes || echo no')"
+unset BT_CODEC
+check "and nothing is sent for it either" "0" \
     "$(grep -c 'droid.bt-wbs' "$STUBDIR/setparam.log" 2>/dev/null || echo 0)"
 
 # The hold has to outlive the audioctl that starts it - without setsid it dies

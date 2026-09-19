@@ -432,10 +432,8 @@ So the HAL does wide-band, it just has to be told: `bt_wbs=on` flips
 `BTCVSD Band` from NB to WB and `Speech_BT_SCO_WB` to on, both observable in
 the mixer. `probe-bt-sco-out --wbs` sends it by hand.
 
-**Who tells the plugin:** `droid-bluetooth-call.lua` picks the headset's
-profile, so it is the one place that knows the codec - `headset-head-unit` is
-mSBC, `headset-head-unit-cvsd` is CVSD - and it sends `droid.bt-wbs` straight
-to both nodes before it sets the routes. Both, because `bt_wbs` belongs to the
+**Who tells the plugin:** `droid-bluetooth-call.lua` sends `droid.bt-wbs`
+straight to both nodes before it sets the routes. Both, because `bt_wbs` belongs to the
 HAL module rather than to one stream and either node may open the next one;
 before the routes, because setting a route is what makes the HAL open a stream
 and the HAL reads the parameter while opening. A profile it does not recognise
@@ -449,6 +447,56 @@ and the tone heard in the earbuds.
 
 This is also why the measurement below once worked and later did not: the
 profile happened to be CVSD that night.
+
+### The profile name is not the codec (19.9.)
+
+The paragraph above used to end with a rule that was wrong: `headset-head-unit`
+is mSBC, `headset-head-unit-cvsd` is CVSD. Only the second half of it holds.
+
+`libspa-bluez5` builds the per-codec profile names by appending the codec
+(`bluez5-device.c`, format `"%s-%s"`), and it keeps a plain `headset-head-unit`
+for whichever codec the two ends agree on. Its description says which that is -
+`Headset Head Unit (HSP/HFP, codec MSBC)` or `... codec CVSD)` - but the name
+never does. `takeOver` asks for the plain profile, so **every** hands-free
+device was announced to the HAL as wide-band.
+
+It cost a call. 18.9., 23:02, hands-free in the car: profile, both routes, SCO
+hold, all correct, `bt_wbs=on` two seconds in - and the call was silent in both
+directions, which is the table above read from the other end. The car is an
+HFP **1.5** unit and its SDP record says so:
+
+    09 0009 35 08 35 06 19 111E 09 0105     Handsfree, version 0x0105 = 1.5
+    09 0311 09 0007                         SupportedFeatures = 0x0007
+
+Bit 5 of `SupportedFeatures` is wide-band speech. `0x0007` is bits 0-2 -
+EC/NR, three-way calling, CLI - so the link could only ever be CVSD. The
+earbuds this was built and heard with are HFP 1.7 with `0x003F`, wide-band bit
+set. One bit apart, and nothing in the code ever looked at it.
+
+The tests agreed with the code rather than with the phone: the CVSD branch was
+exercised with a profile named `headset-head-unit-cvsd`, and the case that
+actually occurs - the plain name on a narrow-band device - was the one nobody
+wrote down. Same shape as the modem's fault 12/16/21/22; see
+`arbeitsweise-invariante-vor-patch`.
+
+**What it reads now**, best source first:
+
+1. `api.bluez5.codec` on the headset's own nodes - what BlueZ negotiated.
+   Arrives late, because the codec is agreed when the SCO link goes up, which
+   on this phone is `furios-audio-sco-hold` opening a stream a second or two
+   into the call. So it is read again while the call runs: every 250 ms for
+   the first 15 s, every 2 s after that, and the HAL reopens its stream by
+   itself when the answer changes (`apply_bt_wbs` in `droid-pcm.c`).
+2. the codec in the profile's description, which is there before the link is.
+3. the suffix of a per-codec profile name.
+4. otherwise nothing is announced and the HAL keeps its narrow-band default.
+
+`audioctl bt-mic` reads it the same way, through `bt_link_codec` and
+`bt_profile_codec`. A codec `bt_wbs` has no word for - LC3-SWB - counts as
+"do not know" rather than as wide-band.
+
+**Still to be heard:** a call in the car. Everything above is the record and
+the code; the ear has not confirmed it yet.
 
 The result, with the controls that make it an answer rather than an impression:
 
@@ -752,9 +800,8 @@ So the HAL does wide-band, it just has to be told. `bt_wbs=on` flips
 `BTCVSD Band` from NB to WB and `Speech_BT_SCO_WB` to on, both visible in the
 mixer. `probe-bt-sco-out --wbs` sends it by hand.
 
-`droid-bluetooth-call.lua` picks the headset's profile, so it is the one place
-that knows which codec was agreed, and it sends `droid.bt-wbs` to **both**
-nodes **before** it sets the routes. Both, because `bt_wbs` belongs to the HAL
+`droid-bluetooth-call.lua` sends `droid.bt-wbs` to **both** nodes **before**
+it sets the routes. Both, because `bt_wbs` belongs to the HAL
 module rather than to one stream and either node may open the next one; before
 the routes, because setting a route is what makes the HAL open a stream and the
 HAL reads the parameter while opening. A profile it does not recognise tells
@@ -764,7 +811,10 @@ silence.
 
 **This is also why a measurement can be right one night and wrong the next.**
 The night it worked, the profile happened to be CVSD. So: when measuring
-anything over Bluetooth, write down the profile of the bluez card.
+anything over Bluetooth, write down the codec of the bluez card - the codec,
+not the profile name. The name of the plain hands-free profile says nothing
+about the codec, and reading it as mSBC left a call in a car silent in both
+directions on 18.9.; see "The profile name is not the codec" above.
 
 ---
 

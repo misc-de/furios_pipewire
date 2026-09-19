@@ -81,6 +81,22 @@ MAX_DEFENDS = 3
 -- finished.
 QUIET_MS = 1000
 
+-- How often to look at the codec while the link is being built, and how long
+-- that counts as "being built".
+--
+-- The codec is not settled when the profile is: BlueZ agrees it when the SCO
+-- link is acquired, and on this phone that is furios-audio-sco-hold opening a
+-- stream a second or two into the call. So the first reading can be the
+-- preferred codec rather than the agreed one, and the difference between the
+-- two is silence. Reading it again costs nothing and the HAL reopens its
+-- stream by itself when the answer changes (droid-pcm.c, apply_bt_wbs).
+--
+-- Slowly for the rest of the call, because a link that drops and comes back
+-- may come back on the other codec, and a call is minutes long.
+CODEC_POLL_MS = 250
+CODEC_FAST_FOR_MS = 15000
+CODEC_SLOW_MS = 2000
+
 in_bt_call = false
 gave_up = false
 defends = 0
@@ -90,6 +106,12 @@ saved_routes = nil
 -- number knows something moved after it was armed, and stands down.
 quiet_token = 0
 took_over = false
+
+-- What the phone's nodes were last told, and a token for the codec watch that
+-- works like quiet_token: a round that fires with a stale one is from a call
+-- that is over.
+announced_wbs = nil
+codec_token = 0
 
 -- Off unless someone turned it on. An unknown setting, an older WirePlumber,
 -- anything unexpected: all of that has to come out as "leave the call alone".
@@ -180,13 +202,33 @@ end
 -- Tell the phone's nodes which codec the Bluetooth link runs, because nothing
 -- else can.
 --
--- The HAL encodes narrow-band CVSD unless it is told otherwise, and the
--- profile above prefers wide-band mSBC. Mismatched, the earbuds decode CVSD
--- bytes as mSBC and play nothing - while everything measurable says the audio
--- is on its way: the link stands, BTCVSD Tx Irq is on, the HAL holds the
--- Bluetooth PCM device. Only the ear notices. Measured, same tone each time:
--- mSBC air + HAL default, nothing; CVSD air + HAL default, heard; mSBC air +
--- bt_wbs=on, heard.
+-- The HAL encodes narrow-band CVSD unless it is told otherwise. Mismatched in
+-- either direction the far end decodes the wrong thing and plays nothing -
+-- while everything measurable says the audio is on its way: the link stands,
+-- BTCVSD Tx Irq is on, the HAL holds the Bluetooth PCM device. Only the ear
+-- notices. Measured, same tone each time: mSBC air + HAL default, nothing;
+-- CVSD air + HAL default, heard; mSBC air + bt_wbs=on, heard.
+--
+-- This used to read the codec off the profile NAME - headset-head-unit as
+-- mSBC, headset-head-unit-cvsd as CVSD - and that is wrong, because the name
+-- of the plain profile says nothing about the codec. libspa-bluez5 builds the
+-- per-codec names by appending the codec (bluez5-device.c: "%s-%s") and keeps
+-- headset-head-unit for whichever codec the two ends agree on; its
+-- description then reads "Headset Head Unit (HSP/HFP, codec CVSD)" or
+-- "... codec MSBC". takeOver asks for the plain one, so it got mSBC announced
+-- for every hands-free device on earth.
+--
+-- It cost a car. 2026-09-18 23:02, hands-free in the car: profile, routes,
+-- SCO hold, all of it right, bt_wbs=on announced two seconds in - and the
+-- call was silent in both directions. The car is an HFP 1.5 unit whose SDP
+-- record has SupportedFeatures 0x0007: no wide-band speech bit, so the link
+-- could only ever be CVSD. The earbuds that this was built and heard with are
+-- HFP 1.7, 0x003F, wide-band bit set. One bit apart, and nothing in the code
+-- ever looked at it.
+--
+-- So ask what the link is actually running, and say nothing when that cannot
+-- be answered - the HAL then keeps its narrow-band default, which is a better
+-- failure than a wrong guess: the guess is silence that measures perfectly.
 --
 -- It goes straight to the nodes, the way droid.lua sends the route. The card
 -- is not a road: it lives in WirePlumber's process and the nodes in
@@ -197,8 +239,9 @@ end
 -- Both directions are told: bt_wbs belongs to the HAL module rather than to
 -- one stream, and either node may be the next to open one.
 --
--- And it has to happen BEFORE the routes are set. The HAL reads the parameter
--- when it opens a stream, and it is the route that makes it open.
+-- And it should happen BEFORE the routes are set. The HAL reads the parameter
+-- when it opens a stream, and it is the route that makes it open; told later
+-- it reopens the stream, which works but costs a gap in the call.
 function nodeOf (dev, card_profile_device)
   return cutils.get_object_manager ("node"):lookup {
     Constraint { "device.id", "=", tostring (dev["bound-id"]) },
@@ -207,18 +250,8 @@ function nodeOf (dev, card_profile_device)
   }
 end
 
-function tellCodec (dev, profile)
-  -- headset-head-unit is mSBC (wide-band); headset-head-unit-cvsd is CVSD.
-  -- Anything else and we do not know - and guessing is a coin toss between
-  -- working audio and silence, so say nothing and let the HAL keep its
-  -- default. The node says so in the log when it opens Bluetooth without a
-  -- codec, which is better than a wrong guess nobody can see.
-  local wbs
-  if profile == "headset-head-unit" then
-    wbs = "on"
-  elseif profile == "headset-head-unit-cvsd" then
-    wbs = "off"
-  else
+function tellCodec (dev, wbs)
+  if wbs == nil then
     return nil
   end
 
@@ -236,7 +269,136 @@ function tellCodec (dev, profile)
   if told == 0 then
     return nil
   end
+  announced_wbs = wbs
   return wbs
+end
+
+-- A codec name as libspa-bluez5 writes it, turned into what the HAL takes.
+--
+-- Only these two exist for it: bt_wbs is a yes-or-no about mSBC. A link on
+-- LC3-SWB, or an A2DP node still carrying "sbc" or "aac" from before the
+-- profile switch, is not something this can answer - and a wrong answer is
+-- silence, so those come back as "do not know" and the HAL keeps its default.
+function wbsOfCodec (name)
+  if name == nil then
+    return nil
+  end
+  name = string.lower (tostring (name))
+  if name == "msbc" then
+    return "on"
+  elseif name == "cvsd" then
+    return "off"
+  end
+  return nil
+end
+
+-- What the link really runs, from the node that runs it.
+--
+-- The Bluetooth nodes carry api.bluez5.codec, and after the profile switch
+-- that is the codec BlueZ negotiated - not what anyone preferred. It is the
+-- only source here that can tell one headset from another.
+function codecOfNodes (card)
+  if card == nil then
+    return nil
+  end
+  -- The constraint is written exactly as nodeOf writes it, because that one
+  -- is known to match on the phone.
+  local om = cutils.get_object_manager ("node")
+  for node in om:iterate {
+      Constraint { "device.id", "=", tostring (card["bound-id"]) },
+    } do
+    local wbs = wbsOfCodec (node.properties ["api.bluez5.codec"])
+    if wbs then
+      return wbs, node.properties ["api.bluez5.codec"]
+    end
+  end
+  -- Some builds put it on the card instead of on its nodes.
+  local wbs = wbsOfCodec (card.properties and card.properties ["api.bluez5.codec"])
+  if wbs then
+    return wbs, card.properties ["api.bluez5.codec"]
+  end
+  return nil
+end
+
+-- What the card says about the profile that was just set.
+--
+-- Two readings, both from PipeWire itself: the description, which is built as
+-- "Headset Head Unit (HSP/HFP, codec %s)" and names the codec the profile
+-- stands for, and the name, which carries it as a suffix on the per-codec
+-- profiles (headset-head-unit-msbc, -cvsd). The plain headset-head-unit says
+-- nothing by its name - it is whichever codec the two ends agreed on - and
+-- reading it as mSBC is exactly the mistake this replaces.
+function codecOfProfile (card, name)
+  if card == nil or name == nil then
+    return nil
+  end
+  for p in card:iterate_params ("EnumProfile") do
+    local profile = cutils.parseParam (p, "EnumProfile")
+    if profile and profile.name == name then
+      local said = profile.description
+                   and string.match (tostring (profile.description), "codec%s+([%a%d_-]+)")
+      local wbs = wbsOfCodec (said)
+      if wbs then
+        return wbs, said
+      end
+    end
+  end
+  local suffix = string.match (name, "^headset%-head%-unit%-(.+)$")
+  local wbs = wbsOfCodec (suffix)
+  if wbs then
+    return wbs, suffix
+  end
+  return nil
+end
+
+-- The codec, from the best source that can answer right now.
+function btWbs (card, profile)
+  local wbs, name = codecOfNodes (card)
+  if wbs then
+    return wbs, name .. " (from the link)"
+  end
+  wbs, name = codecOfProfile (card, profile)
+  if wbs then
+    return wbs, name .. " (from the profile)"
+  end
+  return nil
+end
+
+-- Look again while the call runs, because the answer can arrive late.
+--
+-- Nothing is forced on the HAL from here: told a codec it already has, the
+-- plugin does nothing, and told a different one under an open Bluetooth
+-- stream it reopens that stream itself.
+function watchCodec (dev, card, elapsed)
+  codec_token = codec_token + 1
+  local mine = codec_token
+  local delay = elapsed < CODEC_FAST_FOR_MS and CODEC_POLL_MS or CODEC_SLOW_MS
+
+  Core.timeout_add (delay, function ()
+    -- A newer round, or the call is over: this one has nothing to do.
+    if mine ~= codec_token or not in_bt_call then
+      return false
+    end
+
+    local ok, err = pcall (function ()
+      local wbs, from = codecOfNodes (card)
+      if wbs and wbs ~= announced_wbs then
+        log:info ("bluetooth call: the link runs " .. tostring (from) ..
+                  " - telling the phone bt_wbs=" .. wbs ..
+                  (announced_wbs and " instead of " .. announced_wbs or ""))
+        tellCodec (dev, wbs)
+      end
+    end)
+    if not ok then
+      -- Stop looking rather than take WirePlumber down with it. The call
+      -- keeps whatever it was told at the start.
+      log:warning ("bluetooth call: watching the codec failed - " .. tostring (err))
+      return false
+    end
+
+    watchCodec (dev, card, elapsed + delay)
+    return false
+  end)
 end
 
 function takeOver (dev, card)
@@ -244,15 +406,21 @@ function takeOver (dev, card)
   local prof = setBtProfile (card, "headset-head-unit")
              or setBtProfile (card, "headset-head-unit-cvsd")
   -- Before the routes: setting a route is what makes the HAL open a stream,
-  -- and the codec has to be in place by then.
-  local wbs = tellCodec (dev, prof)
+  -- and the codec should be in place by then.
+  local wbs, from = btWbs (card, prof)
+  wbs = tellCodec (dev, wbs)
   local sink = setRouteByName (dev, BT_SINK_ROUTE)
   local src  = setRouteByName (dev, BT_SOURCE_ROUTE)
 
   log:info (string.format (
       "bluetooth call: headset profile %s, codec %s, output %s, input %s",
-      prof or "NOT set", wbs and ("bt_wbs=" .. wbs) or "unknown",
+      prof or "NOT set",
+      wbs and ("bt_wbs=" .. wbs .. ", " .. tostring (from))
+           or "unknown - the HAL keeps its narrow-band default",
       sink and "set" or "NOT set", src and "set" or "NOT set"))
+
+  -- The codec is agreed when the SCO link goes up, which is after this.
+  watchCodec (dev, card, 0)
 
   if not sink then
     -- Without the output route the HAL never sends BT_SCO=on, and holding a
@@ -267,6 +435,10 @@ function enterBtCall (dev, card)
   in_bt_call = true
   took_over = false
   defends = 0
+  -- Nothing is known about this call's codec yet, and the last call's answer
+  -- is about a headset that may not even be the same one.
+  announced_wbs = nil
+  codec_token = codec_token + 1
   waitForQuiet (dev, card)
 end
 
@@ -293,6 +465,7 @@ end
 
 function leaveBtCall (dev, card)
   in_bt_call = false
+  codec_token = codec_token + 1
   if saved_routes then
     for _, name in pairs (saved_routes) do
       setRouteByName (dev, name)
@@ -318,6 +491,7 @@ function giveUp (dev, card, why)
   in_bt_call = false
   gave_up = true
   defends = 0
+  codec_token = codec_token + 1
   if saved_routes then
     for _, name in pairs (saved_routes) do
       setRouteByName (dev, name)

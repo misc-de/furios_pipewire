@@ -22,13 +22,37 @@ local function droid_card(profile, routes)
   } })
 end
 
-local function bt_card()
-  return wp.object({ ["device.api"] = "bluez5" }, { params = {
+-- A headset as PipeWire publishes one. The hands-free profile is called
+-- headset-head-unit whatever codec it ends up on - the codec is in the
+-- description, built as "Headset Head Unit (HSP/HFP, codec %s)" - so a test
+-- that wants a narrow-band device says so here and not in the name.
+local function bt_card(codec)
+  return wp.object({ ["device.api"] = "bluez5", ["bound-id"] = 7 }, { params = {
     EnumProfile = {
-      { name = "a2dp-sink", index = 0 },
-      { name = "headset-head-unit", index = 1 },
+      { name = "a2dp-sink", index = 0,
+        description = "High Fidelity Playback (A2DP Sink, codec SBC)" },
+      { name = "headset-head-unit", index = 1,
+        description = "Headset Head Unit (HSP/HFP, codec " ..
+                      (codec or "MSBC") .. ")" },
     },
   } })
+end
+
+-- The headset's own nodes. api.bluez5.codec on them is the codec BlueZ really
+-- negotiated, which is the only reading that can tell one headset from
+-- another - and the one that arrives late, because the codec is agreed when
+-- the SCO link goes up.
+local function bt_nodes(card, codec)
+  local out = {}
+  for _, name in ipairs { "bluez_output.9C_DF_03_BB_8D_31.1",
+                          "bluez_input.9C_DF_03_BB_8D_31.0" } do
+    table.insert(out, wp.add("node", wp.object({
+      ["device.id"] = tostring(card["bound-id"]),
+      ["node.name"] = name,
+      ["api.bluez5.codec"] = codec,
+    })))
+  end
+  return out
 end
 
 -- The automatic routing is off unless someone turns it on; every test that
@@ -104,7 +128,7 @@ T.check_equal("the phone card is routed twice - output and input", 2,
 -- all say the audio is on its way.
 local told = codecs_told()
 T.check_equal("both nodes are told the codec", 2, #told)
-T.check_equal("and the wide-band profile is reported as wide-band", "on", told[1])
+T.check_equal("and a wide-band link is reported as wide-band", "on", told[1])
 T.check_equal("for the input side too", "on", told[2])
 -- Order across the two objects: every codec call has to come before the first
 -- route, because the route is what makes the HAL open a stream and the HAL
@@ -123,6 +147,93 @@ for i, c in ipairs(wp.calls) do
 end
 T.check("the codec is told before the first route",
         first_route ~= nil and last_codec > 0 and last_codec < first_route)
+
+-- The car. Hands-free unit, HFP 1.5, SDP SupportedFeatures 0x0007 - no
+-- wide-band bit, so the link can only be CVSD, and PipeWire says so in the
+-- profile description. Read off the profile NAME instead, this announced
+-- wide-band and the call of 2026-09-18 23:02 was silent in both directions
+-- with everything else about it correct.
+setup()
+local car = wp.add("device", droid_card("voicecall"))
+wp.add("device", bt_card("CVSD"))
+droid_nodes(car)
+fire(car)
+local car_told = codecs_told()
+T.check_equal("a narrow-band car is told as narrow-band", "off", car_told[1])
+T.check_equal("for the input side too", "off", car_told[2])
+
+-- The link beats the profile: the description says what the profile stands
+-- for, the node says what BlueZ agreed. When they disagree the agreement wins.
+setup()
+local both = wp.add("device", droid_card("voicecall"))
+local both_card = wp.add("device", bt_card("CVSD"))
+bt_nodes(both_card, "msbc")
+droid_nodes(both)
+fire(both)
+T.check_equal("what the link runs beats what the profile is called", "on",
+              codecs_told()[1])
+
+-- Some builds hang the codec on the card rather than on its nodes.
+setup()
+local oncard = wp.add("device", droid_card("voicecall"))
+local oncard_card = bt_card("CVSD")
+oncard_card.properties["api.bluez5.codec"] = "msbc"
+wp.add("device", oncard_card)
+droid_nodes(oncard)
+fire(oncard)
+T.check_equal("the codec is found on the card too", "on", codecs_told()[1])
+
+-- The codec arrives late. While the profile is still switching, the nodes
+-- carry the A2DP codec and the plain profile has no description to read - so
+-- nothing is announced yet and the HAL keeps its narrow-band default. Once
+-- the link is up the next round says so, and the plugin reopens the HAL
+-- stream by itself.
+setup()
+local late = wp.add("device", droid_card("voicecall"))
+local late_card = wp.add("device", wp.object(
+  { ["device.api"] = "bluez5", ["bound-id"] = 7 },
+  { params = { EnumProfile = { { name = "headset-head-unit", index = 1 } } } }))
+local late_nodes = bt_nodes(late_card, "sbc")
+droid_nodes(late)
+fire(late)
+T.check_equal("a codec nobody can name yet is not guessed", 0, #codecs_told())
+wp.reset()
+for _, n in ipairs(late_nodes) do n.properties["api.bluez5.codec"] = "msbc" end
+wp.fire_timers()
+T.check_equal("and is announced as soon as the link says it", "on",
+              codecs_told()[1])
+T.check_equal("to both nodes", 2, #codecs_told())
+
+-- Told once, not again and again: the HAL reopens its stream on every change,
+-- so repeating the same answer would cost a gap in the call for nothing.
+wp.reset()
+wp.fire_timers()
+T.check_equal("an unchanged codec is not announced again", 0, #codecs_told())
+
+-- A codec bt_wbs has no word for - LC3-SWB is neither on nor off - is not
+-- rounded to the nearest one. The HAL keeps its default and the log says so.
+setup()
+local swb = wp.add("device", droid_card("voicecall"))
+local swb_card = wp.add("device", bt_card("LC3-SWB"))
+bt_nodes(swb_card, "lc3_swb")
+droid_nodes(swb)
+fire(swb)
+T.check_equal("a codec bt_wbs cannot express is not guessed at", 0,
+              #codecs_told())
+
+-- The call ends while the watch is armed: the next round has to stand down
+-- rather than talk to a call that is over.
+setup()
+local over = wp.add("device", droid_card("voicecall"))
+local over_card = wp.add("device", bt_card())
+bt_nodes(over_card, "cvsd")
+droid_nodes(over)
+fire(over)
+over.params.Profile = { { name = "default" } }
+fire(over)
+wp.reset()
+wp.fire_timers()
+T.check_equal("the codec watch stops when the call does", 0, #codecs_told())
 
 -- A headset whose hands-free profiles we cannot name: no codec is invented for
 -- it. The HAL then keeps its narrow-band default and says so in the log, which
@@ -178,11 +289,14 @@ T.check_equal("an event about another card is ignored", 0,
 -- The headset offers only the narrowband profile.
 setup()
 dev = wp.add("device", droid_card("voicecall"))
-wp.add("device", wp.object({ ["device.api"] = "bluez5" }, { params = {
+wp.add("device", wp.object({ ["device.api"] = "bluez5", ["bound-id"] = 7 }, { params = {
   EnumProfile = { { name = "headset-head-unit-cvsd", index = 4 } } } }))
+droid_nodes(dev)
 fire(dev)
 T.check("the narrowband profile is accepted when it is all there is",
         #wp.calls_of("set_params") >= 2)
+T.check_equal("and its name is read as narrow-band", "off",
+              codecs_told()[1] or "nothing told")
 
 -- A card with no Bluetooth SCO route: the attempt is abandoned rather than
 -- left half applied.
