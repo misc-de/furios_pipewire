@@ -16,6 +16,27 @@
 # DMNR is MediaTek's dual-microphone method against ambient noise and echo.
 # With it off, the far end hears itself - especially on speakerphone.
 #
+# There is more than one of those files
+# -------------------------------------
+# And that is why this used to change nothing at all. The parser
+# (/vendor/lib64/libaudio_param_parser-vnd.so) names three files:
+#
+#   AudioParamOptions.xml        the base
+#   AudioParamOptions_vext.xml   the vendor extension - and on this device it
+#                                is the longer one, with entries the base does
+#                                not have at all (VOW, A2DP offload, TTY)
+#   AudioParamOptions_mgvi.xml   not present here
+#
+# Laying a copy over the base alone left the three switches on "no" in the
+# vext file, which is the one a vendor extension exists to win with. So every
+# options file that is there gets its own copy and its own bind mount, and
+# "on" means all of them - a half state reports itself as off, because that is
+# what it sounds like.
+#
+# MTK_INCALL_NORMAL_DMNR is set as well where the file has it (the vext file
+# does, empty). "Handsfree" is the speakerphone; a call held to the ear runs
+# the normal path, and the switch for that one is separate.
+#
 # Why a bind mount
 # ----------------
 # /android/vendor is mounted read-only and protected by dm-verity. Tampering
@@ -23,34 +44,43 @@
 # instead lays a modified copy over the file - the partition stays untouched,
 # and a reboot clears everything away.
 #
-# It only takes effect once the HAL re-reads the file, i.e. on the next start
+# It only takes effect once the HAL re-reads the files, i.e. on the next start
 # of the audio stack (which this script takes care of).
 #
 # Remembering it across a reboot
 # ------------------------------
 # A bind mount is gone after a reboot by construction, so "set on" writes a
-# marker and the boot unit lays the file over again. Two things about where
+# marker and the boot unit lays the files over again. Two things about where
 # things live follow from that, and neither is arbitrary:
 #
 #   - the marker is /etc/..., root-owned. It decides what the system mounts at
 #     boot, so it must not be writable by the account whose audio it is.
-#   - the copy is rebuilt from the vendor original on every apply, into /run,
-#     which is tmpfs and root-owned. It used to sit in /var/lib/furios-audio,
-#     which this user can write: mounting that at boot would have let anything
-#     running as this user put its own file over a vendor one, automatically,
-#     without ever asking for a password. Rebuilding costs a sed and closes it.
+#   - the copies are rebuilt from the vendor originals on every apply, into
+#     /run, which is tmpfs and root-owned. They used to sit in
+#     /var/lib/furios-audio, which this user can write: mounting that at boot
+#     would have let anything running as that user put its own file over a
+#     vendor one, automatically, without ever asking for a password.
+#     Rebuilding costs a sed and closes it.
 set -e
 
-ORIG=/android/vendor/etc/audio_param/AudioParamOptions.xml
+PARAMDIR=${DMNR_PARAMDIR:-/android/vendor/etc/audio_param}
 RUNDIR=${DMNR_RUNDIR:-/run/furios-audio-dmnr}
-COPY="$RUNDIR/AudioParamOptions.dmnr.xml"
 MARKER=${DMNR_MARKER:-/etc/furios-audio-dmnr.persistent}
+
+# Two families, four situations. MTK_* is the switch, VIR_*_SUPPORT is the
+# same situation once more under the vendor's own name - and on this device
+# they do not agree: VIR_INCALL_NORMAL_DMNR_SUPPORT is already "yes" while
+# every other one is "no", which is exactly the shape of "a call held to the
+# ear is fine, the speakerphone echoes". Both names are set, because which of
+# them the HAL asks is not something this file can decide.
+SCHALTER='MTK_INCALL_HANDSFREE_DMNR|MTK_INCALL_NORMAL_DMNR|MTK_VOIP_HANDSFREE_DMNR|MTK_VOIP_NORMAL_DMNR|VIR_INCALL_HANDSFREE_DMNR_SUPPORT|VIR_INCALL_NORMAL_DMNR_SUPPORT|VIR_VOIP_HANDSFREE_DMNR_SUPPORT|VIR_VOIP_NORMAL_DMNR_SUPPORT'
+ZEIGEN="$SCHALTER|MTK_HANDSFREE_DMNR_SUPPORT|MTK_DUAL_MIC_SUPPORT|MTK_AUDIO_NUMBER_OF_MIC"
 
 # As root an override that moves where this reads or writes would be a way of
 # mounting anything over a vendor file at boot. The tests need them and
 # therefore run unprivileged.
 if [ "$(id -u)" -eq 0 ]; then
-    for _v in DMNR_RUNDIR DMNR_MARKER DMNR_ORIG; do
+    for _v in DMNR_PARAMDIR DMNR_RUNDIR DMNR_MARKER; do
         if [ -n "$(eval echo "\${$_v:-}")" ]; then
             echo "refusing to honour $_v as root" >&2
             exit 3
@@ -58,9 +88,72 @@ if [ "$(id -u)" -eq 0 ]; then
     done
 fi
 
+# Every options file the parser reads, in the order it names them. Missing
+# ones are not an error: _mgvi does not exist on this device, and a device
+# with only the base file is just as valid.
+dateien() {
+    local f
+    for f in "$PARAMDIR"/AudioParamOptions.xml \
+             "$PARAMDIR"/AudioParamOptions_vext.xml \
+             "$PARAMDIR"/AudioParamOptions_mgvi.xml; do
+        [ -f "$f" ] && printf '%s\n' "$f"
+    done
+    return 0
+}
+
+kopie_von() { printf '%s/%s.dmnr.xml\n' "$RUNDIR" "$(basename "$1" .xml)"; }
+
+ist_gemountet() { grep -q " $1 " /proc/mounts 2>/dev/null; }
+
+# The copies are built here and nowhere else, always from the vendor original,
+# into a root-owned directory on tmpfs. Never from a file left lying around:
+# what gets laid over a vendor file has to be something this script made.
+#
+# The value is replaced whatever it is rather than only where it reads "no":
+# the vext file carries MTK_INCALL_NORMAL_DMNR with an empty value, which is
+# off as surely as "no" is, and a file that is already right simply comes out
+# unchanged - which is how "nothing to do" is decided one line further down.
+baue_kopie() {
+    local orig="$1" copy
+    copy=$(kopie_von "$orig")
+    [ -r "$orig" ] || return 1
+    sudo mkdir -p "$RUNDIR"
+    sudo chmod 0755 "$RUNDIR"
+    sed -E 's@(<Param name="('"$SCHALTER"')" value=")[^"]*"@\1yes"@g' \
+        "$orig" | sudo tee "$copy" >/dev/null
+    if sudo cmp -s "$orig" "$copy"; then
+        sudo rm -f "$copy"
+        return 2                      # nothing to change in this one
+    fi
+    return 0
+}
+
+# True while any file still has a switch that is off. Once a copy is mounted
+# the file reads "yes" through the mount, so this is also what says whether
+# turning it on is finished.
+offen() {
+    local f
+    for f in $(dateien); do
+        grep -qE '<Param name="('"$SCHALTER"')" value="(no)?"' "$f" && return 0
+    done
+    return 1
+}
+
+gemountete() {
+    local f n=0
+    for f in $(dateien); do
+        ist_gemountet "$f" && n=$((n + 1))
+    done
+    printf '%s\n' "$n"
+}
+
 show() {
+    local f n
+    n=$(gemountete)
     # First line deliberately machine-readable - the switcher app reads it.
-    if grep -q " $ORIG " /proc/mounts 2>/dev/null; then
+    # A half state is not "on": it is what the base-file-only version of this
+    # script left behind, and it sounds exactly like off on a call.
+    if [ "$n" -gt 0 ] && ! offen; then
         printf 'state=on\n'
     else
         printf 'state=off\n'
@@ -72,46 +165,43 @@ show() {
     else
         printf 'persistent=no\n'
     fi
-    printf 'file:  %s\n' "$ORIG"
-    if mountpoint -q "$ORIG" 2>/dev/null || grep -q " $ORIG " /proc/mounts 2>/dev/null; then
-        printf 'state: modified copy is laid over it\n'
-    else
-        printf 'state: vendor original\n'
-    fi
-    printf 'current values:\n'
-    grep -oE '<Param name="(MTK_INCALL_HANDSFREE_DMNR|MTK_VOIP_HANDSFREE_DMNR|MTK_VOIP_NORMAL_DMNR|MTK_HANDSFREE_DMNR_SUPPORT|MTK_DUAL_MIC_SUPPORT)" value="[^"]*"' "$ORIG" \
-        | sed 's/<Param name="/  /; s/" value="/ = /; s/"$//'
-}
-
-# The copy is built here and nowhere else, always from the vendor original,
-# into a root-owned directory on tmpfs. Never from a file left lying around:
-# what gets laid over a vendor file has to be something this script made.
-baue_kopie() {
-    [ -r "$ORIG" ] || { echo "tuning file not readable - wrong device?" >&2; return 1; }
-    sudo mkdir -p "$RUNDIR"
-    sudo chmod 0755 "$RUNDIR"
-    sed -e 's/<Param name="MTK_INCALL_HANDSFREE_DMNR" value="no"/<Param name="MTK_INCALL_HANDSFREE_DMNR" value="yes"/' \
-        -e 's/<Param name="MTK_VOIP_HANDSFREE_DMNR" value="no"/<Param name="MTK_VOIP_HANDSFREE_DMNR" value="yes"/' \
-        -e 's/<Param name="MTK_VOIP_NORMAL_DMNR" value="no"/<Param name="MTK_VOIP_NORMAL_DMNR" value="yes"/' \
-        "$ORIG" | sudo tee "$COPY" >/dev/null
-    if sudo cmp -s "$ORIG" "$COPY"; then
-        echo "nothing to change - the switches are not set to 'no'." >&2
-        sudo rm -f "$COPY"; return 1
-    fi
+    for f in $(dateien); do
+        printf 'file:  %s\n' "$f"
+        if ist_gemountet "$f"; then
+            printf 'state: modified copy is laid over it\n'
+        else
+            printf 'state: vendor original\n'
+        fi
+        printf 'current values:\n'
+        grep -oE '<Param name="('"$ZEIGEN"')" value="[^"]*"' "$f" \
+            | sed 's/<Param name="/  /; s/" value="/ = /; s/"$//'
+    done
 }
 
 einschalten() {
-    grep -q " $ORIG " /proc/mounts 2>/dev/null && return 0   # already over it
-    baue_kopie || return 1
-    sudo mount --bind "$COPY" "$ORIG"
+    local f rc getan=0
+    for f in $(dateien); do
+        ist_gemountet "$f" && { getan=$((getan + 1)); continue; }
+        rc=0; baue_kopie "$f" || rc=$?
+        case $rc in
+        0) sudo mount --bind "$(kopie_von "$f")" "$f"; getan=$((getan + 1)) ;;
+        2) : ;;                       # already says yes - leave it alone
+        *) echo "tuning file not readable - wrong device?" >&2; return 1 ;;
+        esac
+    done
+    [ "$getan" -gt 0 ] || { echo "nothing to change - the switches are not off." >&2; return 1; }
+    return 0
 }
 
 ausschalten() {
-    if grep -q " $ORIG " /proc/mounts 2>/dev/null; then
-        sudo umount "$ORIG"
-        return 0
-    fi
-    return 1
+    local f getan=0
+    for f in $(dateien); do
+        if ist_gemountet "$f"; then
+            sudo umount "$f"
+            getan=$((getan + 1))
+        fi
+    done
+    [ "$getan" -gt 0 ]
 }
 
 case "${1:-status}" in
@@ -119,7 +209,7 @@ status) show ;;
 
 on)
     einschalten || exit 1
-    echo "Modified copy mounted. Restarting the audio stack so the HAL reads it:"
+    echo "Modified copies mounted. Restarting the audio stack so the HAL reads them:"
     audioctl restart >/dev/null 2>&1 || true
     echo
     show
@@ -137,7 +227,7 @@ set)
         printf 'on\n' | sudo tee "$MARKER" >/dev/null
         sudo chmod 0644 "$MARKER"
         audioctl restart >/dev/null 2>&1 || true
-        echo "On, and remembered - the boot unit lays it over again."
+        echo "On, and remembered - the boot unit lays them over again."
         ;;
     off)
         ausschalten || true
@@ -160,9 +250,9 @@ boot)
 
 off)
     if ausschalten; then
-        echo "Original restored."
+        echo "Originals restored."
     else
-        echo "Nothing was laid over it."
+        echo "Nothing was laid over them."
     fi
     # The marker is left alone on purpose: "off" is for now, "set off" is for
     # good. Say so, rather than let the next boot look like it undid this.

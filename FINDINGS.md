@@ -246,11 +246,76 @@ command line:
     furios-audio-dmnr off      # back to the original
     furios-audio-dmnr status
 
+### Why the switch changed nothing (18.9.)
+
+The first version laid its copy over `AudioParamOptions.xml` and nothing else.
+The parser - `/vendor/lib64/libaudio_param_parser-vnd.so` - names three files,
+and on this device two of them exist:
+
+    AudioParamOptions.xml        the base
+    AudioParamOptions_vext.xml   the vendor extension, and the longer of the
+                                 two: VOW, A2DP offload, TTY are only in here
+
+While the base said `yes` through our mount, the extension went on saying
+`no`. The switch was on in the app, on in `status`, and the HAL read the old
+value. Both files are laid over now, and a half state reports itself as `off`.
+
+The same file also holds a second family of names for the same four
+situations, and they do not agree with the first:
+
+    VIR_INCALL_NORMAL_DMNR_SUPPORT      yes
+    VIR_INCALL_HANDSFREE_DMNR_SUPPORT   no
+    VIR_VOIP_NORMAL_DMNR_SUPPORT        no
+    VIR_VOIP_HANDSFREE_DMNR_SUPPORT     no
+
+"Normal" is the call held to the ear, "handsfree" the speakerphone - so the
+device ships with the earpiece path cancelled and the speakerphone path not.
+Which of the two families the HAL asks is not decidable from the file, so both
+are set.
+
+One reading that stays open: `MTK_AUDIO_NUMBER_OF_MIC` is **1** in both files,
+while the policy configuration has a `Built-In Back Mic` and
+`MTK_DUAL_MIC_SUPPORT` is `yes`. DMNR is the *dual*-microphone method. If the
+switches turn out to change nothing audible, that number is the next thing to
+try - and it is the riskier one, because it is also what ordinary recording
+reads.
+
+And one thing DMNR cannot do, whatever it is set to: the click of the volume
+keys, a notification, anything the phone plays locally during a call is not in
+the modem's echo reference - that reference is the far end's voice. The far
+end hears local sounds because the microphone picks them up out of the room,
+and no canceller has a copy of them to subtract. Lower media volume, or hold
+the phone to the ear rather than using the speakerphone.
+
 It lays a modified copy over the file with a bind mount - the partition is
 read-only and protected by dm-verity, and is left alone - and restarts the
 audio stack (`audioctl restart`, the profile stays) so the HAL reads it. A
 reboot of the device clears everything away. **Whether it helps is untested** -
 only a real call can show that.
+
+### And it was never there after a boot (19.9.)
+
+The bind mount goes with the boot, which is what the unit is for - and the
+unit had been skipped at every single boot:
+
+    12:52:20  furios-audio-dmnr.service ... skipped, unmet condition check
+              ConditionPathExists=/android/vendor/etc/audio_param/AudioParamOptions.xml
+    12:52:20  Starting android-mount.service - mount android parts...
+    12:52:56  Finished android-mount.service
+
+A condition is checked when the unit is about to start, and this one asks
+about a path inside the vendor image - 36 seconds before that image was
+mounted. The journal line is tidy and reads like a device without the file,
+`status` went on saying `persistent=yes`, and the setting from 18.9. 18:07 was
+simply gone after the restart. `After=android-mount.service` puts the question
+after the answer; ordering only, so a device without that unit is unaffected,
+and the condition still decides whether there is anything to do.
+
+Put in place and measured on 19.9.: unit active, both files report "modified
+copy is laid over it", all four DMNR switches `yes` in both name families,
+audio stack restarted, sinks present. The hearing test in a call is still
+outstanding - and until now it would have been measuring a phone with the
+switch off.
 
 Two leads that turned out to be dead ends:
 

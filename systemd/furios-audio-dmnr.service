@@ -11,6 +11,18 @@ Documentation=file:/usr/share/doc/furios-audio-pipewire/README.md
 # with the session. Before graphical.target, therefore - afterwards the mount
 # would be in place but nothing would have read it until the next restart.
 Before=graphical.target
+# After the vendor image is there, and that is not a detail: a condition is
+# checked when the unit is about to start, and this one was being checked in
+# the same second android-mount.service BEGAN - 36 s before it finished. The
+# unit was therefore skipped at every boot, silently and with a tidy journal
+# line, while "furios-audio-dmnr status" said persistent=yes. Measured on
+# 2026-09-19: condition unmet at 12:52:20, /android/vendor mounted at 12:52:56,
+# and the setting that had been on since 18.9. was simply gone.
+#
+# Ordering only. On a device without that unit After= is satisfied trivially,
+# and the condition below still decides whether there is anything to do.
+After=android-mount.service
+
 # No hard dependency on the path: on a device without this vendor file the
 # tool exits 0 and nothing here should fail because of it.
 ConditionPathExists=/android/vendor/etc/audio_param/AudioParamOptions.xml

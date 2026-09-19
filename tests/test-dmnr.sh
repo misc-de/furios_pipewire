@@ -20,9 +20,12 @@ UNIT=$ROOT/systemd/furios-audio-dmnr.service
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# A stand-in for the vendor file, with the switches in the state the device
-# ships them in.
-cat > "$TMP/orig.xml" <<'XML'
+# Stand-ins for the vendor's tuning files, with the switches in the state the
+# device ships them in - and two of them, because that is the whole point: the
+# parser reads a base file and a vendor extension, and a copy laid over the
+# base alone leaves the extension saying "no".
+mkdir -p "$TMP/param"
+cat > "$TMP/param/AudioParamOptions.xml" <<'XML'
 <Params>
 <Param name="MTK_DUAL_MIC_SUPPORT" value="yes"/>
 <Param name="MTK_HANDSFREE_DMNR_SUPPORT" value="yes"/>
@@ -31,7 +34,17 @@ cat > "$TMP/orig.xml" <<'XML'
 <Param name="MTK_VOIP_NORMAL_DMNR" value="no"/>
 </Params>
 XML
-sed "s|^ORIG=.*|ORIG=$TMP/orig.xml|" "$TOOL" > "$TMP/dmnr.sh"
+cat > "$TMP/param/AudioParamOptions_vext.xml" <<'XML'
+<Params>
+<Param name="MTK_DUAL_MIC_SUPPORT" value="yes"/>
+<Param name="MTK_HANDSFREE_DMNR_SUPPORT" value="yes"/>
+<Param name="MTK_INCALL_HANDSFREE_DMNR" value="no"/>
+<Param name="MTK_VOIP_HANDSFREE_DMNR" value="no"/>
+<Param name="MTK_VOIP_NORMAL_DMNR" value="no"/>
+<Param name="MTK_INCALL_NORMAL_DMNR" value=""/>
+</Params>
+XML
+sed "s|^PARAMDIR=.*|PARAMDIR=$TMP/param|" "$TOOL" > "$TMP/dmnr.sh"
 
 lauf() { DMNR_RUNDIR="$TMP/run" DMNR_MARKER="$TMP/marker" bash "$TMP/dmnr.sh" "$@" 2>&1; }
 
@@ -46,8 +59,20 @@ check "nothing remembered to begin with" "persistent=no" "$(lauf status | sed -n
 # unit on a phone where nobody ever asked for echo suppression.
 lauf boot >/dev/null 2>&1
 check "boot without a marker does nothing, successfully" "0" "$?"
-check "and lays nothing over the file" "no" \
-    "$([ -e "$TMP/run/AudioParamOptions.dmnr.xml" ] && echo yes || echo no)"
+check "and lays nothing over the files" "no" \
+    "$(ls "$TMP/run" 2>/dev/null | grep -q . && echo yes || echo no)"
+
+# The regression this file exists for: the first version of the tool changed
+# AudioParamOptions.xml and nothing else, the HAL went on reading "no" out of
+# AudioParamOptions_vext.xml, and the switch in the app did nothing that could
+# be heard. Both files have to be seen, and a half state has to say off.
+check "every options file the parser reads is seen" "2" \
+    "$(lauf status | grep -c '^file:')"
+check "the vendor extension is one of them" "1" \
+    "$(lauf status | grep -c 'AudioParamOptions_vext.xml')"
+check "with nothing laid over, that is off" "state=off" "$(lauf status | sed -n 1p)"
+check "the switch for a call held to the ear is set too" "yes" \
+    "$(grep -q 'MTK_INCALL_NORMAL_DMNR' "$TOOL" && echo yes || echo no)"
 
 touch "$TMP/marker"
 check "a marker is seen" "persistent=yes" "$(lauf status | sed -n 2p)"
@@ -86,6 +111,19 @@ check "it runs before the session starts the audio stack" "1" \
     "$(grep -c '^Before=graphical.target' "$UNIT")"
 check "it does nothing on a device without the vendor file" "1" \
     "$(grep -c '^ConditionPathExists=' "$UNIT")"
+
+# The condition and the mount, in that order - and the order is the whole
+# point. A ConditionPathExists is checked when the unit is about to start, so
+# without this the unit was skipped at every boot: the path it asks about is
+# inside the vendor image, which android-mount.service was still mounting.
+# Measured 2026-09-19: unmet at 12:52:20, mounted at 12:52:56, the setting
+# gone while status still said persistent=yes.
+check "it waits for the vendor image before asking whether the file is there" "1" \
+    "$(grep -c '^After=android-mount.service' "$UNIT")"
+# ... and the condition is about a path under that very mount, which is what
+# ties the two lines together.
+check "and the path it asks about is under that mount" "yes" \
+    "$(grep '^ConditionPathExists=' "$UNIT" | grep -q '=/android/' && echo yes || echo no)"
 if command -v systemd-analyze >/dev/null 2>&1; then
     check "and systemd accepts every key in it" "" \
         "$(systemd-analyze verify "$UNIT" 2>&1 | grep -iE 'unknown key|unknown lvalue' | head -1)"
