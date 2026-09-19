@@ -997,11 +997,20 @@ run_audioctl() {
     # AUDIOCTL_ETCU - and "migrate" then reports whatever leftovers the machine
     # running the suite happens to have, which is a verdict about the phone and
     # not about the code.
+    # The plugin and PipeWire's modules are stubbed for the same reason the
+    # paths above are: preflight refuses pw-hal without them, and a dispatcher
+    # that only gets past it on a phone with the real installation is a
+    # verdict about the machine again.
     AUDIOCTL_STATE_DIR="$STUBDIR/state" AUDIOCTL_ETCU="$STUBDIR/etc" \
         AUDIOCTL_LEGACY_ETCU="$STUBDIR/legacy-etc" \
         AUDIOCTL_LEGACY_WP="$STUBDIR/legacy-wp" \
+        AUDIOCTL_PLUGIN_DIR="$STUBDIR/plugin" \
+        AUDIOCTL_PW_MODULE_DIR="$STUBDIR/plugin" \
         VERIFY_TRIES=1 BT_HOLD_INTERVAL=0 bash ${AUDIOCTL_TRACE:+-x} "$HERE/../audioctl" "$@" 2>&1
 }
+mkdir -p "$STUBDIR/plugin"
+: > "$STUBDIR/plugin/libspa-droid.so"
+: > "$STUBDIR/plugin/libpipewire-module-pulse-tunnel.so"
 # Earlier tests wrote profiles into this directory; the dispatcher reads them,
 # so it starts clean.
 rm -rf "$STUBDIR/state" "$STUBDIR/legacy-etc" "$STUBDIR/legacy-wp"
