@@ -161,10 +161,19 @@ with_audioctl() {
       ETCU="$STUBDIR/etc"; DROPIN="$ETCU/pipewire.service.d/50-furios-audio.conf"
       WPUSER="$STUBDIR/wpuser"; WPOFF="$WPUSER/99-furios-droid-off.conf"
       LOCAL="$STUBDIR/local"
+      # The built plugin and PipeWire's modules, as a directory this suite
+      # owns. Without them preflight refuses the pw-hal profile, and every
+      # switch test below would only ever pass on a phone that happens to
+      # have the real ones installed - which is how they failed on a runner
+      # while passing here.
+      PLUGIN_DIR="$STUBDIR/plugin"; PWMODULE_DIR="$PLUGIN_DIR"
       export AUDIOCTL_ETCU="$ETCU" AUDIOCTL_DROPIN="$DROPIN" \
-             AUDIOCTL_WPCONF_DIR="$WPUSER"
-      mkdir -p "$STATE_DIR" "$ETCU" "$WPUSER" "$LOCAL"
+             AUDIOCTL_WPCONF_DIR="$WPUSER" \
+             AUDIOCTL_PLUGIN_DIR="$PLUGIN_DIR" AUDIOCTL_PW_MODULE_DIR="$PLUGIN_DIR"
+      mkdir -p "$STATE_DIR" "$ETCU" "$WPUSER" "$LOCAL" "$PLUGIN_DIR"
       : > "$LOCAL/pipewire-hal.conf"
+      : > "$PLUGIN_DIR/libspa-droid.so"
+      : > "$PLUGIN_DIR/libpipewire-module-pulse-tunnel.so"
       eval "$snippet" )
 }
 
@@ -537,6 +546,11 @@ check "and a card that is not there is refused" "1" \
     "$(with_audioctl 'bt_headset_profile "" headset >/dev/null 2>&1; echo $?')"
 
 # --- switching, end to end -------------------------------------------------
+#
+# preflight wants a wireplumber before it lets pw-hal through. On the phone
+# there is one; on a runner there is not, and without this stub every check
+# below was answering a question about the machine rather than about audioctl.
+stub wireplumber 0 ""
 #
 # switch_to is where the safety net actually fires: it applies a profile, waits
 # for a sink, and rolls back to standard if none appears. Both endings matter.

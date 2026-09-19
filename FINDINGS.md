@@ -1260,6 +1260,36 @@ callaudiod a fresh view of the card: never during a call, stop it when its card
 is gone, and start it again with a method that asks nothing of it - starting it
 with `SelectMode` blocks for the same 25 seconds.
 
+### Nine checks that were measuring the phone (19.9.)
+
+The suite runs on every push since 16.9., and it went red on the first run and
+stayed there. Not because of what it found - because of where it looked.
+
+Nine checks in `test-audioctl.sh` only ever passed on a device that has the
+real installation. `preflight` refuses `pw-hal` without
+`/usr/lib/.../spa-0.2/droid/libspa-droid.so` and without a `wireplumber` on
+the `PATH`, and both paths were literals, so every switch, toggle and dry-run
+check died in `preflight` on a runner. Worse, `plugin_version_check` read the
+same literal while its test set `PLUGIN_DIR="$STUBDIR"` and believed it had
+stubbed something: on the phone the check passed by reading the phone's own
+plugin, and on a runner with no plugin it passed the early return and failed.
+A check that measures the machine it runs on is not a check.
+
+`PLUGIN_DIR` and `PWMODULE_DIR` are overridable now, like `ETCU` before them
+(and refused as root, for the same reason), the suite points them at its own
+directory and puts a `wireplumber` on the `PATH`.
+
+The three `TheAppSpeaksOurWords` cases had the opposite problem: they read
+`/usr/local/bin/misc-de`, which since 15.9. is a three-line launcher with the
+app in `miscde/` beside it. They failed here and were skipped on the runner,
+so nobody was told. They read the package now, and the label check asks only
+about `Name: value` status lines - the page also reads batman's `BTSAVE=` key,
+which is another repository's word.
+
+Measured both ways afterwards: the whole suite is green on the phone, and
+green again with `pactl`, `pw-cli`, `wireplumber` and `systemctl` taken off
+the `PATH`, which is the runner.
+
 `audioctl` is measured with bash's own tracing: `PS4` carries `LINENO`, `set -x`
 prints it, and what is left is arithmetic. It runs against a `PATH` where
 `pactl`, `systemctl` and `sudo` are scripts that answer whatever the case under

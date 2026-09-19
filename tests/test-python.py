@@ -143,16 +143,29 @@ class TheAppSpeaksOurWords(unittest.TestCase):
     The app is in furios_app now, so this reads the installed one. Not
     installed means skipped with a reason - an empty comparison would agree
     with anything.
+
+    What is installed is a launcher of three lines plus a package beside it;
+    reading only the launcher found none of the app's words and failed every
+    check here from the day the window was split up (15.9.). So the package is
+    what is read, and the launcher only if that is all there is.
     """
 
     APP = "/usr/local/bin/misc-de"
+    PACKAGES = ("/usr/local/lib/misc-de/miscde", "/usr/lib/misc-de/miscde")
 
     @classmethod
     def setUpClass(cls):
+        parts = []
+        for base in cls.PACKAGES:
+            found = sorted(Path(base).rglob("*.py")) if Path(base).is_dir() else []
+            if found:
+                parts.extend(f.read_text() for f in found)
+                break
         try:
-            cls.app = Path(cls.APP).read_text()
+            parts.append(Path(cls.APP).read_text())
         except OSError:
-            cls.app = None
+            pass
+        cls.app = "\n".join(parts) if parts else None
         cls.dmnr = (ROOT / "experiments" / "dmnr-handsfree.sh").read_text()
 
     def installed(self):
@@ -174,7 +187,11 @@ class TheAppSpeaksOurWords(unittest.TestCase):
     def test_every_label_the_app_waits_for_is_one_audioctl_prints(self):
         app = self.installed()
         audioctl = (ROOT / "audioctl").read_text()
-        labels = re.findall(r'line\.startswith\("([^"]+)"\)', app)
+        # Only the labels of a status LINE, which audioctl writes as
+        # "Name: value". The page reads other things by prefix too - batman's
+        # config key BTSAVE= among them - and those belong to another helper
+        # in another repository, so they are not audioctl's to print.
+        labels = re.findall(r'line\.startswith\("([^"]+:)"\)', app)
         self.assertGreaterEqual(len(labels), 4)
         for label in labels:
             with self.subTest(label=label):

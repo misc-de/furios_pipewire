@@ -65,6 +65,17 @@ first_existing() {
 LOCAL=$(dirname "$(first_existing /usr/local/share/furios-audio/pipewire-hal.conf \
                                   /usr/share/furios-audio/pipewire-hal.conf)")
 
+# Where the built plugin and PipeWire's own modules live.
+#
+# Overridable for the same reason ETCU is, and for a reason that had already
+# happened: plugin_version_check read this path as a literal, so the test that
+# claims to check it read the PHONE's installation instead of the stub it had
+# just set up. It passed here and failed on a runner that has no plugin at
+# all - the check was measuring the machine, not the code. Same shape as the
+# test that read /etc while believing it read the stub.
+PLUGIN_DIR=${AUDIOCTL_PLUGIN_DIR:-/usr/lib/aarch64-linux-gnu/spa-0.2/droid}
+PWMODULE_DIR=${AUDIOCTL_PW_MODULE_DIR:-/usr/lib/aarch64-linux-gnu/pipewire-0.3}
+
 PROFILES="standard pw-tunnel pw-hal"
 DRY=0
 # Set by the "boot" command: write the configuration, start nothing. See uctl().
@@ -358,7 +369,7 @@ pulse_owner() {
 # breaks it, pw-hal would go silent without a word - the auto-revert catches
 # that, but a warning beforehand saves the search.
 plugin_version_check() {
-    local dir=/usr/lib/aarch64-linux-gnu/spa-0.2/droid built now
+    local dir=$PLUGIN_DIR built now
     [ -r "$dir/built-against" ] || return 0
     built=$(cat "$dir/built-against")
     now=$(pkg-config --modversion libpipewire-0.3 2>/dev/null)
@@ -435,14 +446,14 @@ preflight() {
     case "$1" in
     standard) : ;;
     pw-tunnel)
-        [ -e /usr/lib/aarch64-linux-gnu/pipewire-0.3/libpipewire-module-pulse-tunnel.so ] \
+        [ -e "$PWMODULE_DIR/libpipewire-module-pulse-tunnel.so" ] \
             || die "libpipewire-module-pulse-tunnel.so is missing."
         [ -e "$LOCAL/tunnel.conf" ] || die "$LOCAL/tunnel.conf is missing."
         ;;
     pw-hal)
         plugin_version_check
         aac_version_check
-        [ -e /usr/lib/aarch64-linux-gnu/spa-0.2/droid/libspa-droid.so ] \
+        [ -e "$PLUGIN_DIR/libspa-droid.so" ] \
             || die "SPA droid plugin not built yet - the pw-hal profile stays locked until then."
         command -v wireplumber >/dev/null \
             || die "wireplumber is not installed (apt install wireplumber)."
@@ -1371,7 +1382,8 @@ fi
 # else in here tests whether it can write rather than testing id -u.
 if [ "$(id -u)" -eq 0 ]; then
     for _v in AUDIOCTL_ETCU AUDIOCTL_LIB AUDIOCTL_STATE_DIR AUDIOCTL_WPCONF_DIR \
-              AUDIOCTL_LEGACY_ETCU AUDIOCTL_LEGACY_WP; do
+              AUDIOCTL_LEGACY_ETCU AUDIOCTL_LEGACY_WP \
+              AUDIOCTL_PLUGIN_DIR AUDIOCTL_PW_MODULE_DIR; do
         if [ -n "${!_v:-}" ]; then
             die "refusing to honour $_v as root - that would make this a way of deleting arbitrary files."
         fi
