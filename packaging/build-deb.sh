@@ -90,6 +90,15 @@ install -Dm644 wireplumber/51-bluez-ofono.conf "$STAGE/usr/share/wireplumber/wir
 install -Dm644 systemd/ofono.service.d/30-furios-audio-hfp.conf \
     "$STAGE/usr/lib/systemd/system/ofono.service.d/30-furios-audio-hfp.conf"
 
+# And one for WirePlumber: the +CLCC call index a car kit needs - see
+# tools/furios-audio-bluez5-fix.py. It names the system plugin directory, so
+# the architecture goes in here.
+install -Dm755 tools/furios-audio-bluez5-fix.py "$STAGE/usr/bin/furios-audio-bluez5-fix"
+mkdir -p "$STAGE/usr/lib/systemd/user/wireplumber.service.d"
+sed "s|@TRIPLET@|$TRIPLET|" systemd/wireplumber.service.d/furios-bluez5-fix.conf \
+    > "$STAGE/usr/lib/systemd/user/wireplumber.service.d/furios-bluez5-fix.conf"
+chmod 644 "$STAGE/usr/lib/systemd/user/wireplumber.service.d/furios-bluez5-fix.conf"
+
 install -Dm644 furios-pw-tunnel.service       "$STAGE/usr/lib/systemd/user/furios-pw-tunnel.service"
 install -Dm644 furios-audio-apply.service     "$STAGE/usr/lib/systemd/user/furios-audio-apply.service"
 install -Dm644 furios-audio-verify.service    "$STAGE/usr/lib/systemd/user/furios-audio-verify.service"

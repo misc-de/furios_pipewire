@@ -56,6 +56,20 @@ sudo mkdir -p /etc/systemd/system/ofono.service.d
 sudo install -m644 systemd/ofono.service.d/30-furios-audio-hfp.conf \
     /etc/systemd/system/ofono.service.d/30-furios-audio-hfp.conf
 sudo systemctl daemon-reload
+
+# PipeWire sends every call to a car kit as call 0, and a strict car drops it.
+# The helper writes a fixed copy of libspa-bluez5.so to the runtime directory
+# before WirePlumber starts; the drop-in puts that copy in front of the system
+# plugins - see tools/furios-audio-bluez5-fix.py. /etc for the drop-in, as
+# above: systemd never reads one under /usr/local.
+TRIPLET=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo aarch64-linux-gnu)
+sudo install -m755 tools/furios-audio-bluez5-fix.py /usr/local/bin/furios-audio-bluez5-fix
+sudo mkdir -p /etc/systemd/user/wireplumber.service.d
+sed -e "s|^ExecStartPre=-/usr/bin/|ExecStartPre=-/usr/local/bin/|" -e "s|@TRIPLET@|$TRIPLET|" \
+    systemd/wireplumber.service.d/furios-bluez5-fix.conf \
+    | sudo tee /etc/systemd/user/wireplumber.service.d/furios-bluez5-fix.conf >/dev/null
+sudo chmod 644 /etc/systemd/user/wireplumber.service.d/furios-bluez5-fix.conf
+systemctl --user daemon-reload
 # Not restarted here. ofono restarting takes the modem down for a moment, and
 # on this device it has come back Powered but Online: false - no network and
 # nothing on screen to say why. The drop-in takes effect at the next boot, or

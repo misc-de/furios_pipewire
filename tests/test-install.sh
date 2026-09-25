@@ -68,6 +68,17 @@ for lua in wireplumber/*.lua wireplumber/*.conf; do
 done
 
 echo
+echo "-- the WirePlumber drop-in and the helper it starts"
+for name in furios-bluez5-fix.conf furios-audio-bluez5-fix; do
+    check "install-hal.sh installs $name" yes "$(enthalten install-hal.sh "$name")"
+    check "uninstall.sh removes $name"    yes "$(enthalten uninstall.sh "$name")"
+    check "the package ships $name"       yes "$(enthalten packaging/build-deb.sh "$name")"
+done
+check "both fill in the architecture" yes \
+    "$(grep -q '@TRIPLET@' install-hal.sh && grep -q '@TRIPLET@' packaging/build-deb.sh \
+       && echo yes || echo no)"
+
+echo
 echo "-- the one entry point does the whole job"
 check "install.sh builds the plugin" yes "$(enthalten install.sh build-plugin.sh)"
 check "install.sh installs the HAL side" yes "$(enthalten install.sh install-hal.sh)"

@@ -18,7 +18,9 @@ import subprocess as subprocess_real
 import tempfile
 import sys
 import types
+import glob
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -48,6 +50,7 @@ sco = load(ROOT / "tools" / "furios-audio-sco-hold.py", "sco_hold")
 btmic = load(ROOT / "tools" / "furios-audio-bt-mic.py", "bt_mic")
 reconnect = load(ROOT / "tools" / "furios-audio-bt-reconnect.py",
                  "bt_reconnect")
+bluez5fix = load(ROOT / "tools" / "furios-audio-bluez5-fix.py", "bluez5_fix")
 hands_free_sink_real = sco.hands_free_sink
 os_real = sco.os
 
@@ -2903,6 +2906,105 @@ class BluetoothReconnect(unittest.TestCase):
             system, "/org/freedesktop/login1/session/_31"))
         self.assertTrue(reconnect.session_in_use(
             ReconnectBus(), "/org/freedesktop/login1/session/_31"))
+
+
+class Bluez5CallIndex(unittest.TestCase):
+    """The copy of libspa-bluez5.so with +CLCC call index 1.
+
+    The rule under test is the safety one: a copy only when the instruction
+    sequence is there exactly once, and never a stale copy from an older
+    library - WirePlumber loads whatever sits in front in SPA_PLUGIN_DIR."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.dir.name)
+        self.lib = self.root / "usr/lib/triplet/spa-0.2/bluez5/libspa-bluez5.so"
+        self.lib.parent.mkdir(parents=True)
+        self.runtime = self.root / "run"
+        self.runtime.mkdir()
+        self.target = Path(bluez5fix.overlay_path(str(self.runtime)))
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def fix(self, data):
+        self.lib.write_bytes(data)
+        with redirect_stderr(io.StringIO()) as err:
+            rc = bluez5fix.run(system_glob=str(self.root / "usr/lib/*/spa-0.2/"
+                                               "bluez5/libspa-bluez5.so"),
+                               runtime_dir=str(self.runtime))
+        self.assertEqual(rc, 0)
+        return err.getvalue()
+
+    def test_exactly_one_instruction_changes(self):
+        before, after = b"\x01" * 64, b"\x02" * 64
+        self.fix(before + bluez5fix.SIGNATURE + after)
+        got = self.target.read_bytes()
+        at = 64 + bluez5fix.OFFSET_IN_SIGNATURE
+        self.assertEqual(got[at:at + 4], bluez5fix.INDEX_ONE)
+        self.assertEqual(got[:at] + got[at + 4:],
+                         (before + bluez5fix.SIGNATURE + after)[:at]
+                         + (before + bluez5fix.SIGNATURE + after)[at + 4:])
+
+    def test_the_new_instruction_is_mov_w2_1(self):
+        # movz w2, #1: sf=0 opc=10 100101 hw=00 imm16=1 rd=2
+        word = (0b0_10_100101_00 << 21) | (1 << 5) | 2
+        self.assertEqual(bluez5fix.INDEX_ONE, word.to_bytes(4, "little"))
+
+    def test_the_patched_word_is_the_index_load(self):
+        # ldr w2, [x20, #16]: 32-bit LDR (unsigned offset), imm12 = 16/4
+        word = 0xB9400000 | (4 << 10) | (20 << 5) | 2
+        self.assertEqual(bluez5fix.LOAD_INDEX, word.to_bytes(4, "little"))
+        at = bluez5fix.OFFSET_IN_SIGNATURE
+        self.assertEqual(bluez5fix.SIGNATURE[at:at + 4], bluez5fix.LOAD_INDEX)
+
+    def test_unknown_code_gets_no_copy(self):
+        said = self.fix(b"\x00" * 256)
+        self.assertFalse(self.target.exists())
+        self.assertIn("loads the original", said)
+
+    def test_code_that_appears_twice_gets_no_copy(self):
+        self.fix(bluez5fix.SIGNATURE + b"\x00" * 8 + bluez5fix.SIGNATURE)
+        self.assertFalse(self.target.exists())
+
+    def test_a_stale_copy_goes_when_the_library_no_longer_fits(self):
+        self.fix(bluez5fix.SIGNATURE)
+        self.assertTrue(self.target.exists())
+        self.fix(b"\x00" * 256)     # a PipeWire update changed the code
+        self.assertFalse(self.target.exists())
+
+    def test_no_runtime_dir_writes_nothing(self):
+        with redirect_stderr(io.StringIO()), \
+                unittest.mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(bluez5fix.run(system_glob="/nonexistent/*"), 0)
+
+    def test_no_library_writes_nothing(self):
+        with redirect_stderr(io.StringIO()):
+            bluez5fix.run(system_glob=str(self.root / "nothing/*.so"),
+                          runtime_dir=str(self.runtime))
+        self.assertFalse(self.target.exists())
+
+    def test_the_real_library_matches_when_it_is_the_one_this_was_made_for(self):
+        real = glob.glob(bluez5fix.SYSTEM_GLOB)
+        if len(real) != 1:
+            self.skipTest("no libspa-bluez5.so here")
+        data = Path(real[0]).read_bytes()
+        patched, why = bluez5fix.patch(data)
+        if patched is None:
+            self.skipTest(f"installed PipeWire differs: {why}")
+        self.assertEqual(len(patched), len(data))
+        self.assertEqual(sum(a != b for a, b in zip(patched, data)), 4)
+
+    def test_the_drop_in_keeps_the_system_directory_behind_the_copy(self):
+        conf = (ROOT / "systemd/wireplumber.service.d/"
+                "furios-bluez5-fix.conf").read_text()
+        env = [l for l in conf.splitlines()
+               if l.startswith("Environment=SPA_PLUGIN_DIR=")]
+        self.assertEqual(len(env), 1)
+        dirs = env[0].split("=", 2)[2].split(":")
+        self.assertEqual(dirs, ["%t/furios-audio/spa-0.2",
+                                "/usr/lib/@TRIPLET@/spa-0.2"])
+        self.assertIn("ExecStartPre=-/usr/bin/furios-audio-bluez5-fix", conf)
 
 if __name__ == "__main__":
     # Built by hand rather than through unittest.main(), which looks for tests

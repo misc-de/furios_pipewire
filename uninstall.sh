@@ -25,6 +25,8 @@ sudo rm -f /usr/local/bin/audioctl \
            /usr/local/bin/furios-audio-sco-hold \
            /usr/local/bin/furios-audio-bt-mic \
            /usr/local/bin/furios-audio-bt-reconnect \
+           /usr/local/bin/furios-audio-bluez5-fix \
+           /etc/systemd/user/wireplumber.service.d/furios-bluez5-fix.conf \
            /etc/systemd/user/furios-pw-tunnel.service \
            /etc/systemd/user/furios-audio-apply.service \
            /etc/systemd/user/furios-audio-verify.service \
@@ -37,6 +39,7 @@ sudo rm -f /usr/local/bin/audioctl \
 sudo rm -rf /usr/local/share/furios-audio /var/lib/furios-audio
 sudo rm -rf /usr/lib/aarch64-linux-gnu/spa-0.2/droid
 sudo rmdir /etc/systemd/user/pipewire.service.d 2>/dev/null || true
+sudo rmdir /etc/systemd/user/wireplumber.service.d 2>/dev/null || true
 # switcher app
 # Both names: the app was called furios-audio-switch until it grew a second
 # page, and an uninstall that only knows the new name leaves the old launcher
