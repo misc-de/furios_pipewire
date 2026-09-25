@@ -615,8 +615,28 @@ boot_check() {
 # more ("No suitable card found") and feedbackd fails with "Invalid state": no
 # ringtone, only vibration. Killing them is enough, D-Bus starts both again on
 # the next call.
+#
+# Not before the card is there, though. Killed straight after the switch,
+# callaudiod came back through D-Bus before WirePlumber had built the phone
+# card, logged "No suitable card found, stopping here..." and ran on without
+# one (2026-09-25 18:14:45) - alive, and deaf to every call. So this waits
+# for a card with a call profile first. If none turns up it restarts them
+# anyway, as it always did: a profile whose card is named differently must
+# not lose its ringtone to this.
+wait_for_call_card() {
+    local i=0 tries=${CALL_CARD_TRIES:-20}
+    while [ "$i" -lt "$tries" ]; do
+        pactl list cards 2>/dev/null \
+            | grep -qiE '^[[:space:]]+[a-z0-9_-]*voice[a-z0-9_-]*:' && return 0
+        i=$((i+1)); sleep 0.5
+    done
+    return 1
+}
+
 restart_audio_clients() {
     local restarted=""
+    [ "$DRY" = 1 ] || wait_for_call_card \
+        || info "no card with a call profile yet - restarting callaudiod anyway"
     pkill -x callaudiod 2>/dev/null && restarted="callaudiod"
     pkill -x feedbackd  2>/dev/null && restarted="${restarted:+$restarted, }feedbackd"
     [ -n "$restarted" ] && info "restarted: $restarted (D-Bus activates them on demand)"

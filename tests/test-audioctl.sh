@@ -155,6 +155,7 @@ with_audioctl() {
     ( set +u
       BT_HOLD_INTERVAL=0
       VERIFY_TRIES=1
+      CALL_CARD_TRIES=1
       CALLAUDIO_WARMUP=0
       AUDIOCTL_LIB=1 . "$HERE/../audioctl"
       STATE_DIR="$STUBDIR/state"; STICKY="$STATE_DIR/profile"; TRY="$STATE_DIR/profile.try"
@@ -255,11 +256,36 @@ check "an unknown profile is refused by name" "yes" \
 # callaudiod and feedbackd hold a connection to the audio server; after a
 # switch they find no card and the ringtone stays silent.
 stub pkill 0 ""
+# The phone card is there, as it is after every switch that works; what
+# happens without one is checked further down.
+stub pactl 0 "Card #61
+	Name: droid
+		voicecall: Voice Call (sinks: 1, sources: 1, priority: 50, available: yes)"
 check "restarting the clients reports what it killed" "yes" \
     "$(with_audioctl 'restart_audio_clients | grep -q callaudiod && echo yes || echo no')"
 stub pkill 1 ""
 check "and says nothing when there was nothing to kill" "" \
     "$(with_audioctl 'restart_audio_clients')"
+
+# callaudiod must not be restarted before the phone card is there: started
+# early it finds no card and runs on without one (2026-09-25 18:14:45).
+stub pactl 0 "Card #61
+	Name: droid
+	Profiles:
+		default: Playback and Capture (sinks: 1, sources: 1, priority: 100, available: yes)
+		voicecall: Voice Call (sinks: 1, sources: 1, priority: 50, available: yes)"
+check "a card with a call profile is seen" "yes" \
+    "$(with_audioctl 'wait_for_call_card && echo yes || echo no')"
+check "and then it restarts without a word about waiting" "no" \
+    "$(says 'restart_audio_clients' 'no card with a call profile')"
+stub pactl 0 "Card #81
+	Name: bluez_card.F4_9D_8A_7C_5C_66
+	Profiles:
+		a2dp-sink: High Fidelity Playback (A2DP Sink, codec AAC) (sinks: 1, sources: 1, priority: 133, available: yes)"
+check "a headset alone is not a card callaudiod can use" "no" \
+    "$(with_audioctl 'wait_for_call_card && echo yes || echo no')"
+check "without one it says so, and still restarts" "yes" \
+    "$(says 'restart_audio_clients' 'restarting callaudiod anyway')"
 
 # Killing callaudiod is not enough: the call that starts it again must not be
 # SelectMode, or it blocks for 25 seconds and the first call after a switch has
