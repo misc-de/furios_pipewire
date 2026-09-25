@@ -113,6 +113,10 @@ took_over = false
 announced_wbs = nil
 codec_token = 0
 
+-- The hands-free profile the call was put on, so the hook below knows which
+-- one to keep.
+call_profile = nil
+
 -- Off unless someone turned it on. An unknown setting, an older WirePlumber,
 -- anything unexpected: all of that has to come out as "leave the call alone".
 function autoRoutingEnabled ()
@@ -405,6 +409,7 @@ function takeOver (dev, card)
   took_over = true
   local prof = setBtProfile (card, "headset-head-unit")
              or setBtProfile (card, "headset-head-unit-cvsd")
+  call_profile = prof
   -- Before the routes: setting a route is what makes the HAL open a stream,
   -- and the codec should be in place by then.
   local wbs, from = btWbs (card, prof)
@@ -599,3 +604,63 @@ bluetooth_call_hook = SimpleEventHook {
 }
 
 bluetooth_call_hook:register ()
+
+-- Keep the headset in hands-free for the length of the call.
+--
+-- WirePlumber picks a profile afresh whenever a card's list of profiles
+-- changes (device/select-profile), and what it picks is the stored one or the
+-- best one - for a headset that is A2DP, priority 133 against 3. The list
+-- changes when music was playing just before the call: the A2DP transport is
+-- released as the profile goes to hands-free, the set of connected profiles
+-- moves, and 330 ms after takeOver WirePlumber put the card straight back on
+-- a2dp-sink. Measured 2026-09-25 18:08:20 with spa.bluez5 at debug level:
+-- "setting profile 2 codec:4 save:0". furios-audio-sco-hold then held its
+-- stream of zeroes on the A2DP sink instead of the hands-free one, no SCO
+-- link ever came up (hcitool con: ACL only, no eSCO), and three calls in a
+-- row had no sound and no microphone. The one call that worked that day had
+-- no music before it - nothing was released, nothing was re-picked.
+--
+-- So while a call is on the headset, the answer to "which profile" is the one
+-- the call is on. This runs after every hook that makes a choice and before
+-- the one that applies it; outside a call it does nothing at all.
+keep_call_profile_hook = SimpleEventHook {
+  name = "device/furios-keep-call-profile",
+  after = { "device/find-calling-profile", "device/find-stored-profile",
+            "device/find-preferred-profile", "device/find-best-profile" },
+  before = "device/apply-profile",
+  interests = {
+    EventInterest {
+      Constraint { "event.type", "=", "select-profile" },
+    },
+  },
+  execute = function (event)
+    local ok, err = pcall (function ()
+      if not in_bt_call or not took_over or call_profile == nil then
+        return
+      end
+      local card = event:get_subject ()
+      if card.properties["device.api"] ~= "bluez5" then
+        return
+      end
+      for p in card:iterate_params ("EnumProfile") do
+        local profile = cutils.parseParam (p, "EnumProfile")
+        if profile and profile.name == call_profile then
+          local picked = event:get_data ("selected-profile")
+          if picked == nil or picked.name ~= call_profile then
+            log:info ("bluetooth call: keeping the headset on " .. call_profile ..
+                      " instead of " .. tostring (picked and picked.name))
+          end
+          event:set_data ("selected-profile", profile)
+          return
+        end
+      end
+    end)
+    if not ok then
+      -- Leave WirePlumber's own choice standing rather than take the monitor
+      -- down: a call on the earpiece is a nuisance, no sound at all is not.
+      log:warning ("bluetooth call: keeping the profile failed - " .. tostring (err))
+    end
+  end,
+}
+
+keep_call_profile_hook:register ()

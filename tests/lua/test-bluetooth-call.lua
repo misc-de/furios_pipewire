@@ -487,4 +487,72 @@ end
 T.check_equal("but the card is still taken over exactly once - the timer armed "
               .. "before the move stands down", 1, profiles)
 
+-- WirePlumber re-picks a profile whenever a card's profile list changes, and
+-- picks A2DP. With music playing just before the call that happened 330 ms
+-- after the takeover (2026-09-25 18:08:20), the hold landed on the A2DP sink,
+-- and no SCO link ever came up. During a call the pick has to be hands-free.
+local function select_profile(card, picked)
+  local data = { ["selected-profile"] = picked }
+  local event = {
+    get_subject = function () return card end,
+    get_data = function (_, key) return data[key] end,
+    set_data = function (_, key, value) data[key] = value end,
+  }
+  T.traced(function () wp.hooks["device/furios-keep-call-profile"].execute(event) end)
+  return data["selected-profile"]
+end
+
+local a2dp = { name = "a2dp-sink", index = 0 }
+
+setup()
+local card = wp.add("device", bt_card())
+T.check_equal("outside a call WirePlumber's pick stands",
+              "a2dp-sink", select_profile(card, a2dp).name)
+
+dev = wp.add("device", droid_card("voicecall"))
+droid_nodes(dev)
+fire(dev)
+T.check_equal("during a call the headset stays in hands-free",
+              "headset-head-unit", select_profile(card, a2dp).name)
+T.check_equal("also when nothing else picked anything",
+              "headset-head-unit", select_profile(card, nil).name)
+local said = false
+for _, c in ipairs(wp.calls_of("log")) do
+  if tostring(c.args[2]):find("keeping the headset on headset-head-unit", 1, true) then said = true end
+end
+T.check("and it says it overrode the pick", said)
+
+local phone = wp.object({ ["device.api"] = "droid-hal" }, { params = {
+  EnumProfile = { { name = "default", index = 1 }, { name = "voicecall", index = 2 } } } })
+T.check_equal("the phone's own card is not touched",
+              "default", select_profile(phone, { name = "default", index = 1 }).name)
+
+-- The call ends: the card leaves voicecall, and A2DP may come back.
+dev.params.Profile = { { name = "default" } }
+fire(dev)
+T.check_equal("after the call WirePlumber's pick stands again",
+              "a2dp-sink", select_profile(card, a2dp).name)
+
+-- Handed back mid-call: the phone has the call now, so do not hold the
+-- headset in hands-free against WirePlumber either.
+setup()
+card = wp.add("device", bt_card())
+dev = wp.add("device", droid_card("voicecall"))
+droid_nodes(dev)
+fire(dev)
+in_bt_call = false
+gave_up = true
+T.check_equal("a call handed back to the phone leaves the pick alone",
+              "a2dp-sink", select_profile(card, a2dp).name)
+
+-- A card that throws must not take the monitor down.
+setup()
+card = wp.add("device", bt_card())
+dev = wp.add("device", droid_card("voicecall"))
+droid_nodes(dev)
+fire(dev)
+card.iterate_params = function () error("the card went away") end
+T.check_equal("an error leaves WirePlumber's pick standing",
+              "a2dp-sink", select_profile(card, a2dp).name)
+
 T.done()
