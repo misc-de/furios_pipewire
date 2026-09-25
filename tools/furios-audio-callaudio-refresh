@@ -25,6 +25,28 @@
 # started here, with a method that asks nothing of it.
 set -u
 
+# Wait for the card first. This runs After=wireplumber.service, but WirePlumber
+# is Type=simple: "started" means the process exists, not that it has built the
+# card. After the crash on 2026-09-25 17:40 callaudiod was started 30 ms after
+# WirePlumber, found no card ("No suitable card found, stopping here...") and
+# kept running without one - the call that was going on had no audio in either
+# direction, and so did every call after it until someone restarted callaudiod.
+# A callaudiod started too early is worse than one started late: it looks alive.
+card_ready() {
+    pactl list cards 2>/dev/null | grep -q '^[[:space:]]*Name: droid$'
+}
+# In tenths of a second; the tests shorten it.
+wait_tenths=${CALLAUDIO_REFRESH_WAIT:-200}
+waited=0
+until card_ready; do
+    if [ "$waited" -ge "$wait_tenths" ]; then
+        echo "the droid card did not appear - leaving callaudiod as it is"
+        exit 0
+    fi
+    sleep 0.2
+    waited=$((waited + 2))
+done
+
 # Never during a call. Taking callaudiod away mid-call would leave the card in
 # the voicecall profile with nobody to bring it back. A WirePlumber restart at
 # that moment has broken the call anyway; making it worse helps no one.
