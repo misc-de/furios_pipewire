@@ -877,6 +877,9 @@ class OfonoBus:
                   timeout, cancellable):
         if method in self.fail:
             raise sco.GLib.Error("ofono is not answering")
+        if method == "ListNames":
+            # Stands in for the session bus too: no players on it.
+            return FakeVariant([[]])
         if method == "GetModems":
             return FakeVariant([[(m, {}) for m in self.modems]])
         if method == "GetCalls":
@@ -1072,6 +1075,165 @@ class ScoHoldMain(unittest.TestCase):
         text = self.run_main()
         self.assertIn("paplay is not installed", text)
         self.assertFalse(self.ran, "there is nothing to watch for")
+
+
+
+class MprisBus:
+    """A session bus with MPRIS players on it, recording Pause and Play."""
+
+    def __init__(self, status=None, fail_on=()):
+        self.status = dict(status or {})
+        self.fail_on = set(fail_on)
+        self.sent = []
+
+    def call_sync(self, dest, path, iface, method, args, reply, flags,
+                  timeout, cancellable):
+        if method == "ListNames":
+            return FakeVariant([["org.freedesktop.DBus", ":1.7"] +
+                                list(self.status)])
+        if dest in self.fail_on:
+            raise sco.GLib.Error("player went away")
+        if method == "Get":
+            return FakeVariant([self.status[dest]])
+        if method in ("Pause", "Play"):
+            self.sent.append((method, dest))
+            self.status[dest] = "Paused" if method == "Pause" else "Playing"
+            return None
+        raise AssertionError("unexpected call: %s" % method)
+
+
+class ScoHoldPausesTheMusicForACall(unittest.TestCase):
+    """2026-09-25: music ran on through the ring, the A2DP sink vanished under
+    it when the call was answered, and PipeWire crashed moving it. Paused at
+    CallAdded, there is nothing left to move."""
+
+    EMILIA = "org.mpris.MediaPlayer2.emilia"
+    OTHER = "org.mpris.MediaPlayer2.other"
+
+    def setUp(self):
+        self.timers = []
+        original = sco.GLib.timeout_add
+        self.addCleanup(setattr, sco.GLib, "timeout_add", original)
+        sco.GLib.timeout_add = lambda ms, fn, *a: self.timers.append((fn, a)) or 1
+        self.profile = "a2dp-sink"
+        self.addCleanup(setattr, sco, "bluez_profile", sco.bluez_profile)
+        sco.bluez_profile = lambda: self.profile
+
+    def quiet(self, fn, *args):
+        with redirect_stdout(io.StringIO()) as out:
+            fn(*args)
+        return out.getvalue()
+
+    def test_what_plays_is_paused_and_what_does_not_is_left(self):
+        bus = MprisBus({self.EMILIA: "Playing", self.OTHER: "Stopped"})
+        players = sco.Players(bus)
+        out = self.quiet(players.pause)
+        self.assertEqual(bus.sent, [("Pause", self.EMILIA)])
+        self.assertIn("paused emilia", out)
+
+    def test_after_the_call_it_plays_again(self):
+        bus = MprisBus({self.EMILIA: "Playing"})
+        players = sco.Players(bus)
+        self.quiet(players.pause)
+        self.quiet(players.resume)
+        self.assertEqual(bus.sent[-1], ("Play", self.EMILIA))
+
+    def test_it_waits_for_the_headset_to_leave_hands_free(self):
+        # Resumed into headset-head-unit the music would play narrow-band and
+        # mono - the Lua script switches back a moment after the call.
+        bus = MprisBus({self.EMILIA: "Playing"})
+        players = sco.Players(bus)
+        self.quiet(players.pause)
+        self.profile = "headset-head-unit"
+        self.quiet(players.resume)
+        self.assertEqual(bus.sent, [("Pause", self.EMILIA)], "played too early")
+        self.assertEqual(len(self.timers), 1)
+        self.profile = "a2dp-sink"
+        fn, args = self.timers.pop()
+        self.quiet(fn, *args)
+        self.assertEqual(bus.sent[-1], ("Play", self.EMILIA))
+
+    def test_but_not_forever(self):
+        bus = MprisBus({self.EMILIA: "Playing"})
+        players = sco.Players(bus)
+        self.quiet(players.pause)
+        self.profile = "headset-head-unit"
+        self.quiet(players.resume, sco.RESUME_MAX_WAIT_MS, players.epoch)
+        self.assertEqual(bus.sent[-1], ("Play", self.EMILIA))
+
+    def test_a_player_the_owner_touched_is_theirs(self):
+        bus = MprisBus({self.EMILIA: "Playing"})
+        players = sco.Players(bus)
+        self.quiet(players.pause)
+        bus.status[self.EMILIA] = "Stopped"
+        out = self.quiet(players.resume)
+        self.assertEqual(bus.sent, [("Pause", self.EMILIA)])
+        self.assertIn("changed during the call", out)
+
+    def test_nothing_paused_means_nothing_played(self):
+        bus = MprisBus({self.EMILIA: "Paused"})
+        players = sco.Players(bus)
+        self.quiet(players.pause)
+        self.quiet(players.resume)
+        self.assertEqual(bus.sent, [])
+
+    def test_a_resume_still_waiting_does_not_play_into_the_next_call(self):
+        bus = MprisBus({self.EMILIA: "Playing"})
+        players = sco.Players(bus)
+        self.quiet(players.pause)
+        self.profile = "headset-head-unit"
+        self.quiet(players.resume)
+        fn, args = self.timers.pop()
+        self.quiet(players.pause)          # the next call rings
+        self.profile = "a2dp-sink"
+        self.quiet(fn, *args)
+        self.assertNotIn(("Play", self.EMILIA), bus.sent)
+
+    def test_a_player_that_does_not_answer_does_not_stop_the_others(self):
+        bus = MprisBus({self.EMILIA: "Playing", self.OTHER: "Playing"},
+                       fail_on={self.OTHER})
+        players = sco.Players(bus)
+        out = self.quiet(players.pause)
+        self.assertEqual(bus.sent, [("Pause", self.EMILIA)])
+        self.assertIn("could not ask other", out)
+
+
+class ScoHoldMainPausesAndResumes(ScoHoldMain):
+    """The wiring: CallAdded pauses on the session bus, CallRemoved resumes."""
+
+    def setUp(self):
+        super().setUp()
+        self.session = MprisBus({"org.mpris.MediaPlayer2.emilia": "Playing"})
+        # Read self.bus late: the inherited tests replace it after setUp, and
+        # running them again with music on the session bus is the point.
+        sco.Gio.bus_get_sync = lambda kind, _c: (
+            self.session if kind == sco.Gio.BusType.SESSION else self.bus)
+        self.addCleanup(setattr, sco, "bluez_profile", sco.bluez_profile)
+        sco.bluez_profile = lambda: "a2dp-sink"
+
+    def test_the_ring_pauses_and_the_hang_up_resumes(self):
+        self.run_main()
+        added, removed = self.handlers()
+        with redirect_stdout(io.StringIO()):
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+            self.assertEqual(self.session.sent,
+                             [("Pause", "org.mpris.MediaPlayer2.emilia")])
+            removed(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+        self.assertEqual(self.session.sent[-1],
+                         ("Play", "org.mpris.MediaPlayer2.emilia"))
+
+    def test_without_a_session_bus_the_hold_still_works(self):
+        def no_session(kind, _c):
+            if kind == sco.Gio.BusType.SESSION:
+                raise sco.GLib.Error("no session bus")
+            return self.bus
+        sco.Gio.bus_get_sync = no_session
+        out = self.run_main()
+        self.assertIn("will not be paused", out)
+        added, _removed = self.handlers()
+        with redirect_stdout(io.StringIO()):
+            added(None, None, None, None, None, FakeVariant(["/ril_0/voicecall01"]))
+        self.assertEqual(len(FakePopen.started), 1)
 
 
 class ScoHoldSurvivesBadDays(unittest.TestCase):

@@ -83,6 +83,18 @@ MAX_RESTARTS = 5
 # mono and somebody finds it hours later and blames the headset.
 MAX_HOLD_S = 3 * 60 * 60
 
+MPRIS_PREFIX = "org.mpris.MediaPlayer2."
+MPRIS_PATH = "/org/mpris/MediaPlayer2"
+MPRIS_PLAYER = "org.mpris.MediaPlayer2.Player"
+
+# After the call: how long to wait for the headset to leave hands-free before
+# the music comes back anyway. Resuming while the card is still in
+# headset-head-unit would play the music narrow-band and mono through the
+# call profile, and it is the Lua script that switches back, a moment after
+# the call is gone.
+RESUME_POLL_MS = 250
+RESUME_MAX_WAIT_MS = 5000
+
 
 def log(msg):
     print(msg, flush=True)
@@ -134,6 +146,104 @@ def hands_free_sink():
         if len(fields) > 1 and fields[1].startswith("bluez_output."):
             return fields[1]
     return None
+
+
+class Players:
+    """Pause the music when a call comes in, and bring it back afterwards.
+
+    A phone does this and this one did not: on 2026-09-25 music ran on in the
+    earbuds through the whole ring, and was only cut when the call was
+    answered and the headset switched from A2DP to hands-free underneath it.
+    That switch took the music's sink away mid-stream, the stream was moved
+    onto the phone's own sink at the exact moment that sink was being
+    reopened for the Bluetooth voice path, and PipeWire crashed (SIGSEGV
+    17:40:26, and the same pattern at 14:37:38 when a moved stream met a
+    reopening HAL). The call that followed had no audio in either direction
+    and the music would not play afterwards.
+
+    Paused at the first sign of the call - CallAdded comes while it is still
+    ringing, six seconds before it was answered - nothing is playing when the
+    profile changes, and nothing has to be moved.
+
+    Only what this paused is resumed, and only if it is still paused: a
+    player the owner stopped or started themselves during the call is theirs.
+    """
+
+    def __init__(self, session):
+        self.session = session
+        self.paused = []
+        # Moved on by every call, like Hold.epoch: a resume still waiting for
+        # the headset when the next call starts must not play into it.
+        self.epoch = 0
+
+    def _names(self):
+        try:
+            names = self.session.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus",
+                "org.freedesktop.DBus", "ListNames", None,
+                GLib.VariantType("(as)"), Gio.DBusCallFlags.NONE, 2000, None,
+            ).unpack()[0]
+        except GLib.Error as err:
+            log("could not list bus names: %s" % err)
+            return []
+        return [n for n in names if n.startswith(MPRIS_PREFIX)]
+
+    def _status(self, name):
+        try:
+            return self.session.call_sync(
+                name, MPRIS_PATH, "org.freedesktop.DBus.Properties", "Get",
+                GLib.Variant("(ss)", (MPRIS_PLAYER, "PlaybackStatus")),
+                GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 2000, None,
+            ).unpack()[0]
+        except GLib.Error as err:
+            log("could not ask %s: %s" % (name[len(MPRIS_PREFIX):], err))
+            return None
+
+    def _send(self, name, method):
+        try:
+            self.session.call_sync(name, MPRIS_PATH, MPRIS_PLAYER, method,
+                                   None, None, Gio.DBusCallFlags.NONE, 2000,
+                                   None)
+            return True
+        except GLib.Error as err:
+            log("could not %s %s: %s" % (method.lower(),
+                                         name[len(MPRIS_PREFIX):], err))
+            return False
+
+    def pause(self):
+        """Pause every player that is playing, and remember which."""
+        self.epoch += 1
+        for name in self._names():
+            if name in self.paused or self._status(name) != "Playing":
+                continue
+            if self._send(name, "Pause"):
+                self.paused.append(name)
+                log("call coming - paused %s" % name[len(MPRIS_PREFIX):])
+
+    def resume(self, waited=0, epoch=None):
+        """After the call: wait for the headset to leave hands-free, then play
+        what was paused for the call."""
+        if epoch is None:
+            epoch = self.epoch
+        elif epoch != self.epoch:
+            return False          # another call started meanwhile
+        if not self.paused:
+            return False
+        profile = bluez_profile()
+        if (profile is not None and profile.startswith(HANDS_FREE_PREFIX)
+                and waited < RESUME_MAX_WAIT_MS):
+            GLib.timeout_add(RESUME_POLL_MS, self.resume,
+                             waited + RESUME_POLL_MS, epoch)
+            return False
+        paused, self.paused = self.paused, []
+        for name in paused:
+            if self._status(name) != "Paused":
+                log("%s was changed during the call - leaving it"
+                    % name[len(MPRIS_PREFIX):])
+                continue
+            if self._send(name, "Play"):
+                log("call over - playing %s again" % name[len(MPRIS_PREFIX):])
+        return False
 
 
 class Hold:
@@ -271,6 +381,13 @@ def main():
     system = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
     hold = Hold()
     calls = set()
+    try:
+        players = Players(Gio.bus_get_sync(Gio.BusType.SESSION, None))
+    except GLib.Error as err:
+        # The hold matters more than the music: without a session bus the
+        # call still gets its link, only the music runs on.
+        log("no session bus - music will not be paused for calls: %s" % err)
+        players = None
 
     def on_added(_conn, _sender, _path, _iface, _signal, params):
         path = params.unpack()[0]
@@ -279,6 +396,9 @@ def main():
         if first:
             log("call %s - waiting for the hands-free profile"
                 % path.rsplit("/", 1)[-1])
+            # Before the hold: pausing is what has to happen while it rings.
+            if players:
+                players.pause()
             hold.begin()
 
     def on_removed(_conn, _sender, _path, _iface, _signal, params):
@@ -286,6 +406,8 @@ def main():
         if not calls:
             log("call ended")
             hold.stop()
+            if players:
+                players.resume()
 
     # Subscribing before asking what is up, not after: in the other order a
     # call that starts in between is never seen at all. A subscription on a
@@ -326,6 +448,8 @@ def main():
         if calls:
             log("ofono went away mid-call - letting go")
             hold.stop()
+            if players:
+                players.resume()
 
     Gio.bus_watch_name_on_connection(
         system, "org.ofono", Gio.BusNameWatcherFlags.NONE,
