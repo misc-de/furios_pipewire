@@ -20,6 +20,24 @@ UNIT=$ROOT/systemd/furios-audio-dmnr.service
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
+# Nothing in here may touch the phone. The tool restarts the sound server
+# with "audioctl restart" and bind-mounts with sudo - and this test used to let
+# it: on a machine with a sudo ticket every run bind-mounted temp files as root
+# and restarted the REAL audio stack through the installed audioctl. Found
+# 2026-09-25 when a test run at 17:52:30 restarted PipeWire under a paired
+# headset, and the next Bluetooth call had no audio in either direction.
+# sudo runs the command as this user, the rest only records.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/sudo" <<'STUB'
+#!/bin/sh
+exec "$@"
+STUB
+for tool in audioctl mount umount; do
+    printf '#!/bin/sh\necho "%s $*" >> "%s/calls"\nexit 0\n' "$tool" "$TMP" > "$TMP/bin/$tool"
+done
+chmod +x "$TMP/bin/"*
+PATH="$TMP/bin:$PATH"
+
 # Stand-ins for the vendor's tuning files, with the switches in the state the
 # device ships them in - and two of them, because that is the whole point: the
 # parser reads a base file and a vendor extension, and a copy laid over the
