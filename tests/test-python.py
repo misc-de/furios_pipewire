@@ -2116,9 +2116,14 @@ class ReconnectBus:
     """
 
     def __init__(self, uuids=("0000110b-0000-1000-8000-00805f9b34fb",),
-                 trusted=True, idle=False, locked=False, fail_get=False):
+                 trusted=True, idle=False, locked=False, fail_get=False,
+                 connected=True, objects=None):
         self.uuids = uuids if uuids is None else list(uuids)
         self.trusted = trusted
+        self.connected = connected
+        # What GetManagedObjects answers: path -> interfaces.
+        self.objects = {} if objects is None else objects
+        self.profiles = []       # every ConnectProfile() that went out
         self.idle = idle
         self.locked = locked
         self.fail_get = fail_get
@@ -2130,6 +2135,10 @@ class ReconnectBus:
                   timeout, cancellable):
         if method == "GetSession":
             return FakeVariant(["/org/freedesktop/login1/session/_31"])
+        if method == "GetManagedObjects":
+            if self.objects is False:
+                raise reconnect.GLib.Error("bluez is not answering")
+            return FakeVariant([self.objects])
         if method != "Get":
             raise AssertionError("unexpected call: %s" % method)
         if self.fail_get:
@@ -2141,6 +2150,8 @@ class ReconnectBus:
             return FakeVariant([self.uuids])
         if wanted == "Trusted":
             return FakeVariant([self.trusted])
+        if wanted == "Connected":
+            return FakeVariant([self.connected])
         if wanted == "IdleHint":
             return FakeVariant([self.idle])
         if wanted == "LockedHint":
@@ -2149,8 +2160,11 @@ class ReconnectBus:
 
     def call(self, dest, path, iface, method, args, reply, flags, timeout,
              cancellable, callback, user_data):
-        assert method == "Connect", method
-        self.connects.append(path)
+        assert method in ("Connect", "ConnectProfile"), method
+        if method == "ConnectProfile":
+            self.profiles.append((path, args._args[1][0]))
+        else:
+            self.connects.append(path)
         self.pending.append((callback, user_data))
 
     def answer(self, ok=True, message="Host is down"):
@@ -2523,9 +2537,130 @@ class BluetoothReconnect(unittest.TestCase):
         out = io.StringIO()
         with redirect_stdout(out):
             rc.on_removed(None, None, None, None, None, FakeVariant(
-                ["/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66", []]))
+                ["/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66",
+                 ["org.bluez.Device1", "org.bluez.MediaControl1"]]))
         self.assertIsNone(rc.candidate)
         self.assertIn("nothing to reconnect", out.getvalue())
+
+    # -- music on a headset that stayed connected -------------------------
+
+    DEV = "/org/bluez/hci0/dev_F4_9D_8A_7C_5C_66"
+
+    def music_gone(self, rc, path=DEV + "/sep1/fd0"):
+        with redirect_stdout(io.StringIO()):
+            rc.on_removed(None, None, None, None, None, FakeVariant(
+                [path, ["org.bluez.MediaTransport1"]]))
+
+    def check(self, rc):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            _tid, seconds, fn = self.timers.pop(0)
+            self.assertEqual(seconds, reconnect.A2DP_CHECK_S)
+            fn()
+        return out.getvalue()
+
+    def test_an_interface_leaving_is_not_the_device_leaving(self):
+        """WirePlumber's battery report lives on the device path and goes
+        with every WirePlumber restart. Read as the device leaving, it made
+        this say "gone from BlueZ" about a headset still in the ear."""
+        rc = self.build(ReconnectBus(), active=False)
+        self.drop(rc)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            rc.on_removed(None, None, None, None, None, FakeVariant(
+                [self.DEV, ["org.bluez.Battery1"]]))
+        self.assertIsNotNone(rc.candidate)
+        self.assertNotIn("gone from BlueZ", out.getvalue())
+
+    def test_music_that_does_not_come_back_is_connected_again(self):
+        """2026-09-25, after every WirePlumber restart: hands-free back by
+        itself, A2DP never, and ConnectProfile fixed it by hand each time."""
+        system = ReconnectBus()
+        rc = self.build(system)
+        self.music_gone(rc)
+        self.assertEqual(system.profiles, [], "not before looking again")
+        out = self.check(rc)
+        self.assertEqual(system.profiles,
+                         [(self.DEV, reconnect.A2DP_SINK_UUID)])
+        self.assertIn("connecting A2DP", out)
+        callback, name = system.pending.pop(0)
+        system.result = True
+        out = io.StringIO()
+        with redirect_stdout(out):
+            callback(system, "token", name)
+        self.assertIn("A2DP back", out.getvalue())
+
+    def test_music_that_came_back_by_itself_is_left(self):
+        system = ReconnectBus(objects={
+            self.DEV + "/sep1/fd1": {"org.bluez.MediaTransport1": {}}})
+        rc = self.build(system)
+        self.music_gone(rc)
+        self.check(rc)
+        self.assertEqual(system.profiles, [])
+
+    def test_a_device_that_left_is_the_series_business(self):
+        system = ReconnectBus(connected=False)
+        rc = self.build(system)
+        self.music_gone(rc)
+        self.check(rc)
+        self.assertEqual(system.profiles, [])
+
+    def test_a_hands_free_only_device_gets_no_music(self):
+        system = ReconnectBus(uuids=["0000111e-0000-1000-8000-00805f9b34fb"])
+        rc = self.build(system)
+        self.music_gone(rc)
+        self.check(rc)
+        self.assertEqual(system.profiles, [])
+
+    def test_an_untrusted_device_is_not_touched(self):
+        system = ReconnectBus(trusted=False)
+        rc = self.build(system)
+        self.music_gone(rc)
+        self.check(rc)
+        self.assertEqual(system.profiles, [])
+
+    def test_bluez_not_answering_means_doing_nothing(self):
+        system = ReconnectBus(objects=False)
+        rc = self.build(system)
+        self.music_gone(rc)
+        self.check(rc)
+        self.assertEqual(system.profiles, [])
+
+    def test_not_during_a_call(self):
+        system = ReconnectBus()
+        rc = self.build(system, session=CallAudioBus(mode=1))
+        self.music_gone(rc)
+        out = self.check(rc)
+        self.assertEqual(system.profiles, [])
+        self.assertIn("a call is up", out)
+
+    def test_not_a_tug_of_war(self):
+        """Earbuds handing their music to a laptop drop the stream too."""
+        system = ReconnectBus()
+        rc = self.build(system)
+        self.music_gone(rc)
+        self.check(rc)
+        self.now += 60
+        self.music_gone(rc)
+        out = self.check(rc)
+        self.assertEqual(len(system.profiles), 1)
+        self.assertIn("leaving it this time", out)
+        self.now += reconnect.A2DP_MIN_GAP_S
+        self.music_gone(rc)
+        self.check(rc)
+        self.assertEqual(len(system.profiles), 2)
+
+    def test_several_streams_closing_make_one_look(self):
+        system = ReconnectBus()
+        rc = self.build(system)
+        self.music_gone(rc, self.DEV + "/sep1/fd0")
+        self.music_gone(rc, self.DEV + "/sep2/fd1")
+        self.assertEqual(len(self.timers), 1)
+
+    def test_a_path_that_is_no_device_is_ignored(self):
+        rc = self.build(ReconnectBus())
+        self.music_gone(rc, "/org/bluez/hci0")
+        self.assertEqual(self.timers, [])
 
     def test_a_device_that_cannot_be_read_is_left_alone(self):
         """The opposite default to the pause watcher, and deliberately so.
@@ -2682,7 +2817,8 @@ class BluetoothReconnect(unittest.TestCase):
         self.drop(rc)
         with redirect_stdout(io.StringIO()):
             rc.on_removed(None, None, None, None, None,
-                          FakeVariant(["/org/bluez/hci0/dev_SOMETHING", []]))
+                          FakeVariant(["/org/bluez/hci0/dev_SOMETHING",
+                                       ["org.bluez.Device1"]]))
         self.assertIsNotNone(rc.candidate)
 
     def test_an_attempt_already_out_is_not_doubled(self):

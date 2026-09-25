@@ -87,6 +87,27 @@ CANDIDATE_TTL_S = 24 * 3600
 # worth waiting for - it says whether the device was there at all.
 CONNECT_TIMEOUT_MS = 30000
 
+# Music on a headset that is still connected.
+#
+# A WirePlumber restart unregisters its A2DP endpoints, BlueZ closes the music
+# stream with them, and the new WirePlumber registers fresh endpoints that
+# nobody connects to. The headset stays on the air - hands-free comes back by
+# itself - so there is no disconnect for the series above to react to, and
+# the card offers nothing but hands-free: music plays narrow-band and mono, or
+# not on the headset at all. Seen after every restart on 2026-09-25 (17:40,
+# 17:52, 18:14, 18:33); ConnectProfile for the A2DP sink brought it back each
+# time, by hand.
+#
+# So when a music transport goes away under a device that stays connected,
+# look again after A2DP_CHECK_S - long enough for WirePlumber to be back and
+# for the headset to reconnect on its own if it is going to - and connect the
+# A2DP profile if it is still missing. At most once per A2DP_MIN_GAP_S per
+# device: earbuds that hand their music to a laptop drop the stream too, and
+# pulling it back every few seconds would be a tug of war.
+A2DP_SINK_UUID = "0000110b-0000-1000-8000-00805f9b34fb"
+A2DP_CHECK_S = 8
+A2DP_MIN_GAP_S = 300
+
 
 def carries_audio(system, path):
     """Is this a device that could carry sound?
@@ -162,6 +183,45 @@ def in_a_call(session):
     return mode != 0
 
 
+def device_of(path):
+    """/org/bluez/hci0/dev_XX/sep1/fd0 -> /org/bluez/hci0/dev_XX, or None."""
+    parts = path.split("/")
+    if len(parts) < 5 or not parts[4].startswith("dev_"):
+        return None
+    return "/".join(parts[:5])
+
+
+def device_prop(system, path, prop):
+    """One Device1 property, or None when it cannot be read."""
+    try:
+        return system.call_sync(
+            "org.bluez", path, "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", ("org.bluez.Device1", prop)),
+            GLib.VariantType("(v)"), Gio.DBusCallFlags.NONE, 1000, None,
+        ).unpack()[0]
+    except GLib.Error:
+        return None
+
+
+def has_music_transport(system, dev):
+    """Does BlueZ hold a media transport under this device right now?
+
+    None when BlueZ cannot be asked, which the caller reads as "do nothing".
+    """
+    try:
+        objects = system.call_sync(
+            "org.bluez", "/", "org.freedesktop.DBus.ObjectManager",
+            "GetManagedObjects", None, GLib.VariantType("(a{oa{sa{sv}}})"),
+            Gio.DBusCallFlags.NONE, 2000, None,
+        ).unpack()[0]
+    except GLib.Error as err:
+        print("could not ask BlueZ for its objects: %s" % err, flush=True)
+        return None
+    prefix = dev + "/"
+    return any(path.startswith(prefix) and "org.bluez.MediaTransport1" in ifaces
+               for path, ifaces in objects.items())
+
+
 class Candidate:
     """The one device this service may dial, and what is owed to it.
 
@@ -205,6 +265,10 @@ class Reconnector:
         # kept current by on_session_props. It decides only one thing: who
         # is likely to have hung up - see on_disconnected.
         self.active = True
+        # Music that went missing under a connected headset: the pending look
+        # per device, and when the profile was last connected for it.
+        self.a2dp_checks = {}
+        self.a2dp_last = {}
 
     # -- dialling ---------------------------------------------------------
 
@@ -334,14 +398,79 @@ class Reconnector:
         self.schedule_next()
 
     def on_removed(self, _conn, _sender, _path, _iface, _signal, params):
-        """The device was unpaired or forgotten: forget it here too."""
-        path, _ifaces = params.unpack()
+        """The device was unpaired or forgotten: forget it here too.
+
+        Only when Device1 itself goes. Other interfaces live on the same path
+        and come and go with the programs that provide them - WirePlumber's
+        battery report among them - and reading their removal as the device
+        leaving made this say "gone from BlueZ" at every WirePlumber restart
+        while the headset was still connected.
+        """
+        path, ifaces = params.unpack()
+        if "org.bluez.MediaTransport1" in ifaces:
+            self.on_music_gone(path)
+        if "org.bluez.Device1" not in ifaces:
+            return
         cand = self.candidate
         if cand is not None and cand.path == path:
             cand.cancel_timer()
             self.candidate = None
             print("%s is gone from BlueZ - nothing to reconnect"
                   % cand.name, flush=True)
+
+    # -- music on a headset that stayed connected -------------------------
+
+    def on_music_gone(self, transport):
+        """A music stream closed. Look again in a moment - see A2DP_CHECK_S."""
+        dev = device_of(transport)
+        if dev is None or dev in self.a2dp_checks:
+            return
+        self.a2dp_checks[dev] = GLib.timeout_add_seconds(
+            A2DP_CHECK_S, lambda: self.check_music(dev))
+
+    def check_music(self, dev):
+        self.a2dp_checks.pop(dev, None)
+        name = dev.rsplit("/", 1)[-1]
+        if device_prop(self.system, dev, "Connected") is not True:
+            return False    # it left; the series after a disconnect has it
+        uuids = device_prop(self.system, dev, "UUIDs") or []
+        if A2DP_SINK_UUID not in [str(u).lower() for u in uuids]:
+            return False    # a car kit on hands-free only, say
+        if device_prop(self.system, dev, "Trusted") is not True:
+            return False
+        if has_music_transport(self.system, dev) is not False:
+            return False    # back by itself, or BlueZ could not be asked
+        now = GLib.get_monotonic_time() / 1e6
+        last = self.a2dp_last.get(dev)
+        if last is not None and now - last < A2DP_MIN_GAP_S:
+            print("%s lost its music again - leaving it this time" % name,
+                  flush=True)
+            return False
+        if in_a_call(self.session):
+            # A call is on hands-free; music can wait until it is over, and
+            # the next transport that goes away will ask again.
+            print("%s has no music, but a call is up - not now" % name,
+                  flush=True)
+            return False
+        self.a2dp_last[dev] = now
+        print("%s is connected without music - connecting A2DP" % name,
+              flush=True)
+        self.system.call(
+            "org.bluez", dev, "org.bluez.Device1", "ConnectProfile",
+            GLib.Variant("(s)", (A2DP_SINK_UUID,)), None,
+            Gio.DBusCallFlags.NONE, CONNECT_TIMEOUT_MS, None,
+            self.on_music_done, name,
+        )
+        return False
+
+    def on_music_done(self, conn, result, name):
+        try:
+            conn.call_finish(result)
+        except GLib.Error as err:
+            print("could not connect A2DP on %s: %s" % (name, err.message),
+                  flush=True)
+            return
+        print("A2DP back on %s" % name, flush=True)
 
     def on_session_props(self, _conn, _sender, _path, _iface, _signal,
                          params):
