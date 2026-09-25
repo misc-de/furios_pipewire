@@ -1701,6 +1701,64 @@ audio. It is written down because a recording that silently contains nothing is
 the exact failure this project keeps finding in Bluetooth audio, and because
 the next occurrence should not look like the first.
 
+## The car shows no call, keeps the radio on, and nobody hears anything
+
+Audi A6, 2013, MMI 3G: CSR controller, Bluetooth 2.1, HFP 1.5, no eSCO. Every
+call through it was silent in both directions, and the car never showed it,
+while earbuds worked. Profile, codec (CVSD, `bt_wbs=off`), SCO link and HAL
+route were all correct, so each of those led nowhere:
+
+- **Not the codec.** Earbuds forced to CVSD (`bluez5.enable-msbc = false`)
+  worked, so the narrowband path through the HAL is fine.
+- **Not plain SCO.** The car cannot do eSCO (`hcitool info`: byte 3 of the
+  features is 0x7e, the eSCO bit is clear), so the kernel correctly falls back
+  to HV3. Building the link by hand with Enhanced Setup Synchronous Connection
+  and data path PCM, as Android does, changed nothing.
+- **Not measurable with BTCVSD.** The "BTCVSD Rx/Tx Irq Received" mixer
+  controls stay off during a *working* earbud call too, and no SCO data crosses
+  HCI in either case: in a modem call the voice does not take that route.
+
+The clue was the radio playing on. The car sends `AT+BRSF=103` (enhanced call
+status) and polls `AT+CLCC` every second. PipeWire answered
+`+CLCC: 0,0,3,0,0,"+49…",145`. The first field is the call number, and 3GPP TS
+27.007 numbers calls from 1. `modemmanager.c` never sets `call->index`, so it
+is always 0, and the car drops the entry. For the car there is no call. With 1
+in its place, the display, the radio and both directions of speech were right
+straight away (25.9., confirmed twice in the car).
+
+`tools/furios-audio-bluez5-fix.py` carries the fix until PipeWire has it; the
+report and a patch against master are in
+`upstream/pipewire-1-clcc-call-index.md`. It changes one instruction, not the
+format string, because string suffixes are merged by the linker and `%d`/`%u`
+have no copy of their own in that library.
+
+## Contacts do not reach the car - waiting for BlueZ 5.87
+
+The car asks for the phone book over PBAP when it connects, and obexd answers
+`open(/telecom/pb.vcf): Unknown error 61681` / Internal Server Error, within a
+millisecond, without asking evolution-data-server anything.
+
+The cause is in BlueZ 5.85 (installed: 5.85-4): `phonebook_pull()` in
+`obexd/plugins/phonebook-ebook.c` never sets `*err` on success, and its caller
+`vobject_pull_open()` in `pbap.c` declares `int ret;` without a value and then
+tests `ret < 0`. Whatever is on the stack decides, and here it is -61681 every
+time. BlueZ 5.87 sets both (`*err = 0` and `int ret = 0`).
+
+**Decision (25.9.): no workaround.** Wait for a BlueZ >= 5.87 in the
+distribution, then test again: connect the car and check that obexd logs no
+error for `telecom/pb.vcf` and that the contacts show up in the car.
+
+What will be transferred then: obexd's EDS backend serves only the **default
+address book** (`e_source_registry_ref_default_address_book`). Here that is the
+Nextcloud book "FamilyContacts" (36 contacts, gsettings
+`org.gnome.Evolution.DefaultSources default-address-book`). The larger
+"Contacts" (46) will *not* reach the car unless the default is changed, and
+that also decides where GNOME Contacts saves new contacts. Call history
+(`och`/`ich`/`mch.vcf`) is not provided by this backend at all.
+
+To look closer, obexd has a debug switch: a user drop-in for `obex.service`
+with `ExecStart=/usr/libexec/bluetooth/obexd -n -d --capability=!/usr/libexec/obex-capabilities`.
+
 ## From the README
 
 The README was cut down to what somebody needs to use this. What follows was in it until then: the reasoning, the measurements and the trade-offs behind the decisions.
